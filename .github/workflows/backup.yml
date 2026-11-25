@@ -78,7 +78,7 @@ jobs:
           else
             sha=$(timeout 60 git ls-remote "$TKURL" refs/heads/status/alerts | cut -f1)
             [ -n "$sha" ] && timeout 60 git -C $G fetch -q --depth=1 "$TKURL" $sha || { echo 999999; exit 0; }
-            t=$(( $(git -C $G log -1 --format=%ct $sha) - 600 ))     # alerts only change on news: 10 min extra slack
+            t=$(( $(git -C $G log -1 --format=%ct $sha) + 600 ))     # alerts only change on news: 10 min extra slack
           fi
           echo $(( $(date +%s) - ${t:-0} ))
           EOS
