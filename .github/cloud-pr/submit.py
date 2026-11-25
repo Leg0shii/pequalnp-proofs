@@ -213,6 +213,12 @@ def race_ok(gid):
         if DRY:
             return True, "clear (dry run: no claim)", None
         lid, why = claim(gid)
+        for att in range(6):        # the desk caps leases per handle (5); ours free up as submits release them
+            if lid or "most one handle may hold" not in why:
+                break
+            log("claim refused (lease cap), retry in 30 s")
+            time.sleep(30)
+            lid, why = claim(gid)
         if not lid and is_h:
             return False, why, None
         return True, "clear, " + (why if lid else "unheld, no lease (" + why[:80] + ")"), lid
