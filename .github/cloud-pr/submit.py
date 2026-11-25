@@ -153,6 +153,10 @@ def desk(path, post=False):
     time.sleep(max(0, _DESK_T[0] + 3 - time.time()))      # the desk asks for one request every few seconds
     r = run(["curl", "-sS", "--max-time", "30", "-w", "\n%{http_code}"] + (["-X", "POST"] if post else []) + [DESK + path], timeout=40)
     _DESK_T[0] = time.time()
+    try:
+        dg().note_call()
+    except Exception:
+        pass
     body, _, code = r.stdout.rpartition("\n")
     try:
         d = json.loads(body)
@@ -169,21 +173,19 @@ PAUSE_MIN_S = 900               # 4b.5: on a pause or repetition answer, no desk
 PAUSE_RE = re.compile(r"paus|again and again|repeat|same proof", re.I)
 TK_URL = "https://github.com/Leg0shii/pnp-toolkit.git"
 TK_PAUSE_REF = "refs/heads/status/desk-pause"   # toolkit: file DESK-PAUSE (until epoch, reason) for every claimer
-PAUSE_REF = "refs/heads/status/desk-pause"     # on this fork: unix time until which no run may ask the desk
 
 
 def set_pause(until, why=""):
-    """Record the desk's pause on this fork (later runs read it) and as DESK-PAUSE on the toolkit (Lead rule 4b.5)."""
+    """Shared deskguard pause (every machine of the team) and DESK-PAUSE on the toolkit (Lead rules 4b.5, 4c.6)."""
     if DRY or not PR_TOKEN:
         return
+    try:
+        log("deskguard pause until", time.strftime("%H:%M:%S", time.gmtime(until)), "UTC:", "ok" if dg().pause(until) else "FAILED")
+    except Exception as e:
+        log("deskguard pause failed:", repr(e)[:120])
     g = os.path.join(W, "pause.git")
     run(["git", "init", "-q", "--bare", g])
-    blob = subprocess.run(["git", "-C", g, "hash-object", "-w", "--stdin"], input=f"{until}\n", capture_output=True, text=True).stdout.strip()
-    tree = subprocess.run(["git", "-C", g, "mktree"], input=f"100644 blob {blob}\tuntil.txt\n", capture_output=True, text=True).stdout.strip()
     cenv = dict(os.environ, GIT_AUTHOR_NAME=HANDLE, GIT_COMMITTER_NAME=HANDLE, GIT_AUTHOR_EMAIL=EMAIL, GIT_COMMITTER_EMAIL=EMAIL)
-    c = run(["git", "-C", g, "commit-tree", tree, "-m", f"desk pause until {until}"], env=cenv).stdout.strip()
-    r = run(["git"] + auth_cfg() + ["-C", g, "push", "-q", "-f", f"https://github.com/{FORK}.git", f"{c}:{PAUSE_REF}"], timeout=60)
-    log("desk pause recorded until", time.strftime("%H:%M:%S", time.gmtime(until)), "UTC" if r.returncode == 0 else "(push failed)")
     txt = (f"DESK-PAUSE until {until} {time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(until))} UTC\n"
            f"written {time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())} UTC by the cloud opener ({os.environ.get('GITHUB_RUN_ID', '?')})\n"
            f"desk answer: {why[:300]}\n")
@@ -194,36 +196,47 @@ def set_pause(until, why=""):
     log("DESK-PAUSE on toolkit", TK_PAUSE_REF, "ok" if r.returncode == 0 else "(push failed)")
 
 
-def read_pause():
-    g = os.path.join(W, "pause.git")
+_DG = []
+
+
+def dg():
+    """The team's desk gate (Lead's team/lead/deskguard.py, PIPELINE 4c): one git ref claim/<step> per step on the
+    toolkit, created atomically (exactly one machine of the whole team gets through), shared pause refs
+    deskpause/<epoch>, fails closed. The lock remote is the private toolkit (PR_TOKEN can push there)."""
+    if _DG:
+        return _DG[0]
+    g = os.path.join(W, "dg.git")
     run(["git", "init", "-q", "--bare", g])
-    if run(["git", "-C", g, "fetch", "-q", "--depth=1", f"https://github.com/{FORK}.git", f"+{PAUSE_REF}:{PAUSE_REF}"], timeout=60).returncode:
-        return 0
+    run(["git", "-C", g, "remote", "add", "origin", os.environ.get("DESKGUARD_URL") or TK_URL])
+    if PR_TOKEN:
+        run(["git", "-C", g, "config", "http.https://github.com/.extraheader",
+             "AUTHORIZATION: basic " + base64.b64encode(f"x-access-token:{PR_TOKEN}".encode()).decode()])
+    os.environ.update(DESKGUARD_REPO=g, DESKGUARD_REMOTE="origin", DESKGUARD_HOME=os.path.join(W, "dg-home"))
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("deskguard", os.path.join(os.path.dirname(os.path.abspath(__file__)), "deskguard.py"))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    _DG.append(m)
+    return m
+
+
+def read_pause():
+    """Shared pause (deskguard refs deskpause/<epoch> on the toolkit). Unreadable = paused for this run (fail closed)."""
     try:
-        return int(run(["git", "-C", g, "show", f"{PAUSE_REF}:until.txt"]).stdout.strip() or 0)
-    except ValueError:
-        return 0
+        return dg().paused_until()
+    except Exception as e:
+        log("deskguard pause read failed, no desk calls in this run:", repr(e)[:120])
+        return time.time() + 3600
 
 
 def claim_lock(gid):
-    """At most ONE desk claim per step, ever, across all runs (Lead/coordinator 18:26 after the desk paused the handle
-    for repeated claims): tag claim/<gid> on this fork is created without force, so only the first run gets it."""
+    """At most ONE desk claim per step, ever, for the whole team: deskguard.acquire (ref claim/<gid> on the toolkit)."""
     if DRY or not PR_TOKEN:
         return False
-    g = os.path.join(W, "pause.git")
-    run(["git", "init", "-q", "--bare", g])
-    tree = subprocess.run(["git", "-C", g, "mktree"], input="", capture_output=True, text=True).stdout.strip()
-    cenv = dict(os.environ, GIT_AUTHOR_NAME=HANDLE, GIT_COMMITTER_NAME=HANDLE, GIT_AUTHOR_EMAIL=EMAIL, GIT_COMMITTER_EMAIL=EMAIL,
-                )
-    # unique per run: re-pushing the SAME sha to an existing tag counts as "up to date" (success); a different sha is
-    # refused without force, which is the lock
-    me = f"desk claim lock {gid} run {os.environ.get('GITHUB_RUN_ID', '?')}.{os.environ.get('GITHUB_RUN_ATTEMPT', '?')} {time.time_ns()}"
-    c = run(["git", "-C", g, "commit-tree", tree, "-m", me], env=cenv).stdout.strip()
-    if not c:
-        return False
-    url = os.environ.get("CLAIM_LOCK_URL") or f"https://github.com/{FORK}.git"     # override: stub-desk test only
-    r = run(["git"] + auth_cfg() + ["-C", g, "push", "-q", url, f"{c}:refs/tags/claim/{gid}"], timeout=60)
-    return r.returncode == 0
+    w = []
+    ok = dg().acquire(gid, w)
+    log("deskguard", gid, "OK" if ok else "NO", w[0] if w else "")
+    return ok
 
 
 def claim(gid):
@@ -238,7 +251,7 @@ def claim(gid):
     d = desk(f"next?handle={HANDLE}&gap={gid}&have=proof&another=1")
     if d.get("_http") == "410":
         return None, "gone (410): proved first " + json.dumps(d)[:120]
-    if PAUSE_RE.search(json.dumps(d)):
+    if d.get("_http") == "429" or PAUSE_RE.search(json.dumps(d)):
         PAUSED[0] = True
         try:
             ra = int(d.get("retry_after_s") or 3600)
