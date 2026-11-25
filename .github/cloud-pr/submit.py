@@ -356,6 +356,9 @@ def race_ok(gid):
             return False, f"blocking PRs {b}", None
         if not is_h:     # unheld: the lease is taken right before gh pr create (watch.py submit, Lead D4)
             return True, "clear", None
+        if PAUSED[0] or time.time() < NO_DESK_UNTIL:
+            # Lead 20:43: desk off or paused = no claim and no error: open the PR without a lease (as the PC does)
+            return True, "clear (held, desk off: PR without a lease, no desk call)", None
         if DRY:
             return True, "clear (dry run: held, no claim)", None
         lid, why = claim_retry(gid)      # held by someone else: our have=proof lease is required before the push
