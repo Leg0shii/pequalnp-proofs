@@ -1,0 +1,197 @@
+# BACKUP: the PC watcher (pnp-toolkit watch/watch.py) in the cloud while the owner's PC is offline.
+#
+# Every 5 min (GitHub often starts schedules late): read the PC's heartbeat, toolkit branch status/heartbeat (falls back
+# to status/alerts). Fresh (under STALE_S) = do nothing. Stale = run the same watch.py here for up to MINUTES (new
+# steps, store/cache lookups, families, ready/ and fix/ branches, PRs as Leg0shii), and hand back as soon as the PC's
+# heartbeat is fresh again. One backup at a time (concurrency group). Its own status goes to status/backup-heartbeat
+# and status/backup-alerts, never to the PC's branches. No toolkit merges, no self-update, no official checker.
+# Duplicates: both sides use branch <step id> and check for our open PR first, so the same step cannot get two PRs.
+# Lean families (preproof equality check, mainmatch, circtable, autotac) have no built Lean tree here and fall through.
+#
+# Secret PR_TOKEN (classic, Leg0shii): reads/pushes the private toolkit, pushes the fork, opens PRs upstream.
+name: backup
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Run even if the PC heartbeat is fresh (testing)
+        type: boolean
+        default: false
+      dry:
+        description: Dry run (watch.py --dry-run --once: generate and check, never push or open a PR)
+        type: boolean
+        default: true
+      minutes:
+        description: Longest run in minutes
+        type: string
+        default: '50'
+      tkref:
+        description: Toolkit branch to run (testing)
+        type: string
+        default: main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: watcher-backup
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      W: ${{ github.workspace }}/work
+      TKURL: https://github.com/Leg0shii/pnp-toolkit
+      STALE_S: '300'
+      FRESH_S: '120'
+      IN_FORCE: ${{ inputs.force }}
+      IN_DRY: ${{ inputs.dry }}
+      IN_MIN: ${{ inputs.minutes }}
+      TKREF: ${{ inputs.tkref || 'main' }}
+    steps:
+      - name: PC heartbeat
+        id: hb
+        env:
+          PR_TOKEN: ${{ secrets.PR_TOKEN }}
+        run: |
+          set -uo pipefail
+          [ -n "${PR_TOKEN:-}" ] || { echo "no PR_TOKEN secret"; echo "run=0" >> "$GITHUB_OUTPUT"; exit 0; }
+          mkdir -p "$W"
+          git config --global http.https://github.com/.extraheader "AUTHORIZATION: basic $(printf 'x-access-token:%s' "$PR_TOKEN" | base64 -w0)"
+          git config --global user.name Leg0shii; git config --global user.email 46093332+Leg0shii@users.noreply.github.com
+          cat > "$W/hb.sh" <<'EOS'
+          #!/bin/bash
+          # prints the age in seconds of the PC's last sign of life (heartbeat, else the status/alerts commit)
+          G=$W/hb.git; [ -d $G ] || git init -q --bare $G
+          sha=$(timeout 60 git ls-remote "$TKURL" refs/heads/status/heartbeat | cut -f1)
+          if [ -n "$sha" ] && timeout 60 git -C $G fetch -q --depth=1 "$TKURL" $sha; then
+            t=$(git -C $G show $sha:heartbeat.txt | cut -d' ' -f1)
+          else
+            sha=$(timeout 60 git ls-remote "$TKURL" refs/heads/status/alerts | cut -f1)
+            [ -n "$sha" ] && timeout 60 git -C $G fetch -q --depth=1 "$TKURL" $sha || { echo 999999; exit 0; }
+            t=$(( $(git -C $G log -1 --format=%ct $sha) - 600 ))     # alerts only change on news: 10 min extra slack
+          fi
+          echo $(( $(date +%s) - ${t:-0} ))
+          EOS
+          chmod +x "$W/hb.sh"
+          age=$("$W/hb.sh")
+          echo "PC heartbeat age: ${age} s (stale after $STALE_S s)"
+          if [ "$age" -gt "$STALE_S" ] || [ "$IN_FORCE" = true ]; then echo "run=1" >> "$GITHUB_OUTPUT"; else echo "run=0" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Set up the watcher (toolkit, upstream clone, Python packages)
+        if: steps.hb.outputs.run == '1'
+        run: |
+          set -euo pipefail
+          printf '%s' "$TKREF" | grep -Eqx '[A-Za-z0-9._/-]+' || { echo "bad tkref"; exit 1; }
+          timeout 300 git clone -q --depth 1 --branch "$TKREF" "$TKURL" "$W/tk"
+          git -C "$W/tk" log -1 --format='toolkit main %h %s'
+          # PNP_REPO: open-goat main (remote upstream) + this fork (remote origin) for the PR branches
+          timeout 300 git clone -q --depth 1 --origin upstream https://github.com/open-goat/pequalnp-proofs.git "$W/repo"
+          git -C "$W/repo" remote add origin "https://github.com/$GITHUB_REPOSITORY.git"
+          git -C "$W/repo" fetch -q --depth=1 upstream main:refs/remotes/upstream/main
+          # a recent fork branch as push negotiation base (else the first push sends the whole tree)
+          tip=$(git ls-remote "https://github.com/$GITHUB_REPOSITORY.git" 'refs/heads/L-meta-*' | sed 's#.*refs/heads/##' | sort -t- -k3 -n | tail -1)
+          [ -n "$tip" ] && git -C "$W/repo" fetch -q --depth=1 origin "$tip:refs/remotes/origin/$tip" || true
+          timeout 300 git clone -q --depth 1 https://github.com/open-goat/pequalnp-proofs.git "$W/scan"
+          pip install -q python-sat scipy numpy 2>&1 | tail -2
+          mkdir -p "$W/wh/out"
+
+      - name: Restore the backup's own state
+        if: steps.hb.outputs.run == '1'
+        uses: actions/cache/restore@v4
+        with:
+          path: work/wh/state.json
+          key: backup-state-${{ github.run_id }}
+          restore-keys: backup-state-
+
+      - name: Merge the PC's state snapshot
+        if: steps.hb.outputs.run == '1'
+        run: |
+          set -uo pipefail
+          sha=$(git ls-remote "$TKURL" refs/heads/status/heartbeat | cut -f1)
+          if [ -n "$sha" ] && git -C "$W/tk" fetch -q --depth=1 origin "$sha" && git -C "$W/tk" cat-file -e "$sha:state.json.xz" 2>/dev/null; then
+            git -C "$W/tk" show "$sha:state.json.xz" > "$W/pc-state.json.xz"
+          fi
+          python3 -I - "$W/wh/state.json" "$W/pc-state.json.xz" <<'PY'
+          import json, lzma, os, sys
+          sp, pp = sys.argv[1], sys.argv[2]
+          st = json.load(open(sp)) if os.path.exists(sp) else {"seen": {}, "done": {}, "queued": {}, "fate": {}}
+          if os.path.exists(pp):
+              pc = json.loads(lzma.decompress(open(pp, "rb").read()))
+              for k in ("seen", "done", "queued", "nogen_ver"):
+                  d = st.setdefault(k, {})
+                  for gid, v in (pc.get(k) or {}).items():
+                      d.setdefault(gid, v)        # our own record of a step wins (we handled it after the PC stopped)
+              for gid in pc.get("bg") or []:      # the PC was still generating these: try them here
+                  st["done"].pop(gid, None)
+              print("merged the PC snapshot:", {k: len(pc.get(k) or {}) for k in ("seen", "done", "queued")})
+          else:
+              print("no PC snapshot (status/heartbeat missing): starting from", "our own state" if st["seen"] else "a baseline")
+          st.pop("bg", None)                       # background jobs of an earlier runner are gone
+          json.dump(st, open(sp, "w"))
+          PY
+
+      - name: Run the watcher until the PC is back
+        if: steps.hb.outputs.run == '1'
+        env:
+          GH_TOKEN: ${{ secrets.PR_TOKEN }}
+          WATCH_BACKUP: '1'
+          WATCH_HOME: ${{ github.workspace }}/work/wh
+          PNP_REPO: ${{ github.workspace }}/work/repo
+          PNP_SCAN_TREE: ${{ github.workspace }}/work/scan
+          WATCH_BG_MAX: '3'
+          WATCH_FRESH_EXTRA: '1'
+          WATCH_SUBMIT_PAR: '16'
+          WATCH_READY_GRACE: '90'
+        run: |
+          set -uo pipefail
+          export WATCH_FORMATSCAN="$W/tk/watch/cloudscan.sh"
+          [ -x "$WATCH_FORMATSCAN" ] || { echo "toolkit main has no watch/cloudscan.sh yet: stop"; exit 1; }
+          MIN=${IN_MIN:-50}; case "$MIN" in ''|*[!0-9]*) MIN=50;; esac
+          ARGS="--no-update --no-precheck --poll 20"
+          [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && [ "$IN_DRY" != false ] && ARGS="$ARGS --dry-run --once"
+          echo "watch.py $ARGS for at most $MIN min"
+          python3 "$W/tk/watch/watch.py" $ARGS > "$W/wh/stdout.log" 2>&1 &
+          pid=$!
+          end=$(( $(date +%s) + MIN * 60 )); why="time limit"
+          while kill -0 $pid 2>/dev/null; do
+            [ "$(date +%s)" -ge "$end" ] && break
+            sleep 30
+            if [ "$IN_FORCE" != true ]; then
+              age=$("$W/hb.sh"); [ "$age" -lt "$FRESH_S" ] && { why="PC heartbeat fresh again (${age} s)"; break; }
+            fi
+            tail -n 3 "$W/wh/watch.log" 2>/dev/null
+          done
+          kill -0 $pid 2>/dev/null && { echo "stopping the watcher: $why"; kill -TERM $pid; sleep 5; kill -KILL $pid 2>/dev/null; } || why="watcher exited"
+          pkill -f bggen.py 2>/dev/null || true
+          echo "### backup watcher: $why" >> "$GITHUB_STEP_SUMMARY"
+          grep -E " (SUBMIT|SUBMIT-FAIL|RACE-LOST|FORMAT-FAIL|GENFAIL|NEW|BASELINE|STOP|DRY) " "$W/wh/watch.log" 2>/dev/null | tail -60 | sed 's/^/    /' >> "$GITHUB_STEP_SUMMARY"
+          tail -n 40 "$W/wh/stdout.log"
+          exit 0
+
+      - name: Save the backup's state
+        if: always() && steps.hb.outputs.run == '1'
+        uses: actions/cache/save@v4
+        with:
+          path: work/wh/state.json
+          key: backup-state-${{ github.run_id }}
+
+      - name: Keep the watcher log
+        if: always() && steps.hb.outputs.run == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: backup-watch-log
+          path: |
+            work/wh/watch.log
+            work/wh/stdout.log
+          retention-days: 7
+          if-no-files-found: ignore
