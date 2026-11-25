@@ -237,6 +237,18 @@ def race_ok(gid):
         return False, f"race check error {e}", None
 
 
+STOP_URL = "https://raw.githubusercontent.com/open-goat/pequalnp-proofs/main/STOP"
+
+
+def stopped():
+    """Owner's kill switch (Lead D7, same as watch.py stopped()): while upstream main has a STOP file, no PR and no
+    lease. True if the fresh upstream clone has it or the raw URL answers 200."""
+    if os.path.exists(os.path.join(TREE, "STOP")):
+        return True
+    r = run(["curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "10", STOP_URL], timeout=20)
+    return r.stdout.strip() == "200"
+
+
 def open_pr_for_branch(gid):
     """Our own open PR whose head is this fork's branch <gid> (exact, no search index lag)."""
     out = gh(["api", f"repos/{UP}/pulls?head={HANDLE}:{gid}&state=open", "--jq", ".[].html_url"]).stdout.split()
@@ -299,6 +311,8 @@ def submit(gid, lease):
     own = None                                      # a lease claimed here is released by main() (submitted / other)
     r = None
     for att in range(5):
+        if stopped():                    # STOP may appear while this PR waited for a retry
+            return None, "STOP file on upstream main"
         if not lease and KIND != "value":
             lid, cwhy = claim(gid)
             if lid:
@@ -333,7 +347,7 @@ def finish(result, why, url=None):
             f.write(f"result={result}\nwhy={why[:300].replace(chr(10), ' ')}\nurl={url or ''}\n")
     if result in ("submitted", "race", "exists", "formatfail"):
         delete_ready()
-    sys.exit(1 if result in ("submitfail", "formatfail", "error") else 0)
+    sys.exit(1 if result in ("submitfail", "formatfail", "error", "stopped") else 0)
 
 
 def main():
@@ -365,6 +379,8 @@ def main():
     if r.returncode:
         finish("formatfail", "guards: " + ((r.stdout + r.stderr).strip().splitlines() or ["?"])[-1][:200])
     log(f"guards passed ({time.time() - t0:.0f}s)")
+    if not DRY and stopped():
+        finish("stopped", "STOP file on upstream main: no PR, no lease (branch kept; re-run the job once STOP is gone)")
     # 2. race check right before the push
     ok, why, lease = race_ok(ID)
     if not ok:
@@ -379,6 +395,8 @@ def main():
         finish("dry", why2)
     if not url and why2 == "file already in upstream main":
         finish("race", why2)
+    if not url and why2.startswith("STOP"):
+        finish("stopped", why2 + " (branch kept)")
     finish("submitted" if url else "submitfail", f"{why2}; {time.time() - t0:.0f}s after start", url)
 
 
