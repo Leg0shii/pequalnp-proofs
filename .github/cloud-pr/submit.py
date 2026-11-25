@@ -168,7 +168,7 @@ def desk(path, post=False):
 
 
 PAUSED = [False]
-NO_DESK_UNTIL = 1795635000      # 2026-11-25 19:30 UTC: Lead rule 4b.1, no desk call with our handle before this
+NO_DESK_UNTIL = 1795676400      # 2026-11-26 07:00 UTC: Lead desk policy (desk OFF overnight), no desk call before this
 PAUSE_MIN_S = 900               # 4b.5: on a pause or repetition answer, no desk call for at least 15 min
 PAUSE_RE = re.compile(r"paus|again and again|repeat|same proof", re.I)
 TK_URL = "https://github.com/Leg0shii/pnp-toolkit.git"
@@ -245,7 +245,7 @@ def claim(gid):
     if PAUSED[0]:
         return None, "claim skipped: handle paused by the desk"
     if time.time() < NO_DESK_UNTIL:
-        return None, "claim skipped: desk paused for our handle until 19:30 UTC (Lead rule 4b.1)"
+        return None, "claim skipped: desk off until 07:00 UTC (Lead desk policy; held step skipped, paused)"
     if not claim_lock(gid):
         return None, "claim skipped: this step was claimed once already"
     d = desk(f"next?handle={HANDLE}&gap={gid}&have=proof&another=1")

@@ -72,7 +72,7 @@ def taken():
     if run(["git", "-C", G, "fetch", "-q", "--depth=1", TK, "+refs/heads/status/taken:refs/taken"], 60).returncode:
         return None
     t = run(["git", "-C", G, "show", "refs/taken:taken.txt"]).stdout.splitlines()
-    if not t or not t[0].startswith("# updated") or time.time() - int(t[0].split()[2]) > 180:
+    if not t or not t[0].startswith("# updated") or time.time() - int(t[0].split()[2]) > 120:
         return None
     return {l.split()[0]: l.split()[2] for l in t[1:] if l.strip()}
 
