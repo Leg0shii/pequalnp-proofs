@@ -16,6 +16,10 @@ on:
     - cron: '*/5 * * * *'
   workflow_dispatch:
     inputs:
+      chain:
+        description: Start the next run when this one ends (keeps the job alive without cron)
+        type: boolean
+        default: false
       force:
         description: 'Run even if the PC heartbeat is fresh (testing)'
         type: boolean
@@ -51,13 +55,15 @@ defaults:
 jobs:
   backup:
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 115
     env:
       W: ${{ github.workspace }}/work
       TKURL: https://github.com/Leg0shii/pnp-toolkit
       STALE_S: '300'
       FRESH_S: '120'
       IN_FORCE: ${{ inputs.force }}
+      IN_CHAIN: ${{ inputs.chain }}
+      IDLE_MIN: '50'
       IN_DRY: ${{ inputs.dry }}
       IN_MIN: ${{ inputs.minutes }}
       TKREF: ${{ inputs.tkref || 'main' }}
@@ -91,6 +97,12 @@ jobs:
           chmod +x "$W/hb.sh"
           age=$("$W/hb.sh")
           echo "PC heartbeat age: ${age} s (stale after $STALE_S s)"
+          # chained (no cron on this fork): stay on watch for up to IDLE_MIN while the PC is alive, check every 60 s
+          if [ "$IN_CHAIN" = true ] && [ "$IN_FORCE" != true ]; then
+            end=$(( $(date +%s) + ${IDLE_MIN:-50} * 60 ))
+            while [ "$age" -le "$STALE_S" ] && [ "$(date +%s)" -lt "$end" ]; do sleep 60; age=$("$W/hb.sh"); done
+            echo "PC heartbeat age now: ${age} s"
+          fi
           if [ "$age" -gt "$STALE_S" ] || [ "$IN_FORCE" = true ]; then echo "run=1" >> "$GITHUB_OUTPUT"; else echo "run=0" >> "$GITHUB_OUTPUT"; fi
 
       - name: Set up the watcher (toolkit, upstream clone, Python packages)
@@ -210,3 +222,13 @@ jobs:
             work/wh/stdout.log
           retention-days: 7
           if-no-files-found: ignore
+
+      - name: Start the next run (schedules do not fire on this fork)
+        if: always() && (github.event_name == 'schedule' || inputs.chain)
+        env:
+          GH_TOKEN: ${{ secrets.PR_TOKEN }}
+        shell: bash
+        run: |
+          [ -n "${GH_TOKEN:-}" ] || exit 0
+          for i in 1 2 3 4 5; do gh workflow run backup.yml --repo "$GITHUB_REPOSITORY" --ref main -f chain=true -f dry=false -f force=false && exit 0; sleep $((i * 10)); done
+          echo "could not start the next run"; exit 1

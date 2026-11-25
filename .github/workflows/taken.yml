@@ -16,6 +16,10 @@ on:
     - cron: '*/5 * * * *'
   workflow_dispatch:
     inputs:
+      chain:
+        description: Start the next run when this one ends (keeps the job alive without cron)
+        type: boolean
+        default: false
       minutes:
         description: Longest run in minutes
         type: string
@@ -78,3 +82,13 @@ jobs:
           done
           echo "### taken: $n pushes, last $(head -1 "$TAKEN_OUT" 2>/dev/null)" >> "$GITHUB_STEP_SUMMARY"
           tail -n 20 "$W/takenpub.log"
+
+      - name: Start the next run (schedules do not fire on this fork)
+        if: always() && (github.event_name == 'schedule' || inputs.chain)
+        env:
+          GH_TOKEN: ${{ secrets.PR_TOKEN }}
+        shell: bash
+        run: |
+          [ -n "${GH_TOKEN:-}" ] || exit 0
+          for i in 1 2 3 4 5; do gh workflow run taken.yml --repo "$GITHUB_REPOSITORY" --ref main -f chain=true && exit 0; sleep $((i * 10)); done
+          echo "could not start the next run"; exit 1

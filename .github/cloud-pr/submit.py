@@ -69,7 +69,9 @@ def curl_json(url, timeout=60):
 
 def gh(args, write=False, timeout=120):
     """gh with the run's own token for reads (falls back to PR_TOKEN), PR_TOKEN for writes. Retries transient errors."""
-    toks = [PR_TOKEN] if write else [READ_TOKEN, PR_TOKEN]
+    # reads use the run's own GITHUB_TOKEN only: never fall back to PR_TOKEN, whose API limit the PC and every PR
+    # creation share (20:27 UTC: the account hit its limit and gh pr create failed on a wave)
+    toks = [PR_TOKEN] if write else [READ_TOKEN or ("" if os.environ.get("GITHUB_ACTIONS") else PR_TOKEN)]
     r = None
     for t in [x for x in toks if x]:
         for att in range(3):
@@ -126,7 +128,45 @@ def own_pr(n):
     return _OWN[n]
 
 
+TAKEN_REF = "refs/heads/status/taken"
+
+
+_TL = []
+
+
+def taken_list():
+    if not _TL:
+        _TL.append(_taken_list())
+    return _TL[0]
+
+
+def _taken_list():
+    """The team's live taken list (fork workflow taken.yml -> toolkit status/taken, ~20 s fresh): {step: author} of
+    the first PR per step from anyone. None when missing or older than 180 s. A git fetch, no API call."""
+    g = os.path.join(W, "taken.git")
+    run(["git", "init", "-q", "--bare", g])
+    if run(["git"] + (auth_cfg() if PR_TOKEN else []) + ["-C", g, "fetch", "-q", "--depth=1", TK_URL, f"+{TAKEN_REF}:{TAKEN_REF}"],
+           timeout=60).returncode:
+        return None
+    t = run(["git", "-C", g, "show", f"{TAKEN_REF}:taken.txt"]).stdout.splitlines()
+    try:
+        if not t or time.time() - int(t[0].split()[2]) > 180:
+            return None
+    except (IndexError, ValueError):
+        return None
+    return {l.split()[0]: l.split()[2] for l in t[1:] if len(l.split()) >= 3}
+
+
 def race_check(step_id):
+    """Blocking PRs. A step not on the fresh taken list has no PR from anyone: no API call at all. Otherwise (on the
+    list, or the list is stale) the GitHub search below, on the run's own token."""
+    _TL.clear()                          # fresh copy right before the push
+    tl = taken_list()
+    if tl is not None and step_id not in tl:
+        log("race check: not on the taken list (no API call)")
+        return []
+    if tl is not None and tl.get(step_id) == HANDLE:
+        return [{"number": "?", "state": "OPEN", "ours": True, "why": "our PR on the taken list"}]
     n = step_id.split("-")[-1]
     mod = step_id.replace("-", "_")
     out = gh(["pr", "list", "--repo", UP, "--state", "all", "--search", n, "--limit", "200",
@@ -339,7 +379,11 @@ def stopped():
 
 
 def open_pr_for_branch(gid):
-    """Our own open PR whose head is this fork's branch <gid> (exact, no search index lag)."""
+    """Our own open PR whose head is this fork's branch <gid> (exact, no search index lag). Skipped (no API call) when
+    the fresh taken list has no PR at all for the step."""
+    tl = taken_list()
+    if tl is not None and gid not in tl:
+        return None
     out = gh(["api", f"repos/{UP}/pulls?head={HANDLE}:{gid}&state=open", "--jq", ".[].html_url"]).stdout.split()
     return out[0] if out else None
 
