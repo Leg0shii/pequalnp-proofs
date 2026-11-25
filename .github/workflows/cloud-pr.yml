@@ -1,0 +1,111 @@
+# CLOUD PR: open the upstream PR for a finished proof without the owner's PC.
+#
+#   push to ready/<step id>   the commit adds exactly one file ready/<module>.lean on top of this fork's main
+#                             (pnp-toolkit worker/ready.sh pushes it). Guards, race check, then one commit on current
+#                             open-goat main pushed here as branch <step id>, and the PR to open-goat/pequalnp-proofs.
+#                             The ready/ branch is deleted once the step is done (submitted, lost race, PR exists,
+#                             format failure). Without the PR_TOKEN secret the run stops at once and the PC watcher
+#                             submits the toolkit copy of the file instead (it waits WATCH_READY_GRACE seconds for us).
+#   workflow_dispatch         the same on any file of this repo; dry run by default (no claim, no push, no PR).
+#
+# Secret PR_TOKEN: classic token of Leg0shii with scopes public_repo + workflow (push to this fork, PR upstream).
+# The run's own GITHUB_TOKEN is read-only and is used for the GitHub reads of the race check.
+# Logic: .github/cloud-pr/submit.py (port of pnp-toolkit watch.py race_ok/submit + survey.py race check).
+name: cloud-pr
+
+on:
+  push:
+    branches: ['ready/**']
+  workflow_dispatch:
+    inputs:
+      step:
+        description: Step id, for example L-meta-13371
+        required: true
+        type: string
+      file:
+        description: Path of the proof file in this repo (named L_meta_N.lean or V_meta_N__kK.lean)
+        required: true
+        type: string
+      dry:
+        description: Dry run (guards and race check only; no desk claim, no push, no PR)
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: cloud-pr-${{ github.ref }}-${{ inputs.step }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  submit:
+    if: github.event.deleted != true
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      W: ${{ github.workspace }}/work
+      IN_STEP: ${{ inputs.step }}
+      IN_FILE: ${{ inputs.file }}
+      IN_DRY: ${{ inputs.dry }}
+    steps:
+      - name: Check out the ready commit
+        uses: actions/checkout@v4
+        with:
+          path: src
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Resolve step and file
+        run: |
+          set -euo pipefail
+          mkdir -p "$W"
+          cd "$GITHUB_WORKSPACE/src"
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            ID=${GITHUB_REF_NAME#ready/}; DRY=0
+            mapfile -t files < <(git ls-tree -r --name-only HEAD ready/ | grep -E '^ready/[A-Za-z0-9_]+\.lean$' || true)
+            [ "${#files[@]}" -eq 1 ] || { echo "REFUSED: ready/ must hold exactly one .lean file, found ${#files[@]}: ${files[*]:-}"; exit 1; }
+            FILE=${files[0]}
+          else
+            ID=$IN_STEP; FILE=$IN_FILE; DRY=1; [ "$IN_DRY" = false ] && DRY=0
+          fi
+          printf '%s' "$ID" | grep -Eqx 'L-[a-z0-9]+(-[a-z0-9]+)*' || { echo "REFUSED: bad step id '$ID'"; exit 1; }
+          printf '%s' "$FILE" | grep -Eqx '[A-Za-z0-9_./-]+\.lean' && [ -f "$FILE" ] || { echo "REFUSED: file '$FILE' not found"; exit 1; }
+          cp "$FILE" "$W/proof.lean"
+          { echo "ID=$ID"; echo "MOD=$(basename "$FILE" .lean)"; echo "PROOF=$W/proof.lean"; echo "DRY=$DRY"; } >> "$GITHUB_ENV"
+          echo "step $ID, file $FILE ($(wc -c < "$FILE") bytes), dry=$DRY"
+
+      - name: Fetch open-goat main (guards and PR base)
+        run: |
+          set -euo pipefail
+          for i in 1 2 3; do
+            git clone -q --depth 1 --single-branch --branch main https://github.com/open-goat/pequalnp-proofs.git "$W/tree" && break
+            rm -rf "$W/tree"; sleep $((i * 5))
+          done
+          echo "TREE=$W/tree" >> "$GITHUB_ENV"
+          git -C "$W/tree" log -1 --format='upstream main %h %s'
+
+      - name: Guards, race check, PR
+        id: submit
+        env:
+          READ_TOKEN: ${{ github.token }}
+          PR_TOKEN: ${{ secrets.PR_TOKEN }}
+        run: python3 -I "$GITHUB_WORKSPACE/src/.github/cloud-pr/submit.py"
+
+      - name: Summary
+        if: always()
+        env:
+          RESULT: ${{ steps.submit.outputs.result }}
+          WHY: ${{ steps.submit.outputs.why }}
+          URL: ${{ steps.submit.outputs.url }}
+        run: |
+          echo "### ${ID:-?}: ${RESULT:-failed before a result}" >> "$GITHUB_STEP_SUMMARY"
+          echo "${WHY:-}" >> "$GITHUB_STEP_SUMMARY"
+          [ -n "${URL:-}" ] && echo "PR: $URL" >> "$GITHUB_STEP_SUMMARY"
+          exit 0
