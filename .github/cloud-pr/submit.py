@@ -416,7 +416,7 @@ def submit(gid, lease):
 
 
 def delete_ready():
-    if DRY or os.environ.get("GITHUB_EVENT_NAME") != "push":
+    if DRY or os.environ.get("GITHUB_REF_NAME") != f"ready/{ID}":     # push, or a dispatch on the ready/ branch
         return
     r = run(["git"] + auth_cfg() + ["-C", TREE, "push", "-q", f"https://github.com/{FORK}.git", "--delete", f"ready/{ID}"], timeout=120)
     log("deleted ready/" + ID if r.returncode == 0 else "could not delete ready/" + ID + ": " + r.stderr.strip()[:120])
@@ -471,6 +471,10 @@ def main():
     ok, why, lease = race_ok(ID)
     if not ok:
         # an error or the desk's lease cap is not a lost race: keep the branch (re-run the job), the PC still has its copy
+        if why in ("not posted", "not on the desk"):
+            # pre-generated file for a step the desk has not listed yet: keep ready/<ID>; ready-wait.yml dispatches
+            # this workflow again for the branch the moment the step is listed
+            finish("waiting", why + ": branch kept for ready-wait")
         finish("error" if why.startswith("race check error") or "most one handle may hold" in why or "paused" in why
                else "race", why)          # a 410 or an earlier claim of this step ends here as a lost race
     log("race check:", why)

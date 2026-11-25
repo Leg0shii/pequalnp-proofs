@@ -1,0 +1,44 @@
+# READY-WAIT: ready/<ID> files that arrive before the desk lists the step (pre-generated waves) are kept by cloud-pr
+# (result 'waiting'). This job polls the listing every 10 s and dispatches cloud-pr on each such branch the moment
+# its step is listed: PRs only, no desk calls here (cloud-pr itself makes no desk call for unheld steps).
+# Cron every 5 min, one job at a time, up to 58 min each.
+name: ready-wait
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: Longest run in minutes
+        type: string
+        default: '58'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ready-wait
+  cancel-in-progress: false
+
+jobs:
+  wait:
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: src
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Dispatch cloud-pr for kept ready/ branches once listed
+        env:
+          GH_TOKEN: ${{ secrets.PR_TOKEN }}
+          MINUTES: ${{ inputs.minutes || '58' }}
+          W: ${{ github.workspace }}
+        shell: bash
+        run: |
+          [ -n "${GH_TOKEN:-}" ] || { echo "no PR_TOKEN secret: stop"; exit 0; }
+          case "$MINUTES" in ''|*[!0-9]*) MINUTES=58;; esac
+          python3 -I src/.github/cloud-pr/readywait.py 2>&1 | tee "$W/rw.log"
+          grep -E " (DISPATCH|DISPATCH-FAIL|SKIP|end:) " "$W/rw.log" | tail -80 | sed 's/^/    /' >> "$GITHUB_STEP_SUMMARY"
