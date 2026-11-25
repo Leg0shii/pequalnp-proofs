@@ -1,0 +1,80 @@
+# TAKEN LIST: which posted steps already have a PR from anyone, from the GitHub search API, always on.
+#
+# The Lead's team/lead/takenpub.py (copy in .github/taken/), run here for up to 58 min per job; cron every 5 min with
+# one job at a time (concurrency group), so the next job takes over within minutes. gaps.json pr_numbers lags up to
+# 20 min in a wave; this list is about 20 s fresh.
+# Published as taken.txt on pnp-toolkit branch status/taken (one commit, force-pushed whenever the list changes and
+# at least every 60 s so the 'updated' line stays fresh). Format: line 1 '# updated <epoch> <HH:MM:SS> steps N', then
+# 'L-meta-N <first PR number> <author> <created HH:MM:SS>'. Readers ignore it when 'updated' is older than 180 s.
+# (status/alerts is force-pushed by the PC watcher with alerts.md only, so taken.txt has its own branch.)
+#
+# Secret PR_TOKEN (classic, Leg0shii): pushes the private toolkit. Searches use the run's own GITHUB_TOKEN.
+name: taken
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: Longest run in minutes
+        type: string
+        default: '58'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: takenpub
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  taken:
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    steps:
+      - name: Check out the publisher
+        uses: actions/checkout@v4
+        with:
+          path: src
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Publish taken.txt every 20 s
+        env:
+          PR_TOKEN: ${{ secrets.PR_TOKEN }}
+          GH_SEARCH_TOKEN: ${{ github.token }}
+          IN_MIN: ${{ inputs.minutes }}
+        run: |
+          set -uo pipefail
+          [ -n "${PR_TOKEN:-}" ] || { echo "no PR_TOKEN secret: stop"; exit 0; }
+          MIN=${IN_MIN:-58}; case "$MIN" in ''|*[!0-9]*) MIN=58;; esac
+          W=$GITHUB_WORKSPACE/work; mkdir -p "$W"; G=$W/pub.git; git init -q --bare "$G"
+          git config --global http.https://github.com/.extraheader "AUTHORIZATION: basic $(printf 'x-access-token:%s' "$PR_TOKEN" | base64 -w0)"
+          export GIT_AUTHOR_NAME=Leg0shii GIT_COMMITTER_NAME=Leg0shii
+          export GIT_AUTHOR_EMAIL=46093332+Leg0shii@users.noreply.github.com GIT_COMMITTER_EMAIL=46093332+Leg0shii@users.noreply.github.com
+          export TAKEN_OUT=$W/taken.txt TAKEN_MINUTES=$MIN
+          python3 -I "$GITHUB_WORKSPACE/src/.github/taken/takenpub.py" 3 > "$W/takenpub.log" 2>&1 &
+          pid=$!
+          last=""; lastpush=0; n=0; fails=0
+          while kill -0 $pid 2>/dev/null; do
+            sleep 20
+            [ -s "$TAKEN_OUT" ] || continue
+            body=$(tail -n +2 "$TAKEN_OUT" | sha1sum)
+            [ "$body" = "$last" ] && [ $(( $(date +%s) - lastpush )) -lt 60 ] && continue
+            blob=$(git -C "$G" hash-object -w "$TAKEN_OUT")
+            tree=$(printf '100644 blob %s\ttaken.txt\n' "$blob" | git -C "$G" mktree)
+            c=$(git -C "$G" commit-tree "$tree" -m "taken list ($(head -1 "$TAKEN_OUT" | cut -d' ' -f4-))")
+            if timeout 60 git -C "$G" push -q -f https://github.com/Leg0shii/pnp-toolkit.git "$c:refs/heads/status/taken"; then
+              last=$body; lastpush=$(date +%s); n=$((n + 1)); fails=0
+            else
+              fails=$((fails + 1)); echo "push failed ($fails)"
+            fi
+            [ $((n % 30)) -eq 1 ] && echo "$(date -u +%H:%M:%S) pushed $n: $(head -1 "$TAKEN_OUT")"
+          done
+          echo "### taken: $n pushes, last $(head -1 "$TAKEN_OUT" 2>/dev/null)" >> "$GITHUB_STEP_SUMMARY"
+          tail -n 20 "$W/takenpub.log"
