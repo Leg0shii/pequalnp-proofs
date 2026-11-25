@@ -149,6 +149,7 @@ jobs:
           WATCH_HOME: ${{ github.workspace }}/work/wh
           PNP_REPO: ${{ github.workspace }}/work/repo
           PNP_SCAN_TREE: ${{ github.workspace }}/work/scan
+          PNP_LEAN_DIR: ${{ github.workspace }}/work/scan/lean   # no Lean here: Lean checks fail cleanly, same-text pre-proofs still go
           WATCH_BG_MAX: '3'
           WATCH_FRESH_EXTRA: '1'
           WATCH_SUBMIT_PAR: '16'
