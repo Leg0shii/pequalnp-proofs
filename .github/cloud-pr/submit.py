@@ -159,8 +159,47 @@ def desk(path, post=False):
         return {"error": (r.stdout or r.stderr).strip()[:200]}
 
 
+PAUSED = [False]
+PAUSE_REF = "refs/heads/status/desk-pause"     # on this fork: unix time until which no run may ask the desk
+
+
+def set_pause(until):
+    """Record the desk's pause on this fork, so later runs make no desk request at all until it is over."""
+    if DRY or not PR_TOKEN:
+        return
+    g = os.path.join(W, "pause.git")
+    run(["git", "init", "-q", "--bare", g])
+    blob = subprocess.run(["git", "-C", g, "hash-object", "-w", "--stdin"], input=f"{until}\n", capture_output=True, text=True).stdout.strip()
+    tree = subprocess.run(["git", "-C", g, "mktree"], input=f"100644 blob {blob}\tuntil.txt\n", capture_output=True, text=True).stdout.strip()
+    cenv = dict(os.environ, GIT_AUTHOR_NAME=HANDLE, GIT_COMMITTER_NAME=HANDLE, GIT_AUTHOR_EMAIL=EMAIL, GIT_COMMITTER_EMAIL=EMAIL)
+    c = run(["git", "-C", g, "commit-tree", tree, "-m", f"desk pause until {until}"], env=cenv).stdout.strip()
+    r = run(["git"] + auth_cfg() + ["-C", g, "push", "-q", "-f", f"https://github.com/{FORK}.git", f"{c}:{PAUSE_REF}"], timeout=60)
+    log("desk pause recorded until", time.strftime("%H:%M:%S", time.gmtime(until)), "UTC" if r.returncode == 0 else "(push failed)")
+
+
+def read_pause():
+    g = os.path.join(W, "pause.git")
+    run(["git", "init", "-q", "--bare", g])
+    if run(["git", "-C", g, "fetch", "-q", "--depth=1", f"https://github.com/{FORK}.git", f"+{PAUSE_REF}:{PAUSE_REF}"], timeout=60).returncode:
+        return 0
+    try:
+        return int(run(["git", "-C", g, "show", f"{PAUSE_REF}:until.txt"]).stdout.strip() or 0)
+    except ValueError:
+        return 0
+
+
 def claim(gid):
+    """No desk request at all once the desk said the handle is paused: every request while paused extends the pause."""
+    if PAUSED[0]:
+        return None, "claim skipped: handle paused by the desk"
     d = desk(f"next?handle={HANDLE}&gap={gid}&have=proof&another=1")
+    if "paused" in str(d.get("error", "")):
+        PAUSED[0] = True
+        try:
+            set_pause(int(time.time()) + int(d.get("retry_after_s") or 3600))
+        except Exception as e:
+            log("could not record the desk pause:", e)
+        return None, "claim refused: handle paused: " + str(d.get("error"))[:160]
     if "too many requests" in str(d.get("error", "")):
         time.sleep(15)
         d = desk(f"next?handle={HANDLE}&gap={gid}&have=proof&another=1")
@@ -380,13 +419,18 @@ def main():
     if r.returncode:
         finish("formatfail", "guards: " + ((r.stdout + r.stderr).strip().splitlines() or ["?"])[-1][:200])
     log(f"guards passed ({time.time() - t0:.0f}s)")
+    pu = read_pause()
+    if pu > time.time():
+        PAUSED[0] = True
+        log("the desk paused this handle until", time.strftime("%H:%M:%S", time.gmtime(pu)), "UTC: no desk requests in this run")
     if not DRY and stopped():
         finish("stopped", "STOP file on upstream main: no PR, no lease (branch kept; re-run the job once STOP is gone)")
     # 2. race check right before the push
     ok, why, lease = race_ok(ID)
     if not ok:
         # an error or the desk's lease cap is not a lost race: keep the branch (re-run the job), the PC still has its copy
-        finish("error" if why.startswith("race check error") or "most one handle may hold" in why else "race", why)
+        finish("error" if why.startswith("race check error") or "most one handle may hold" in why or "paused" in why
+               else "race", why)
     log("race check:", why)
     # 3.+4. commit on upstream main, push, PR
     LEASE[0] = lease
