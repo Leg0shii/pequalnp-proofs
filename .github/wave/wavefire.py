@@ -160,6 +160,21 @@ log(f"wavefire: {len(ids)} ids with id % {MOD} == {REM}, rate {RATE}/min, {PAR} 
 queue = []; qlock = threading.Condition(); t_first = [None]; tk = {}; tk_t = 0; st = {}; st_t = 0; last_s = 0; sids = set()
 
 
+ORDER = os.environ.get("WAVE_ORDER", "high")
+
+
+def prio(n):
+    """high: highest id first. middle (Lead 19:25): 15100-15799, then the 15800s, 15900s, 16000s, then the rest; inside
+    a block highest first (rivals sweep upward from the bottom)."""
+    if ORDER != "middle":
+        return (0, -n)
+    blocks = [(15100, 15799), (15800, 15899), (15900, 15999), (16000, 16099)]
+    for i, (a, b) in enumerate(blocks):
+        if a <= n <= b:
+            return (i, -n)
+    return (len(blocks), -n)
+
+
 def worker():
     while True:
         with qlock:
@@ -169,9 +184,9 @@ def worker():
                     return
             if state["stop"] and not queue:
                 return
-            queue.sort(key=lambda x: -int(x[0].split("-")[-1]))      # highest id first
+            queue.sort(key=lambda x: prio(int(x[0].split("-")[-1])))
             gid, sha, posted = queue.pop(0)
-        if gid in tk and tk[gid] != HANDLE:
+        if gid in tk:                       # a PR from anyone (ours included: opened by an earlier job or the PC)
             skipped[gid] = "taken by " + tk[gid]; log("SKIP", gid, skipped[gid]); continue
         if posted is not None:
             ok = check_statement(gid, sha, posted)
