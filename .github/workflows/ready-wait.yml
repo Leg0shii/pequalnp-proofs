@@ -44,8 +44,9 @@ jobs:
         run: |
           [ -n "${GH_TOKEN:-}" ] || { echo "no PR_TOKEN secret: stop"; exit 0; }
           case "$MINUTES" in ''|*[!0-9]*) MINUTES=58;; esac
+          git config --global http.https://github.com/.extraheader "AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
           python3 -I src/.github/cloud-pr/readywait.py 2>&1 | tee "$W/rw.log"
-          grep -E " (DISPATCH|DISPATCH-FAIL|SKIP|end:) " "$W/rw.log" | tail -80 | sed 's/^/    /' >> "$GITHUB_STEP_SUMMARY"
+          grep -E " (REPUSH|REPUSH-FAIL|SKIP|end:) " "$W/rw.log" | tail -80 | sed 's/^/    /' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Start the next run (schedules do not fire on this fork)
         if: always() && (github.event_name == 'schedule' || inputs.chain)
