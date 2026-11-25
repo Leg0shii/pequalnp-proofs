@@ -1,0 +1,67 @@
+# WAVE: open the PRs of a pre-staged wave (fork branches L-meta-<id> = upstream main + store file) the moment the desk
+# lists it. PR creation only, no desk call. Our share: id % mod == rem (Lead: cloud 3, PC 1), highest id first, ids on
+# the taken list skipped. Logic and limits: .github/wave/wavefire.py.
+name: wave
+
+on:
+  workflow_dispatch:
+    inputs:
+      list:
+        description: Wave list in this repo (id hex dec A B)
+        type: string
+        default: .github/wave/wave6c-all.txt
+      rem:
+        description: Our share, id % mod == rem
+        type: string
+        default: '3'
+      mod:
+        type: string
+        default: '4'
+      rate:
+        description: Most PR creations per minute here (the account limit is shared with the PC)
+        type: string
+        default: '30'
+      par:
+        type: string
+        default: '2'
+      minutes:
+        description: Longest run in minutes (waits for the listing)
+        type: string
+        default: '300'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wave-${{ inputs.list }}-${{ inputs.rem }}
+  cancel-in-progress: false
+
+jobs:
+  fire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: src
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Wait for the listing, then open the PRs
+        env:
+          PR_TOKEN: ${{ secrets.PR_TOKEN }}
+          GH_TOKEN: ${{ secrets.PR_TOKEN }}
+          WAVE_LIST: ${{ inputs.list }}
+          WAVE_REM: ${{ inputs.rem }}
+          WAVE_MOD: ${{ inputs.mod }}
+          WAVE_RATE: ${{ inputs.rate }}
+          WAVE_PAR: ${{ inputs.par }}
+          MINUTES: ${{ inputs.minutes }}
+          W: ${{ github.workspace }}/work
+        shell: bash
+        run: |
+          [ -n "${PR_TOKEN:-}" ] || { echo "no PR_TOKEN secret: stop"; exit 1; }
+          for v in "$WAVE_REM" "$WAVE_MOD" "$WAVE_RATE" "$WAVE_PAR" "$MINUTES"; do case "$v" in ''|*[!0-9]*) echo "bad number input"; exit 1;; esac; done
+          printf '%s' "$WAVE_LIST" | grep -Eqx '[A-Za-z0-9_./-]+' || { echo "bad list"; exit 1; }
+          git config --global http.https://github.com/.extraheader "AUTHORIZATION: basic $(printf 'x-access-token:%s' "$PR_TOKEN" | base64 -w0)"
+          cd src && python3 -I .github/wave/wavefire.py 2>&1 | tee "$W.log"
+          grep -E " (PR-FAIL|SKIP|BACKOFF|RESPELL|LISTED|END:|FAILED|STOP) " "$W.log" | tail -100 | sed 's/^/    /' >> "$GITHUB_STEP_SUMMARY"
