@@ -92,16 +92,17 @@ jobs:
         run: |
           set -euo pipefail
           printf '%s' "$TKREF" | grep -Eqx '[A-Za-z0-9._/-]+' || { echo "bad tkref"; exit 1; }
-          timeout 300 git clone -q --depth 1 --branch "$TKREF" "$TKURL" "$W/tk"
-          git -C "$W/tk" log -1 --format='toolkit main %h %s'
+          retry() { for i in 1 2 3 4; do "$@" && return 0; echo "retry $i: $*"; sleep $((i * 10)); done; return 1; }
+          clone() { rm -rf "${@: -1}"; timeout 300 git clone -q --depth 1 "$@"; }
+          retry clone --branch "$TKREF" "$TKURL" "$W/tk"
+          git -C "$W/tk" log -1 --format='toolkit %h %s'
           # PNP_REPO: open-goat main (remote upstream) + this fork (remote origin) for the PR branches
-          timeout 300 git clone -q --depth 1 --origin upstream https://github.com/open-goat/pequalnp-proofs.git "$W/repo"
+          retry clone --origin upstream https://github.com/open-goat/pequalnp-proofs.git "$W/repo"
           git -C "$W/repo" remote add origin "https://github.com/$GITHUB_REPOSITORY.git"
-          git -C "$W/repo" fetch -q --depth=1 upstream main:refs/remotes/upstream/main
           # a recent fork branch as push negotiation base (else the first push sends the whole tree)
-          tip=$(git ls-remote "https://github.com/$GITHUB_REPOSITORY.git" 'refs/heads/L-meta-*' | sed 's#.*refs/heads/##' | sort -t- -k3 -n | tail -1)
-          [ -n "$tip" ] && git -C "$W/repo" fetch -q --depth=1 origin "$tip:refs/remotes/origin/$tip" || true
-          timeout 300 git clone -q --depth 1 https://github.com/open-goat/pequalnp-proofs.git "$W/scan"
+          tip=$(git ls-remote "https://github.com/$GITHUB_REPOSITORY.git" 'refs/heads/L-meta-*' | sed 's#.*refs/heads/##' | sort -t- -k3 -n | tail -1 || true)
+          [ -n "$tip" ] && retry git -C "$W/repo" fetch -q --depth=1 origin "$tip:refs/remotes/origin/$tip" || true
+          retry clone https://github.com/open-goat/pequalnp-proofs.git "$W/scan"
           pip install -q python-sat scipy numpy 2>&1 | tail -2
           mkdir -p "$W/wh/out"
 
