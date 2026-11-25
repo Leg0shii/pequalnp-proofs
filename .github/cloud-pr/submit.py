@@ -325,7 +325,9 @@ def main():
         url = open_pr_for_branch(ID)
     except Exception as e:
         finish("error", f"PR lookup failed: {e}")
-    if url:
+    if url and DRY:
+        log("dry run: our PR is already open, testing the rest anyway:", url)
+    elif url:
         finish("exists", "our PR for this branch is already open (PC watcher or an earlier run)", url)
     # 1. guards (= formatscan on the PC)
     env = dict(os.environ, NODE=subprocess.run(["sh", "-c", "command -v node"], capture_output=True, text=True).stdout.strip())
