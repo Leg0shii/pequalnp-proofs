@@ -201,8 +201,13 @@ def claim_lock(gid):
     run(["git", "init", "-q", "--bare", g])
     tree = subprocess.run(["git", "-C", g, "mktree"], input="", capture_output=True, text=True).stdout.strip()
     cenv = dict(os.environ, GIT_AUTHOR_NAME=HANDLE, GIT_COMMITTER_NAME=HANDLE, GIT_AUTHOR_EMAIL=EMAIL, GIT_COMMITTER_EMAIL=EMAIL,
-                GIT_AUTHOR_DATE="2026-01-01T00:00:00Z", GIT_COMMITTER_DATE="2026-01-01T00:00:00Z")
-    c = run(["git", "-C", g, "commit-tree", tree, "-m", "desk claim lock"], env=cenv).stdout.strip()
+                )
+    # unique per run: re-pushing the SAME sha to an existing tag counts as "up to date" (success); a different sha is
+    # refused without force, which is the lock
+    me = f"desk claim lock {gid} run {os.environ.get('GITHUB_RUN_ID', '?')}.{os.environ.get('GITHUB_RUN_ATTEMPT', '?')} {time.time_ns()}"
+    c = run(["git", "-C", g, "commit-tree", tree, "-m", me], env=cenv).stdout.strip()
+    if not c:
+        return False
     r = run(["git"] + auth_cfg() + ["-C", g, "push", "-q", f"https://github.com/{FORK}.git", f"{c}:refs/tags/claim/{gid}"], timeout=60)
     return r.returncode == 0
 
