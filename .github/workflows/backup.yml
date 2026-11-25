@@ -182,11 +182,15 @@ jobs:
             fi
             tail -n 3 "$W/wh/watch.log" 2>/dev/null
           done
-          kill -0 $pid 2>/dev/null && { echo "stopping the watcher: $why"; kill -TERM $pid; sleep 5; kill -KILL $pid 2>/dev/null; } || why="watcher exited"
+          if kill -0 $pid 2>/dev/null; then
+            echo "stopping the watcher: $why"; kill -TERM $pid; sleep 5; kill -KILL $pid 2>/dev/null || true
+          else
+            why="watcher exited"
+          fi
           pkill -f bggen.py 2>/dev/null || true
           echo "### backup watcher: $why" >> "$GITHUB_STEP_SUMMARY"
-          grep -E " (SUBMIT|SUBMIT-FAIL|RACE-LOST|FORMAT-FAIL|GENFAIL|NEW|BASELINE|STOP|DRY) " "$W/wh/watch.log" 2>/dev/null | tail -60 | sed 's/^/    /' >> "$GITHUB_STEP_SUMMARY"
-          tail -n 40 "$W/wh/stdout.log"
+          grep -E " (SUBMIT|SUBMIT-FAIL|RACE-LOST|FORMAT-FAIL|GENFAIL|NEW|BASELINE|STOP|DRY) " "$W/wh/watch.log" 2>/dev/null | tail -60 | sed 's/^/    /' >> "$GITHUB_STEP_SUMMARY" || true
+          tail -n 40 "$W/wh/stdout.log" || true
           exit 0
 
       - name: Save the backup's state
