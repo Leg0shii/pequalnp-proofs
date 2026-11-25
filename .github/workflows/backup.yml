@@ -17,11 +17,11 @@ on:
   workflow_dispatch:
     inputs:
       force:
-        description: Run even if the PC heartbeat is fresh (testing)
+        description: 'Run even if the PC heartbeat is fresh (testing)'
         type: boolean
         default: false
       dry:
-        description: Dry run (watch.py --dry-run --once: generate and check, never push or open a PR)
+        description: 'Dry run (watch.py --dry-run --once, generate and check, never push or open a PR)'
         type: boolean
         default: true
       minutes:
