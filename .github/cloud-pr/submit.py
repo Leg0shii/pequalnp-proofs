@@ -164,11 +164,16 @@ def desk(path, post=False):
 
 
 PAUSED = [False]
+NO_DESK_UNTIL = 1795635000      # 2026-11-25 19:30 UTC: Lead rule 4b.1, no desk call with our handle before this
+PAUSE_MIN_S = 900               # 4b.5: on a pause or repetition answer, no desk call for at least 15 min
+PAUSE_RE = re.compile(r"paus|again and again|repeat|same proof", re.I)
+TK_URL = "https://github.com/Leg0shii/pnp-toolkit.git"
+TK_PAUSE_REF = "refs/heads/status/desk-pause"   # toolkit: file DESK-PAUSE (until epoch, reason) for every claimer
 PAUSE_REF = "refs/heads/status/desk-pause"     # on this fork: unix time until which no run may ask the desk
 
 
-def set_pause(until):
-    """Record the desk's pause on this fork, so later runs make no desk request at all until it is over."""
+def set_pause(until, why=""):
+    """Record the desk's pause on this fork (later runs read it) and as DESK-PAUSE on the toolkit (Lead rule 4b.5)."""
     if DRY or not PR_TOKEN:
         return
     g = os.path.join(W, "pause.git")
@@ -179,6 +184,14 @@ def set_pause(until):
     c = run(["git", "-C", g, "commit-tree", tree, "-m", f"desk pause until {until}"], env=cenv).stdout.strip()
     r = run(["git"] + auth_cfg() + ["-C", g, "push", "-q", "-f", f"https://github.com/{FORK}.git", f"{c}:{PAUSE_REF}"], timeout=60)
     log("desk pause recorded until", time.strftime("%H:%M:%S", time.gmtime(until)), "UTC" if r.returncode == 0 else "(push failed)")
+    txt = (f"DESK-PAUSE until {until} {time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(until))} UTC\n"
+           f"written {time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime())} UTC by the cloud opener ({os.environ.get('GITHUB_RUN_ID', '?')})\n"
+           f"desk answer: {why[:300]}\n")
+    blob = subprocess.run(["git", "-C", g, "hash-object", "-w", "--stdin"], input=txt, capture_output=True, text=True).stdout.strip()
+    tree = subprocess.run(["git", "-C", g, "mktree"], input=f"100644 blob {blob}\tDESK-PAUSE\n", capture_output=True, text=True).stdout.strip()
+    c = run(["git", "-C", g, "commit-tree", tree, "-m", f"DESK-PAUSE until {until}"], env=cenv).stdout.strip()
+    r = run(["git"] + auth_cfg() + ["-C", g, "push", "-q", "-f", TK_URL, f"{c}:{TK_PAUSE_REF}"], timeout=60)
+    log("DESK-PAUSE on toolkit", TK_PAUSE_REF, "ok" if r.returncode == 0 else "(push failed)")
 
 
 def read_pause():
@@ -208,7 +221,8 @@ def claim_lock(gid):
     c = run(["git", "-C", g, "commit-tree", tree, "-m", me], env=cenv).stdout.strip()
     if not c:
         return False
-    r = run(["git"] + auth_cfg() + ["-C", g, "push", "-q", f"https://github.com/{FORK}.git", f"{c}:refs/tags/claim/{gid}"], timeout=60)
+    url = os.environ.get("CLAIM_LOCK_URL") or f"https://github.com/{FORK}.git"     # override: stub-desk test only
+    r = run(["git"] + auth_cfg() + ["-C", g, "push", "-q", url, f"{c}:refs/tags/claim/{gid}"], timeout=60)
     return r.returncode == 0
 
 
@@ -217,18 +231,21 @@ def claim(gid):
     One claim per step ever (claim_lock); a 410 (proved first) is final."""
     if PAUSED[0]:
         return None, "claim skipped: handle paused by the desk"
+    if time.time() < NO_DESK_UNTIL:
+        return None, "claim skipped: desk paused for our handle until 19:30 UTC (Lead rule 4b.1)"
     if not claim_lock(gid):
         return None, "claim skipped: this step was claimed once already"
     d = desk(f"next?handle={HANDLE}&gap={gid}&have=proof&another=1")
     if d.get("_http") == "410":
         return None, "gone (410): proved first " + json.dumps(d)[:120]
-    if "paused" in str(d.get("error", "")):
+    if PAUSE_RE.search(json.dumps(d)):
         PAUSED[0] = True
         try:
-            set_pause(int(time.time()) + int(d.get("retry_after_s") or 3600))
+            ra = int(d.get("retry_after_s") or 3600)
+            set_pause(int(time.time()) + max(ra, PAUSE_MIN_S), json.dumps(d))
         except Exception as e:
             log("could not record the desk pause:", e)
-        return None, "claim refused: handle paused: " + str(d.get("error"))[:160]
+        return None, "claim refused: handle paused: " + json.dumps(d)[:160]
     le = d.get("lease"); gp = d.get("gap") or {}
     lid = le.get("id") if isinstance(le, dict) else le
     if not lid or (isinstance(gp, dict) and gp.get("id") not in (None, gid)):
@@ -367,19 +384,10 @@ def submit(gid, lease):
     if err:
         return None, "push: " + err
     log("pushed", c[:12], "to", f"{FORK}:{gid}")
-    own = None                                      # a lease claimed here is released by main() (submitted / other)
     r = None
     for att in range(5):
         if stopped():                    # STOP may appear while this PR waited for a retry
             return None, "STOP file on upstream main"
-        if not lease and KIND != "value":
-            lid, cwhy = claim(gid)
-            if cwhy.startswith("gone (410)"):
-                return None, "file already in upstream main"      # proved first: final, a lost race
-            if lid:
-                lease = own = lid
-            else:
-                log("desk claim failed (PR goes anyway, unheld step):", cwhy[:160])
         body = DESC + (f"\n\nLease: {lease}" if lease else "") + FOOTER
         r = run(["gh", "pr", "create", "--repo", UP, "--head", f"{HANDLE}:{gid}", "--base", "main",
                  "--title", gid, "--body", body], timeout=120, env=dict(os.environ, GH_TOKEN=PR_TOKEN))
