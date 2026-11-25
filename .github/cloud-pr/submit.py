@@ -42,7 +42,8 @@ REL = f"lean/PEqualNP/Outside/{MOD}.lean"
 KIND = ""          # gaps.json kind of the step (set by race_ok)
 LEASE = [None]     # the lease the PR carries (held: race_ok; unheld: claimed right before gh pr create)
 TRANSIENT = re.compile(r"HTTP (408|429|5\d\d)|Something went wrong|secondary rate limit|submitted too quickly|"
-                       r"timed? ?out|connection reset|EOF|Internal Server Error|unexpected disconnect|RPC failed", re.I)
+                       r"timed? ?out|connection reset|EOF|Internal Server Error|unexpected disconnect|RPC failed|"
+                       r"unable to write file|unable to rename temporary|remote: fatal|remote: error", re.I)
 
 
 def log(*a):
