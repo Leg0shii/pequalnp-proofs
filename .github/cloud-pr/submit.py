@@ -39,6 +39,8 @@ FORK = os.environ.get("GITHUB_REPOSITORY", "Leg0shii/pequalnp-proofs-fork")
 DRY = os.environ.get("DRY", "0") == "1"
 READ_TOKEN = os.environ.get("READ_TOKEN", ""); PR_TOKEN = os.environ.get("PR_TOKEN", "")
 REL = f"lean/PEqualNP/Outside/{MOD}.lean"
+KIND = ""          # gaps.json kind of the step (set by race_ok)
+LEASE = [None]     # the lease the PR carries (held: race_ok; unheld: claimed right before gh pr create)
 TRANSIENT = re.compile(r"HTTP (408|429|5\d\d)|Something went wrong|secondary rate limit|submitted too quickly|"
                        r"timed? ?out|connection reset|EOF|Internal Server Error|unexpected disconnect|RPC failed", re.I)
 
@@ -157,15 +159,26 @@ def desk(path, post=False):
 
 
 def claim(gid):
-    d = desk(f"next?handle={HANDLE}&gap={gid}&have=proof")
+    d = desk(f"next?handle={HANDLE}&gap={gid}&have=proof&another=1")
     if "too many requests" in str(d.get("error", "")):
         time.sleep(15)
-        d = desk(f"next?handle={HANDLE}&gap={gid}&have=proof")
+        d = desk(f"next?handle={HANDLE}&gap={gid}&have=proof&another=1")
     le = d.get("lease"); gp = d.get("gap") or {}
     lid = le.get("id") if isinstance(le, dict) else le
     if not lid or (isinstance(gp, dict) and gp.get("id") not in (None, gid)):
         return None, "claim refused: " + json.dumps(d)[:200]
     return str(lid), "claimed" + (" (race)" if isinstance(le, dict) and (le.get("terms") or {}).get("race") else "")
+
+
+def claim_retry(gid):
+    lid, why = claim(gid)
+    for att in range(6):        # the desk caps leases per handle (5); ours free up as submits release them
+        if lid or "most one handle may hold" not in why:
+            break
+        log("claim refused (lease cap), retry in 30 s")
+        time.sleep(30)
+        lid, why = claim(gid)
+    return lid, why
 
 
 def release(lid, reason):
@@ -192,6 +205,8 @@ def race_ok(gid):
         g = next((x for x in gj["gaps"] if x["id"] == gid), None)
         if g is None:
             return False, "not posted", None
+        global KIND
+        KIND = g.get("kind") or ""
         # intake rule: a listed PR blocks only if it is ours or passed CI within the size limit (backup rule)
         live = [n for n in pr_list(g) if own_pr(n) or (pr_accepted(n) and not pr_oversized(n, gid))]
         if live:
@@ -210,18 +225,14 @@ def race_ok(gid):
         b = race_check(gid)
         if b:
             return False, f"blocking PRs {b}", None
+        if not is_h:     # unheld: the lease is taken right before gh pr create (watch.py submit, Lead D4)
+            return True, "clear", None
         if DRY:
-            return True, "clear (dry run: no claim)", None
-        lid, why = claim(gid)
-        for att in range(6):        # the desk caps leases per handle (5); ours free up as submits release them
-            if lid or "most one handle may hold" not in why:
-                break
-            log("claim refused (lease cap), retry in 30 s")
-            time.sleep(30)
-            lid, why = claim(gid)
-        if not lid and is_h:
+            return True, "clear (dry run: held, no claim)", None
+        lid, why = claim_retry(gid)      # held by someone else: our have=proof lease is required before the push
+        if not lid:
             return False, why, None
-        return True, "clear, " + (why if lid else "unheld, no lease (" + why[:80] + ")"), lid
+        return True, "clear, " + why, lid
     except Exception as e:
         return False, f"race check error {e}", None
 
@@ -285,9 +296,16 @@ def submit(gid, lease):
     if err:
         return None, "push: " + err
     log("pushed", c[:12], "to", f"{FORK}:{gid}")
-    body = DESC + (f"\n\nLease: {lease}" if lease else "") + FOOTER
+    own = None                                      # a lease claimed here is released by main() (submitted / other)
     r = None
     for att in range(5):
+        if not lease and KIND != "value":
+            lid, cwhy = claim(gid)
+            if lid:
+                lease = own = lid
+            else:
+                log("desk claim failed (PR goes anyway, unheld step):", cwhy[:160])
+        body = DESC + (f"\n\nLease: {lease}" if lease else "") + FOOTER
         r = run(["gh", "pr", "create", "--repo", UP, "--head", f"{HANDLE}:{gid}", "--base", "main",
                  "--title", gid, "--body", body], timeout=120, env=dict(os.environ, GH_TOKEN=PR_TOKEN))
         if re.search(r"https://\S+", r.stdout) or "already exists" in r.stderr:
@@ -297,6 +315,7 @@ def submit(gid, lease):
         log("PR retry in", 30 * 2 ** att, "s:", r.stderr.strip()[:150])
         time.sleep(30 * 2 ** att)
     url = (re.findall(r"https://github\.com/\S+/pull/\d+", r.stdout + r.stderr) or [None])[0]
+    LEASE[0] = lease
     return url, ("ok" if url else r.stderr.strip()[:300])
 
 
@@ -349,11 +368,13 @@ def main():
     # 2. race check right before the push
     ok, why, lease = race_ok(ID)
     if not ok:
-        finish("error" if why.startswith("race check error") else "race", why)
+        # an error or the desk's lease cap is not a lost race: keep the branch (re-run the job), the PC still has its copy
+        finish("error" if why.startswith("race check error") or "most one handle may hold" in why else "race", why)
     log("race check:", why)
     # 3.+4. commit on upstream main, push, PR
+    LEASE[0] = lease
     url, why2 = submit(ID, lease)
-    release(lease, "submitted" if url else "other")
+    release(LEASE[0], "submitted" if url else "other")
     if url == "dry-run":
         finish("dry", why2)
     if not url and why2 == "file already in upstream main":
