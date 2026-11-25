@@ -151,12 +151,16 @@ _DESK_T = [0.0]
 
 def desk(path, post=False):
     time.sleep(max(0, _DESK_T[0] + 3 - time.time()))      # the desk asks for one request every few seconds
-    r = run(["curl", "-sS", "--max-time", "30"] + (["-X", "POST"] if post else []) + [DESK + path], timeout=40)
+    r = run(["curl", "-sS", "--max-time", "30", "-w", "\n%{http_code}"] + (["-X", "POST"] if post else []) + [DESK + path], timeout=40)
     _DESK_T[0] = time.time()
+    body, _, code = r.stdout.rpartition("\n")
     try:
-        return json.loads(r.stdout)
+        d = json.loads(body)
     except Exception:
-        return {"error": (r.stdout or r.stderr).strip()[:200]}
+        d = {"error": (body or r.stderr).strip()[:200]}
+    if isinstance(d, dict):
+        d["_http"] = code.strip()
+    return d
 
 
 PAUSED = [False]
@@ -188,11 +192,31 @@ def read_pause():
         return 0
 
 
+def claim_lock(gid):
+    """At most ONE desk claim per step, ever, across all runs (Lead/coordinator 18:26 after the desk paused the handle
+    for repeated claims): tag claim/<gid> on this fork is created without force, so only the first run gets it."""
+    if DRY or not PR_TOKEN:
+        return False
+    g = os.path.join(W, "pause.git")
+    run(["git", "init", "-q", "--bare", g])
+    tree = subprocess.run(["git", "-C", g, "mktree"], input="", capture_output=True, text=True).stdout.strip()
+    cenv = dict(os.environ, GIT_AUTHOR_NAME=HANDLE, GIT_COMMITTER_NAME=HANDLE, GIT_AUTHOR_EMAIL=EMAIL, GIT_COMMITTER_EMAIL=EMAIL,
+                GIT_AUTHOR_DATE="2026-01-01T00:00:00Z", GIT_COMMITTER_DATE="2026-01-01T00:00:00Z")
+    c = run(["git", "-C", g, "commit-tree", tree, "-m", "desk claim lock"], env=cenv).stdout.strip()
+    r = run(["git"] + auth_cfg() + ["-C", g, "push", "-q", f"https://github.com/{FORK}.git", f"{c}:refs/tags/claim/{gid}"], timeout=60)
+    return r.returncode == 0
+
+
 def claim(gid):
-    """No desk request at all once the desk said the handle is paused: every request while paused extends the pause."""
+    """No desk request at all once the desk said the handle is paused: every request while paused extends the pause.
+    One claim per step ever (claim_lock); a 410 (proved first) is final."""
     if PAUSED[0]:
         return None, "claim skipped: handle paused by the desk"
+    if not claim_lock(gid):
+        return None, "claim skipped: this step was claimed once already"
     d = desk(f"next?handle={HANDLE}&gap={gid}&have=proof&another=1")
+    if d.get("_http") == "410":
+        return None, "gone (410): proved first " + json.dumps(d)[:120]
     if "paused" in str(d.get("error", "")):
         PAUSED[0] = True
         try:
@@ -200,9 +224,6 @@ def claim(gid):
         except Exception as e:
             log("could not record the desk pause:", e)
         return None, "claim refused: handle paused: " + str(d.get("error"))[:160]
-    if "too many requests" in str(d.get("error", "")):
-        time.sleep(15)
-        d = desk(f"next?handle={HANDLE}&gap={gid}&have=proof&another=1")
     le = d.get("lease"); gp = d.get("gap") or {}
     lid = le.get("id") if isinstance(le, dict) else le
     if not lid or (isinstance(gp, dict) and gp.get("id") not in (None, gid)):
@@ -211,14 +232,7 @@ def claim(gid):
 
 
 def claim_retry(gid):
-    lid, why = claim(gid)
-    for att in range(6):        # the desk caps leases per handle (5); ours free up as submits release them
-        if lid or "most one handle may hold" not in why:
-            break
-        log("claim refused (lease cap), retry in 30 s")
-        time.sleep(30)
-        lid, why = claim(gid)
-    return lid, why
+    return claim(gid)            # one claim per step, ever: no retries (the desk pauses handles that repeat)
 
 
 def release(lid, reason):
@@ -355,6 +369,8 @@ def submit(gid, lease):
             return None, "STOP file on upstream main"
         if not lease and KIND != "value":
             lid, cwhy = claim(gid)
+            if cwhy.startswith("gone (410)"):
+                return None, "file already in upstream main"      # proved first: final, a lost race
             if lid:
                 lease = own = lid
             else:
@@ -430,7 +446,7 @@ def main():
     if not ok:
         # an error or the desk's lease cap is not a lost race: keep the branch (re-run the job), the PC still has its copy
         finish("error" if why.startswith("race check error") or "most one handle may hold" in why or "paused" in why
-               else "race", why)
+               else "race", why)          # a 410 or an earlier claim of this step ends here as a lost race
     log("race check:", why)
     # 3.+4. commit on upstream main, push, PR
     LEASE[0] = lease
