@@ -15,6 +15,7 @@ UP = "open-goat/pequalnp-proofs"
 TK = "https://github.com/Leg0shii/pnp-toolkit.git"
 HANDLE = "Leg0shii"
 TOK = os.environ.get("PR_TOKEN", "")
+RTOK = os.environ.get("READ_TOKEN", "") or TOK     # reads: their own token (PR_TOKEN's limit is shared with PR creation)
 DRY = os.environ.get("DRY", "0") == "1"
 END = time.time() + float(os.environ.get("MINUTES", "58")) * 60
 W = os.environ.get("W") or tempfile.mkdtemp()
@@ -42,6 +43,97 @@ def auth():
 
 def ghenv():
     return dict(os.environ, GH_TOKEN=TOK) if TOK else None
+
+
+def rdenv():
+    return dict(os.environ, GH_TOKEN=RTOK) if RTOK else None
+
+
+# ---- v2 (Lead 19:30, team/lead/DUPCLOSE-V2.md): an earlier PR number does NOT win; a holder's later PR beats our
+# earlier unleased one. REST only (no search API): one full sweep of upstream open PRs every FULL_S, the newest pages
+# every pass. Map unit -> every open PR (number, author, Lease line).
+FULL_S, NEW_PAGES = 300, 2
+ID_RX = re.compile(r"(?<![A-Za-z0-9])(L-[a-z]+(?:-[a-z0-9]+)*-\d+)(?![0-9])")
+LEASE_RX = re.compile(r"(?m)^Lease:\s*\S")
+OPEN = {"t": 0.0, "prs": {}}       # number -> {"n", "gid", "author", "lease", "created"}
+EXPO = {"alerted": 0.0}
+V2_REF = "refs/heads/dupclose/v2_on"   # close rule v2 only while this toolkit ref exists (infra pushes it on the Lead's word)
+
+
+def _page(k):
+    if os.environ.get("FIXTURE_OPEN"):
+        d = json.load(open(os.environ["FIXTURE_OPEN"]))
+        return d[(k - 1) * 100:k * 100]
+    r = sh("gh", "api", f"repos/{UP}/pulls?state=open&sort=created&direction=desc&per_page=100&page={k}", env=rdenv(), timeout=60)
+    if r.returncode:
+        raise RuntimeError("pulls page %d: %s" % (k, r.stderr.strip()[-120:]))
+    return json.loads(r.stdout or "[]")
+
+
+def _row(x):
+    t = x.get("title") or ""
+    m = ID_RX.search(t) or ID_RX.search(((x.get("head") or {}).get("ref") or "").replace("_", "-"))
+    return {"n": x["number"], "gid": m.group(1) if m else None, "author": (x.get("user") or {}).get("login"),
+            "lease": bool(LEASE_RX.search(x.get("body") or "")), "createdAt": x.get("created_at") or "", "title": t,
+            "body": x.get("body") or ""}
+
+
+def open_prs():
+    """{number: row} of all open upstream PRs: full sweep every FULL_S (drops closed ones), else the newest pages."""
+    full = time.time() - OPEN["t"] >= FULL_S
+    got, k = {}, 1
+    while True:
+        pg = _page(k)
+        for x in pg:
+            got[x["number"]] = _row(x)
+        if len(pg) < 100 or (not full and k >= NEW_PAGES):
+            break
+        k += 1
+    if full:
+        OPEN["prs"], OPEN["t"] = got, time.time()
+    else:
+        OPEN["prs"].update(got)
+    return OPEN["prs"]
+
+
+def v2_on():
+    g = os.path.join(W, "taken.git")
+    if not os.path.isdir(g):
+        sh("git", "init", "-q", "--bare", g)
+    r = sh("git", *auth(), "-C", g, "ls-remote", TK, V2_REF, timeout=30)
+    return r.returncode == 0 and V2_REF in r.stdout
+
+
+def exposure(prs):
+    """Lead 19:30 item 2: our open PRs that share the unit with another author's open PR, split by rival number
+    lower/higher and rival Lease yes/no; ours with a Lease line counted apart. Returns (split dict, close list,
+    exposed list)."""
+    by = {}
+    for p in prs.values():
+        if p["gid"]:
+            by.setdefault(p["gid"], []).append(p)
+    sp = {"ours": 0, "ours_lease": 0, "shared": 0, "lowL": 0, "low": 0, "highL": 0, "high": 0}
+    close, exposed = [], []
+    for p in prs.values():
+        if p["author"] != HANDLE or not p["gid"]:
+            continue
+        sp["ours"] += 1
+        if p["lease"]:
+            sp["ours_lease"] += 1
+            continue
+        riv = [r for r in by.get(p["gid"], []) if r["author"] != HANDLE]
+        if not riv:
+            continue
+        sp["shared"] += 1
+        low = [r for r in riv if r["n"] < p["n"]]
+        leased = [r for r in riv if r["lease"]]
+        key = ("low" if low else "high") + ("L" if leased else "")
+        sp[key] += 1
+        if low or leased:
+            close.append((p["n"], p["gid"], (low or leased)[0]["author"], (low or leased)[0]["n"], bool(leased)))
+        else:
+            exposed.append((p["n"], p["gid"]))
+    return sp, close, exposed
 
 
 def taken():
@@ -106,6 +198,9 @@ def alert_ref(msg, kind):
 HB = {"t": 0.0}
 
 
+SPLIT = {"txt": ""}
+
+
 def heartbeat(n, d, fresh):
     """Lead 18:45: liveness. Force-push toolkit ref status/dupclose every 30 s; message
     `dupclose <epoch> open=N dups=D closed=C taken=fresh|stale run=<id>`. The infra box alerts DUPCLOSE-DEAD when the
@@ -118,7 +213,7 @@ def heartbeat(n, d, fresh):
     env = dict(os.environ, GIT_AUTHOR_NAME="dupclose", GIT_AUTHOR_EMAIL="dupclose@localhost",
                GIT_COMMITTER_NAME="dupclose", GIT_COMMITTER_EMAIL="dupclose@localhost")
     msg = (f"dupclose {int(time.time())} open={n} dups={d} closed={len(CLOSED)} taken={'fresh' if fresh else 'stale'} "
-           f"run={os.environ.get('GITHUB_RUN_ID', '-')}")
+           f"{SPLIT['txt']} run={os.environ.get('GITHUB_RUN_ID', '-')}")
     c = subprocess.run(["git", "-C", g, "commit-tree", tree, "-m", msg], capture_output=True, text=True, env=env).stdout.strip()
     sh("git", *auth(), "-C", g, "push", "-q", "-f", TK, f"{c}:refs/heads/status/dupclose", timeout=60)
 
@@ -133,9 +228,22 @@ def rej_burst():
     if os.environ.get("FIXTURE_CLOSED"):
         prs = json.load(open(os.environ["FIXTURE_CLOSED"]))
     else:
-        r = sh("gh", "pr", "list", "--repo", UP, "--author", HANDLE, "--state", "closed", "--limit", "60",
-               "--json", "number,closedAt,mergedAt,comments", env=ghenv())
-        prs = json.loads(r.stdout or "[]") if r.returncode == 0 else []
+        # REST, no search API (Lead 19:30): the 100 most recently updated closed PRs, ours closed unmerged in the
+        # window, then the comments of those only
+        r = sh("gh", "api", f"repos/{UP}/pulls?state=closed&sort=updated&direction=desc&per_page=100", env=rdenv(), timeout=60)
+        prs = []
+        for x in (json.loads(r.stdout or "[]") if r.returncode == 0 else []):
+            if (x.get("user") or {}).get("login") != HANDLE or x.get("merged_at") or not x.get("closed_at"):
+                continue
+            ca = x["closed_at"]
+            try:
+                if time.time() - (time.mktime(time.strptime(ca[:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone) > REJ_WIN:
+                    continue
+            except Exception:
+                continue
+            c = sh("gh", "api", f"repos/{UP}/issues/{x['number']}/comments?per_page=30", env=rdenv(), timeout=60)
+            prs.append({"number": x["number"], "closedAt": ca, "mergedAt": None,
+                        "comments": json.loads(c.stdout or "[]") if c.returncode == 0 else []})
     now = time.time()
 
     def t(x):
@@ -154,21 +262,45 @@ def rej_burst():
 
 
 def one_pass():
-    prs = [p for p in ours() if p["number"] not in CLOSED]
+    allp = None
+    try:
+        allp = open_prs()
+    except Exception as e:
+        log("open PR list failed:", repr(e)[:120])
+    if allp is not None and not os.environ.get("FIXTURE"):
+        prs = [{"number": p["n"], "title": p["title"], "body": p["body"], "createdAt": p["createdAt"]}
+               for p in allp.values() if p["author"] == HANDLE and p["n"] not in CLOSED]
+    else:                                             # REST list failed: nothing this pass (no search API fallback)
+        prs = [p for p in ours() if p["number"] not in CLOSED] if os.environ.get("FIXTURE") else []
     tk = taken()
     dups = []
+    v2 = False
+    if allp is not None:
+        sp, close2, exposed = exposure({k: v for k, v in allp.items() if k not in CLOSED})
+        SPLIT["txt"] = (f"exposed={len(exposed)} shared={sp['shared']} rlow={sp['low']} rlowL={sp['lowL']} "
+                        f"rhigh={sp['high']} rhighL={sp['highL']} ours_lease={sp['ours_lease']} v2={'on' if v2_on() else 'off'}")
+        v2 = "v2=on" in SPLIT["txt"]
+        if len(exposed) >= 15 and time.time() - EXPO["alerted"] >= 600 and not DRY:
+            EXPO["alerted"] = time.time()
+            alert_ref(f"EXPOSED {len(exposed)}", "exposed")
+            log("EXPOSED", len(exposed))
+        if v2:                                       # rule v2: rival lower number OR rival with a Lease line
+            for n, gid, ra, rn, rl in close2:
+                p = allp.get(n)
+                if p and age({"createdAt": p["createdAt"]}) >= 20:
+                    dups.append((n, gid, int(age({"createdAt": p["createdAt"]}))))
     for p in prs:
         gid = (p.get("title") or "").strip()
         if not re.fullmatch(r"L-[a-z0-9]+(-[a-z0-9]+)*-\d+", gid) or re.search(r"(?m)^Lease:\s*\S", p.get("body") or ""):
             continue                                  # not a step PR, or we hold its lease: keep
         a = age(p)
-        if a < 20:
+        if a < 20 or any(x[0] == p["number"] for x in dups):
             continue
         if tk is not None:
             first = tk.get(gid)
             dup = bool(first and first[1] != HANDLE and first[0] < p["number"])
         else:
-            dup = a < 600 and rival_lower(gid, p["number"])
+            dup = False                               # Lead 19:30: no search API in any loop (was rival_lower)
         if dup:
             dups.append((p["number"], gid, int(a)))
     for n, gid, a in dups:
@@ -188,6 +320,14 @@ def one_pass():
     return len(prs), len(dups), tk is not None
 
 
+if __name__ == "__main__" and sys.argv[1:2] == ["measure"]:
+    # Lead 19:30 item 2: one full sweep, print the split and what rule v2 would close; closes nothing
+    sp, close2, exposed = exposure(open_prs())
+    print(json.dumps(sp))
+    for n, gid, ra, rn, rl in sorted(close2):
+        print("V2 WOULD CLOSE", n, gid, "rival", ra, rn, "lease" if rl else "lower")
+    print("EXPOSED", len(exposed), " ".join(f"{n}:{g}" for n, g in sorted(exposed)[:40]))
+    sys.exit(0)
 if __name__ == "__main__":
     once = sys.argv[1:2] == ["once"]
     while True:

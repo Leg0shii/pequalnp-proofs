@@ -38,6 +38,7 @@ jobs:
       - name: Close our duplicate PRs every 20 s
         env:
           PR_TOKEN: ${{ secrets.PR_TOKEN }}
+          READ_TOKEN: ${{ secrets.READ_TOKEN }}
           IN_MIN: ${{ inputs.minutes }}
         run: |
           [ -n "${PR_TOKEN:-}" ] || { echo "no PR_TOKEN secret: stop"; exit 0; }
