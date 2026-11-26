@@ -7,7 +7,7 @@ listing (data.pequalnp.com gaps.json only since the 16:00 pause; no desk-host re
 ready/ branches, and re-pushes each listed one on current fork main once per step per job. A branch must be at
 least MIN_AGE s old, so the push run of a fresh branch is never doubled. Dispatches are paced (GitHub allows about
 2 PR creations in parallel; cloud-pr retries refusals)."""
-import json, os, re, subprocess, sys, time
+import json, os, re, subprocess, sys, threading, time
 
 FORK = os.environ.get("GITHUB_REPOSITORY", "Leg0shii/pequalnp-proofs-fork")
 END = time.time() + float(os.environ.get("MINUTES", "58")) * 60
@@ -18,6 +18,7 @@ FORK_URL = os.environ.get("FORK_URL", f"https://github.com/{FORK}.git")   # test
 first_seen, done = {}, set()
 TRIES = {}      # gid -> (re-pushes, last epoch): a run that ended "waiting" (gaps.json behind desk/status) keeps the
 RETRY_S, MAX_TRIES = 60, 4   # branch; it is re-pushed again after RETRY_S, at most MAX_TRIES times per job
+NO_RUN_WAIT = float(os.environ.get("NO_RUN_WAIT", "15"))   # Lead 18:53: no cloud-pr run this long after a round -> BATCH-NO-RUN
 
 
 def run(cmd, timeout=60):
@@ -151,13 +152,51 @@ def batch_push(items):
         if not c:
             failed.append(gid); continue
         refs.append(f"+{c}:refs/heads/ready/{gid}"); pushed.append(gid)
-    for k in range(0, len(refs), 50):
-        r = run(["git", "-C", G, "push", "-q", url, *refs[k:k + 50]], 180)
+    # Lead 18:53: GitHub may create no push event for a many-branch push and the drain starts only on one, so the FIRST
+    # re-push of the round goes alone (sure event: starts or queues the drain), then the rest in chunks of 50
+    ups = [x for x in refs if not x.startswith(":")]
+    chunks = ([ups[:1]] if ups else []) + [c for c in ([x for x in refs if x not in ups[:1]][k:k + 50]
+                                                       for k in range(0, len(refs) - len(ups[:1]), 50)) if c]
+    for ch in chunks:
+        r = run(["git", "-C", G, "push", "-q", url, *ch], 180)
         if r.returncode:
             log("BATCH-PUSH-FAIL", (r.stderr or "").strip()[-150:])
-            bad = {x.rsplit("/", 1)[1] for x in refs[k:k + 50]}
+            bad = {x.rsplit("/", 1)[1] for x in ch}
             failed += [g for g in pushed if g in bad]; pushed = [g for g in pushed if g not in bad]
+    if pushed:
+        # in a thread: the next round never waits for this check
+        threading.Thread(target=no_run_check, args=(pushed[0], {g: c for g, c in ((x.rsplit("/", 1)[1], x[1:].split(":")[0]) for x in ups)}),
+                         daemon=True).start()
     return pushed, dropped, failed
+
+
+def drain_runs():
+    """cloud-pr runs in progress or queued (None if the API cannot say)."""
+    n = 0
+    for st in ("in_progress", "queued"):
+        r = run(["gh", "api", f"repos/{FORK}/actions/workflows/cloud-pr.yml/runs?status={st}&per_page=1", "--jq", ".total_count"], 30)
+        if r.returncode or not r.stdout.strip().isdigit():
+            return None
+        n += int(r.stdout.strip())
+    return n
+
+
+def no_run_check(gid, commits, wait=None):
+    """Lead 18:53: 15 s after a round with re-pushes, no cloud-pr run in progress or queued -> re-push one ref (a new
+    commit, so the push is a real change and creates an event) and log BATCH-NO-RUN."""
+    time.sleep(NO_RUN_WAIT if wait is None else wait)
+    if drain_runs() != 0:
+        return False
+    c = commits.get(gid)
+    cenv = dict(os.environ, GIT_AUTHOR_NAME="Leg0shii", GIT_COMMITTER_NAME="Leg0shii",
+                GIT_AUTHOR_EMAIL="46093332+Leg0shii@users.noreply.github.com", GIT_COMMITTER_EMAIL="46093332+Leg0shii@users.noreply.github.com")
+    tree = run(["git", "-C", G, "rev-parse", f"{c}^{{tree}}"]).stdout.strip() if c else ""
+    msg = run(["git", "-C", G, "log", "-1", "--format=%B", c]).stdout.strip() if c else ""
+    c2 = subprocess.run(["git", "-C", G, "commit-tree", tree, "-p", "main", "-m", msg + " (no-run re-push)"],
+                        env=cenv, capture_output=True, text=True).stdout.strip() if tree else ""
+    r = run(["git", "-C", G, "push", "-q", "-f", FORK_URL, f"{c2}:refs/heads/ready/{gid}"], 120) if c2 else None
+    log("BATCH-NO-RUN", gid, "no cloud-pr run 15 s after the round: re-pushed it", "ok" if r is not None and not r.returncode else "FAILED")
+    return True
 
 
 run(["git", "init", "-q", "--bare", G])
