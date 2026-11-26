@@ -52,6 +52,34 @@ def queue():
     return sorted(((x, sha[x]) for x in out), key=lambda x: -int(x[0].rsplit("-", 1)[1]) if x[0].rsplit("-", 1)[1].isdigit() else 0)
 
 
+_PR = [0.0]
+
+
+def prune(gj):
+    """Lead 17:04: drop every queued utest/<ID> whose unit is taken (a rival's first PR in the toolkit taken list, or
+    gaps.json shows a PR or a holder) in ONE push, at most once a minute, so a new free unit is filed in seconds."""
+    if time.time() - _PR[0] < 60:
+        return 0
+    _PR[0] = time.time()
+    taken = {}
+    g = os.path.join(D["W"], "taken.git")
+    sh("git", "init", "-q", "--bare", g, timeout=30)
+    if sh("git", *auth(), "-C", g, "fetch", "-q", "--depth=1", TK, "+refs/heads/status/taken:refs/heads/status/taken",
+          timeout=60).returncode == 0:
+        for l in sh("git", "-C", g, "show", "refs/heads/status/taken:taken.txt", timeout=30).stdout.splitlines()[1:]:
+            p = l.split()
+            if len(p) >= 3:
+                taken[p[0]] = p[2]
+    busy = {x["id"] for x in (gj.get("gaps") or []) if x.get("pr_open") or x.get("pr_numbers") or x.get("held_now")
+            or (x.get("holders_now") or 0)}
+    drop = [sid for sid, _ in queue() if (sid in taken and taken[sid] != HANDLE) or sid in busy]
+    for k in range(0, len(drop), 100):
+        refs = [f":refs/heads/utest/{x}" for x in drop[k:k + 100]]
+        r = sh("git", *auth(), "push", "-q", URL, *refs, timeout=120)
+        log("pruned", len(refs), "taken utest branches" if r.returncode == 0 else "(prune push failed: " + r.stderr.strip()[-120:] + ")")
+    return len(drop)
+
+
 def main():
     os.makedirs(D["W"], exist_ok=True)
     if not on():
@@ -85,6 +113,7 @@ def main():
         if not on():
             log("utest/on removed: test stopped after", n, "PRs")
             return
+        prune(gj)
         q = [x for x in queue() if x[0] not in SKIP]
         if not q:
             time.sleep(20)              # the infra box feeds utest/ branches as w12's list refreshes
