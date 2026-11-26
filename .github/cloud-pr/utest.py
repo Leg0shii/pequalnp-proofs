@@ -63,22 +63,31 @@ def main():
         log("our handle is not paused: the test is for the pause only, nothing to do")
         return
     n, last_pr = 0, 0.0
+    # Lead 16:29: start before the freeze. The "moved" auto-stop arms only once our paused_until is the same on two
+    # different exports (the first freeze); from then on any move switches the test off.
+    armed, prev, last_exp = False, base, gj.get("updated_at")
     while time.time() < END:
         gj = gaps()
         now_p = our_pause(gj)
         if now_p is None:
             log("our handle is no longer paused (export", gj.get("updated_at"), "): test ends,", n, "PRs")
             return
-        if now_p != base:
-            switch_off(f"our paused_until moved {base} -> {now_p} at export {gj.get('updated_at')} after {n} PRs")
-            return
+        if gj.get("updated_at") != last_exp:
+            last_exp = gj.get("updated_at")
+            if not armed and now_p == prev:
+                armed, base = True, now_p
+                log("FROZEN our paused_until", now_p, "at export", last_exp, "after", n, "PRs: auto-stop armed")
+            elif armed and now_p != base:
+                switch_off(f"our paused_until moved {base} -> {now_p} at export {last_exp} after {n} PRs")
+                return
+            prev = now_p
         if not on():
             log("utest/on removed: test stopped after", n, "PRs")
             return
         q = queue()
         if not q:
-            log("queue empty: test ends after", n, "PRs")
-            return
+            time.sleep(20)              # the infra box feeds utest/ branches as w12's list refreshes
+            continue
         # Lead 16:24: frozen for 15 min of filing -> 4 a minute
         per_min = PER_MIN if time.time() - T_START < RAMP_S else max(PER_MIN, RAMP_TO)
         wait = last_pr + 60.0 / per_min - time.time()
