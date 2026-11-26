@@ -20,6 +20,7 @@ DRY = os.environ.get("DRY", "0") == "1"
 END = time.time() + float(os.environ.get("MINUTES", "58")) * 60
 W = os.environ.get("W") or tempfile.mkdtemp()
 CLOSED = set()
+CMT = {}          # PR number -> comments (read once)
 FIRST = []
 REJ = {"t": 0.0, "alerted": 0.0}
 REJ_EVERY, REJ_WIN, REJ_MIN = 60, 600, 3      # Lead 18:42: REJ-BURST n at 3 or more in 10 min, once per 10 min
@@ -251,9 +252,14 @@ def rej_burst():
                     continue
             except Exception:
                 continue
-            c = sh("gh", "api", f"repos/{UP}/issues/{x['number']}/comments?per_page=30", env=rdenv(), timeout=60)
-            prs.append({"number": x["number"], "closedAt": ca, "mergedAt": None,
-                        "comments": json.loads(c.stdout or "[]") if c.returncode == 0 else []})
+            if x["number"] in CLOSED:
+                continue                              # closed by us (dupclose), not a checker rejection
+            if x["number"] not in CMT:                # 19:50: each PR's comments read once (was every minute per PR)
+                c = sh("gh", "api", f"repos/{UP}/issues/{x['number']}/comments?per_page=30", env=rdenv(), timeout=60)
+                if c.returncode:
+                    continue
+                CMT[x["number"]] = json.loads(c.stdout or "[]")
+            prs.append({"number": x["number"], "closedAt": ca, "mergedAt": None, "comments": CMT[x["number"]]})
     now = time.time()
 
     def t(x):
