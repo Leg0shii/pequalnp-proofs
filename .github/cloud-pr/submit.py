@@ -468,15 +468,12 @@ def race_ok(gid):
             return True, "clear (held, desk off: PR without a lease, no desk call)", None
         if DRY:
             return True, "clear (dry run: held, no claim)", None
-        if not take_slot(gid):
-            return True, f"clear (held, {LEASE_MAX} lease slots busy: PR without a lease)", None
-        lid, why = claim_retry(gid, prio)   # held by someone else: our have=proof lease is required before the push
-        if not lid:
-            free_slot()
-            if why.startswith("no lease:"):    # rate cap or rollout quota: PR without a lease (Lead 09:50)
-                return True, f"clear (held, {why[10:]}: PR without a lease)", None
-            return False, why, None
-        return True, "clear, " + why, lid
+        # Lead 10:30: the first agent handed a step gets a ~30 min head start and later claims are refused, so a held
+        # step gets no claim: our own recorded lease if there is one, else a PR without a lease at once
+        old = dg().lease_of(gid)
+        if old:
+            return True, "clear (held, our recorded lease reused)", old
+        return True, "clear (held by another agent: PR without a lease, no desk call)", None
     except Exception as e:
         return False, f"race check error {e}", None
 
