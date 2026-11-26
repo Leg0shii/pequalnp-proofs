@@ -90,7 +90,9 @@ def repush(gid, sha, f):
     tree = subprocess.run(["git", "-C", G, "write-tree"], env=env, capture_output=True, text=True).stdout.strip()
     cenv = dict(os.environ, GIT_AUTHOR_NAME="Leg0shii", GIT_COMMITTER_NAME="Leg0shii",
                 GIT_AUTHOR_EMAIL="46093332+Leg0shii@users.noreply.github.com", GIT_COMMITTER_EMAIL="46093332+Leg0shii@users.noreply.github.com")
-    c = subprocess.run(["git", "-C", G, "commit-tree", tree, "-p", "main", "-m", f"ready {gid} (ready-wait: listed)"],
+    # Lead 15:10: a lease-first branch stays lease-first on its re-push (else the opener takes the PR-first path)
+    lf = " lease-first" if "lease-first" in run(["git", "-C", G, "log", "-1", "--format=%B", sha]).stdout.lower() else ""
+    c = subprocess.run(["git", "-C", G, "commit-tree", tree, "-p", "main", "-m", f"ready {gid} (ready-wait: listed{lf})"],
                        env=cenv, capture_output=True, text=True).stdout.strip()
     if not c:
         return subprocess.CompletedProcess([], 1, "", "commit-tree failed")
