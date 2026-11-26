@@ -99,6 +99,7 @@ def repush(gid, sha, f):
 
 run(["git", "init", "-q", "--bare", G])
 n = 0; last_l = 0; ids = set()
+T0 = time.time(); listed_at = {}     # gid -> first time seen listed in this job (ids listed at the start count as old)
 while time.time() < END:
     br = branches()
     now = time.time()
@@ -107,13 +108,17 @@ while time.time() < END:
     if now - last_l >= 10:
         ids = listed() or ids; last_l = now
     ids = ids | signal()
+    for g in ids:
+        listed_at.setdefault(g, T0 if now - T0 < 15 else now)
     # once per step per job (a re-push changes the sha, so the step id is the key)
     for g in list(done):      # still there RETRY_S after our re-push = that run waited or failed: allow another
         k, t = TRIES.get(g, (0, 0))
         if g in br and k < MAX_TRIES and now - t >= RETRY_S:
             done.discard(g)
     todo = [(g, s) for g, s in br.items() if g not in done and g in ids and now - first_seen[(g, s)] >= MIN_AGE]
-    for gid, sha in sorted(todo, key=lambda x: first_seen[x]):
+    # 13:24 UTC 26 Nov: 19538/44/45 waited behind 4 stale branches (4 s pacing each): newest listing first, and no
+    # pacing while a step listed in the last 2 min is still queued
+    for gid, sha in sorted(todo, key=lambda x: (-listed_at.get(x[0], T0), first_seen[x])):
         if not re.fullmatch(r"L-[a-z0-9]+(-[a-z0-9]+)*", gid):
             done.add(gid); TRIES[gid] = (MAX_TRIES, 0); continue
         f = ready_file(gid, sha)
@@ -126,7 +131,10 @@ while time.time() < END:
         log("REPUSH" if r.returncode == 0 else "REPUSH-FAIL", gid, f, (r.stderr or "").strip()[:150])
         if r.returncode:
             done.discard(gid)
-        time.sleep(PACE)
+        if time.time() - listed_at.get(gid, T0) > 120:
+            time.sleep(PACE)
+        else:
+            time.sleep(0.5)
         if time.time() >= END:
             break
     time.sleep(5)

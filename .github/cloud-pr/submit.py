@@ -40,6 +40,8 @@ DRY = os.environ.get("DRY", "0") == "1"
 READ_TOKEN = os.environ.get("READ_TOKEN", ""); PR_TOKEN = os.environ.get("PR_TOKEN", "")
 REL = f"lean/PEqualNP/Outside/{MOD}.lean"
 KIND = ""          # gaps.json kind of the step (set by race_ok)
+LATE_LEASE = os.environ.get("LATE_LEASE", "1") == "1"     # unheld: open the PR, then claim, then add the Lease line
+PRIO = [1]
 LEASE = [None]     # the lease the PR carries (held: race_ok; unheld: claimed right before gh pr create)
 TRANSIENT = re.compile(r"HTTP (408|429|5\d\d)|Something went wrong|secondary rate limit|submitted too quickly|"
                        r"timed? ?out|connection reset|EOF|Internal Server Error|unexpected disconnect|RPC failed|"
@@ -461,6 +463,10 @@ def race_ok(gid):
         if b:
             return False, f"blocking PRs {b}", None
         if not is_h:     # unheld: d46 lease right before the push (one claim ever, slots, quota); refused = PR only
+            if LATE_LEASE and not DRY:
+                # Lead 13:37: PR FIRST, the claim after it (the claim chain cost 8 s on 19564 while rivals opened)
+                PRIO[0] = prio
+                return True, "clear (PR first, lease claim after it)", "LATE"
             lid, why = claim_unheld(gid, prio)
             return True, "clear, " + why, lid
         if PAUSED[0] or time.time() < NO_DESK_UNTIL:
@@ -651,8 +657,24 @@ def main():
                else "race", why)          # a 410 or an earlier claim of this step ends here as a lost race
     log("race check:", why)
     # 3.+4. commit on upstream main, push, PR
+    late = lease == "LATE"
+    if late:
+        lease = None
     LEASE[0] = lease
     url, why2 = submit(ID, lease)
+    if late and url and url != "dry-run":
+        # late lease (Lead 13:37 probe): one claim through deskguard now that the PR is open; on a grant the PR body
+        # gets the Lease line by edit, then the lease is released as for any submitted PR. Refused = PR stays as is.
+        lid, lwhy = claim_unheld(ID, PRIO[0])
+        log("late lease:", lwhy)
+        if lid:
+            body = DESC + f"\n\nLease: {lid}" + FOOTER
+            r = run(["gh", "pr", "edit", url, "--body", body], timeout=60, env=dict(os.environ, GH_TOKEN=PR_TOKEN))
+            log("late lease: Lease line added" if r.returncode == 0 else "late lease: PR edit failed: " + r.stderr.strip()[:150])
+            LEASE[0] = lid
+            why2 += f"; late lease {lid}" + ("" if r.returncode == 0 else " (body edit failed)")
+        else:
+            why2 += "; no late lease (" + lwhy[:80] + ")"
     if url and url != "dry-run":
         release(LEASE[0], "submitted")
     elif LEASE[0]:     # D: failed PR create: keep the lease (recorded on claim/<id>; the retry or PC reuses it, expires 45 min)
