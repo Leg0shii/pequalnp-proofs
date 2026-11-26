@@ -1,0 +1,41 @@
+# DUPCLOSE (Lead 17:55 UTC 26 Nov, team/lead/PAUSE-CAUSE.md): every 20 s, close our own open PRs without a lease whose
+# unit's first PR (toolkit taken list) is another author's lower-numbered PR, before the desk's checker rejects them as
+# second proofs (bursts of those start our pauses). 58-min jobs, cron every 5 min, one job at a time.
+# 3 or more duplicates in one pass -> toolkit ref alert/dupopen-<epoch> "DUP-OPEN n" (relayed to the bus alert channel).
+name: dupclose
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: Longest run in minutes
+        type: string
+        default: '58'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dupclose
+  cancel-in-progress: false
+
+jobs:
+  dupclose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: src
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Close our duplicate PRs every 20 s
+        env:
+          PR_TOKEN: ${{ secrets.PR_TOKEN }}
+          IN_MIN: ${{ inputs.minutes }}
+        run: |
+          [ -n "${PR_TOKEN:-}" ] || { echo "no PR_TOKEN secret: stop"; exit 0; }
+          MIN=${IN_MIN:-58}; case "$MIN" in ''|*[!0-9]*) MIN=58;; esac
+          MINUTES=$MIN W=$GITHUB_WORKSPACE/work python3 -I "$GITHUB_WORKSPACE/src/.github/cloud-pr/dupclose.py"
