@@ -14,6 +14,7 @@ END = time.time() + float(os.environ.get("MINUTES", "58")) * 60
 MIN_AGE = 60
 PACE = float(os.environ.get("PACE_S", "4"))
 G = os.path.join(os.environ.get("W", "/tmp"), "rw.git")
+FORK_URL = os.environ.get("FORK_URL", f"https://github.com/{FORK}.git")   # test: a local bare repo
 first_seen, done = {}, set()
 TRIES = {}      # gid -> (re-pushes, last epoch): a run that ended "waiting" (gaps.json behind desk/status) keeps the
 RETRY_S, MAX_TRIES = 60, 4   # branch; it is re-pushed again after RETRY_S, at most MAX_TRIES times per job
@@ -101,29 +102,70 @@ def repush(gid, sha, f):
     return run(["git", "-C", G, "push", "-q", "-f", url, f"{c}:refs/heads/ready/{gid}"], 180)
 
 
+TAKEN_REF = "refs/heads/status/taken"
+
+
+def taken():
+    """Lead 18:52: the team taken list (toolkit status/taken, about 20 s fresh): {step: author of its first PR}. Read
+    right before every batch push. Stale (over 180 s) or unreadable -> None (then the opener's own checks decide)."""
+    if run(["git", "-C", G, "fetch", "-q", "--depth=1", TK, f"+{TAKEN_REF}:refs/taken"], 60).returncode:
+        return None
+    t = run(["git", "-C", G, "show", "refs/taken:taken.txt"]).stdout.splitlines()
+    try:
+        if not t or time.time() - int(t[0].split()[2]) > 180:
+            return None
+    except (IndexError, ValueError):
+        return None
+    return {l.split()[0]: l.split()[2] for l in t[1:] if len(l.split()) >= 3}
+
+
+def batch_push(items):
+    """Lead 18:52: one fetch of fork main and all the branch commits, one push for the whole batch (was one unit per
+    about 7 s). items: [(gid, sha)]. Units the fresh taken list shows with a PR are dropped (branch deleted) instead.
+    Returns (pushed ids, dropped ids, failed ids)."""
+    url = FORK_URL
+    if run(["git", "-C", G, "fetch", "-q", "--depth=1", "--filter=blob:none", url, "+refs/heads/main:refs/heads/main",
+            *[s for _, s in items]], 180).returncode:
+        return [], [], [g for g, _ in items]
+    tk = taken()
+    refs, pushed, dropped, failed = [], [], [], []
+    idx = os.path.join(os.environ.get("W", "/tmp"), "rw.idx"); env = dict(os.environ, GIT_INDEX_FILE=idx)
+    cenv = dict(os.environ, GIT_AUTHOR_NAME="Leg0shii", GIT_COMMITTER_NAME="Leg0shii",
+                GIT_AUTHOR_EMAIL="46093332+Leg0shii@users.noreply.github.com", GIT_COMMITTER_EMAIL="46093332+Leg0shii@users.noreply.github.com")
+    for gid, sha in items:
+        if tk is not None and gid in tk:
+            refs.append(f":refs/heads/ready/{gid}"); dropped.append(gid)
+            log("DROP", gid, "taken list: first PR by", tk[gid], "(no re-push, branch deleted)")
+            continue
+        fs = [x for x in run(["git", "-C", G, "ls-tree", "-r", "--name-only", sha, "ready/"]).stdout.split() if re.fullmatch(r"ready/[A-Za-z0-9_]+\.lean", x)]
+        if len(fs) != 1:
+            failed.append(gid); log("SKIP", gid, "no single ready/ file"); continue
+        f = fs[0]
+        blob = run(["git", "-C", G, "rev-parse", f"{sha}:{f}"]).stdout.strip()
+        subprocess.run(["git", "-C", G, "read-tree", "main"], env=env)
+        subprocess.run(["git", "-C", G, "update-index", "--add", "--cacheinfo", f"100644,{blob},{f}"], env=env)
+        tree = subprocess.run(["git", "-C", G, "write-tree"], env=env, capture_output=True, text=True).stdout.strip()
+        lf = " lease-first" if "lease-first" in run(["git", "-C", G, "log", "-1", "--format=%B", sha]).stdout.lower() else ""
+        c = subprocess.run(["git", "-C", G, "commit-tree", tree, "-p", "main", "-m", f"ready {gid} (ready-wait: listed{lf})"],
+                           env=cenv, capture_output=True, text=True).stdout.strip()
+        if not c:
+            failed.append(gid); continue
+        refs.append(f"+{c}:refs/heads/ready/{gid}"); pushed.append(gid)
+    for k in range(0, len(refs), 50):
+        r = run(["git", "-C", G, "push", "-q", url, *refs[k:k + 50]], 180)
+        if r.returncode:
+            log("BATCH-PUSH-FAIL", (r.stderr or "").strip()[-150:])
+            bad = {x.rsplit("/", 1)[1] for x in refs[k:k + 50]}
+            failed += [g for g in pushed if g in bad]; pushed = [g for g in pushed if g not in bad]
+    return pushed, dropped, failed
+
+
 run(["git", "init", "-q", "--bare", G])
 n = 0; last_l = 0; ids = set()
 T0 = time.time(); listed_at = {}     # gid -> first time seen listed in this job (ids listed at the start count as old)
-_PZ = [0.0, 0.0]
 
-
-def paused():
-    """Shared deskguard pause (toolkit refs deskpause/<epoch>), read at most every 20 s; unreadable = paused. While it
-    runs there is no re-push at all (a re-push starts a cloud-pr run)."""
-    if time.time() - _PZ[0] > 20:
-        r = run(["git", "ls-remote", TK, "refs/heads/deskpause/*"], 60)
-        if r.returncode:
-            _PZ[:] = [time.time(), time.time() + 60]
-        else:
-            ts = [int(l.rsplit("/", 1)[1]) for l in r.stdout.splitlines() if l.rsplit("/", 1)[-1].isdigit()]
-            _PZ[:] = [time.time(), max(ts or [0])]
-    return time.time() < _PZ[1]
-
-
+# GATEWAY 4 (Lead 16:50): a pause never stops filing, so ready-wait no longer idles on the shared pause refs
 while time.time() < END:
-    if paused():
-        time.sleep(20)
-        continue
     br = branches()
     now = time.time()
     for gid, sha in br.items():
@@ -133,32 +175,26 @@ while time.time() < END:
     ids = ids | signal()
     for g in ids:
         listed_at.setdefault(g, T0 if now - T0 < 15 else now)
-    # once per step per job (a re-push changes the sha, so the step id is the key)
     for g in list(done):      # still there RETRY_S after our re-push = that run waited or failed: allow another
         k, t = TRIES.get(g, (0, 0))
         if g in br and k < MAX_TRIES and now - t >= RETRY_S:
             done.discard(g)
-    todo = [(g, s) for g, s in br.items() if g not in done and g in ids and now - first_seen[(g, s)] >= MIN_AGE]
-    # 13:24 UTC 26 Nov: 19538/44/45 waited behind 4 stale branches (4 s pacing each): newest listing first, and no
-    # pacing while a step listed in the last 2 min is still queued
-    for gid, sha in sorted(todo, key=lambda x: (-listed_at.get(x[0], T0), first_seen[x])):
-        if not re.fullmatch(r"L-[a-z0-9]+(-[a-z0-9]+)*", gid):
-            done.add(gid); TRIES[gid] = (MAX_TRIES, 0); continue
-        f = ready_file(gid, sha)
-        done.add(gid)
-        if not f:
-            TRIES[gid] = (MAX_TRIES, 0)
-            log("SKIP", gid, "no single ready/ file"); continue
-        r = repush(gid, sha, f)
-        n += 1; TRIES[gid] = (TRIES.get(gid, (0, 0))[0] + 1, time.time())
-        log("REPUSH" if r.returncode == 0 else "REPUSH-FAIL", gid, f, (r.stderr or "").strip()[:150])
-        if r.returncode:
-            done.discard(gid)
-        if time.time() - listed_at.get(gid, T0) > 120:
-            time.sleep(PACE)
-        else:
-            time.sleep(0.5)
-        if time.time() >= END:
-            break
+    todo = [(g, s) for g, s in br.items() if g not in done and g in ids and now - first_seen[(g, s)] >= MIN_AGE
+            and re.fullmatch(r"L-[a-z0-9]+(-[a-z0-9]+)*", g)]
+    todo.sort(key=lambda x: (-listed_at.get(x[0], T0), first_seen[x]))
+    if todo:
+        t1 = time.time()
+        pushed, dropped, failed = batch_push(todo[:100])
+        for g in pushed:
+            done.add(g); TRIES[g] = (TRIES.get(g, (0, 0))[0] + 1, time.time())
+        for g in dropped:
+            done.add(g); TRIES[g] = (MAX_TRIES, 0)
+        for g in failed:          # retried after RETRY_S while the branch is still there, at most MAX_TRIES times
+            done.add(g); TRIES[g] = (TRIES.get(g, (0, 0))[0] + 1, time.time())
+        n += len(pushed)
+        log("BATCH", len(pushed), "re-pushed,", len(dropped), "dropped (taken),", len(failed), "failed in", f"{time.time() - t1:.1f}s:",
+            ",".join(pushed[:10]))
+    if time.time() >= END:
+        break
     time.sleep(5)
 log("end:", n, "re-pushes;", len(br), "ready/ branches;", len([g for g in br if g in ids]), "listed")
