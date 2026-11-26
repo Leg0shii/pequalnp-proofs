@@ -199,7 +199,16 @@ def race_check(step_id):
 _DESK_T = [0.0]
 
 
+DESK_MODEL = os.environ.get("DESK_MODEL", "unknown")     # owner 15:40:27 UTC "Yes to both": &model= on every desk call
+
+
+def with_model(path):
+    """join.txt "Always send &model= with the model you are and its version, or unknown": every handle call gets it."""
+    return path if re.search(r"[?&]model=", path) else path + ("&" if "?" in path else "?") + "model=" + DESK_MODEL
+
+
 def desk(path, post=False):
+    path = with_model(path)
     time.sleep(max(0, _DESK_T[0] + 3 - time.time()))      # the desk asks for one request every few seconds
     r = run(["curl", "-sS", "--max-time", "30", "-w", "\n%{http_code}"] + (["-X", "POST"] if post else []) + [DESK + path], timeout=40)
     _DESK_T[0] = time.time()
