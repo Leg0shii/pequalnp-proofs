@@ -158,11 +158,74 @@ def slot_free(ref):
         except Exception: pass
 
 
+RATE_DEFAULT = int(os.environ.get("DESKGUARD_RATE", "4"))     # team-wide claims per minute (owner pick 09:48 UTC 26 Nov)
+
+
+def rate():
+    """Team-wide claim rate (claims per minute): the newest toolkit ref leaserate/<epoch>_<n> wins (n = 0 stops all
+    claims); none = RATE_DEFAULT. Fails closed to RATE_DEFAULT."""
+    try:
+        r = _git("ls-remote", REMOTE, "refs/heads/leaserate/*")
+        best = None
+        for l in r.stdout.split("\n"):
+            m = re.search(r"/leaserate/(\d+)_(\d+)$", l)
+            if m and (best is None or int(m.group(1)) > best[0]):
+                best = (int(m.group(1)), int(m.group(2)))
+        return best[1] if best else RATE_DEFAULT
+    except Exception:
+        return RATE_DEFAULT
+
+
+def rate_take(owner, wait=45, prio=2):
+    """One team-wide claim token (cloud opener, PC, backup watcher): tokens are refs ratetok/<minute>/<k>, k < rate(),
+    created atomically, so at most rate() claims start in any wall-clock minute across all machines. Waits up to
+    `wait` s (no desk call meanwhile), then False = PR without a lease. prio 2 (high weight, no rival PR) tries at once
+    in each minute, prio 1 after 3 s, prio 0 after 6 s, so the better steps get a minute's tokens first.
+    Best effort cleanup: deletes token refs older than 10 min."""
+    t0 = time.time(); R = rate()
+    if R <= 0:
+        return False
+    while True:
+        now = time.time(); minute = int(now // 60); into = now - minute * 60
+        delay = {2: 0, 1: 3, 0: 6}.get(prio, 6)
+        if into < delay:
+            time.sleep(delay - into)
+        for k in range(R):
+            ref = f"refs/heads/ratetok/{minute}/{k}"
+            try:
+                if _git("push", f"--force-with-lease={ref}:", REMOTE, f"{_marker('rate ' + owner)}:{ref}").returncode == 0:
+                    _rate_clean(minute)
+                    return True
+            except Exception:
+                return False
+        nxt = (minute + 1) * 60
+        if nxt - t0 > wait:
+            return False
+        time.sleep(max(0.0, nxt - time.time()))
+
+
+def _rate_clean(minute):
+    try:
+        r = _git("ls-remote", REMOTE, "refs/heads/ratetok/*")
+        old = [l.split()[1] for l in r.stdout.split("\n") if l.strip()
+               and re.search(r"/ratetok/(\d+)/", l) and int(re.search(r"/ratetok/(\d+)/", l).group(1)) < minute - 10]
+        if old:
+            _git("push", "-q", REMOTE, *[":" + x for x in old[:50]])
+    except Exception:
+        pass
+
+
 def check_answer(d, what="claim"):
     """Fail closed (A): a desk answer that is a pause/429, or a claim with no lease that is not a known harmless
     refusal, or a non-200 release/beat, sets the shared pause for 15 min. Returns True if the answer was fine."""
-    txt = json.dumps(d) if not isinstance(d, str) else d
     code = str(d.get("_http", "")) if isinstance(d, dict) else ""
+    if isinstance(d, dict) and d.get("lease"):
+        # a granted lease: only non-empty top-level fields other than the step itself can carry a warning
+        # (a good answer with "warnings": [] or a statement text mentioning "repeat" must not pause the team)
+        txt = json.dumps({k: v for k, v in d.items() if k not in ("gap", "statement", "title", "lease", "_http")
+                          and v not in (None, "", [], {}, 0, False)})
+    else:
+        txt = json.dumps(d) if not isinstance(d, str) else d
     bad = code == "429" or bool(re.search(r"paus|again and again|repeat|same proof|warn|abuse|slow down", txt, re.I))
     if not bad and what == "claim":
         le = d.get("lease") if isinstance(d, dict) else None

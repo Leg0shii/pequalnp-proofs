@@ -330,29 +330,47 @@ def take_quota(gid):
     return False
 
 
-def claim_unheld(gid):
+RATE_WAIT_S = 45
+
+
+def rate_prio(backup, points):
+    """Lead 09:50 queue order for the team-wide claim tokens: no rival PR and desk price >= 100 first (2), other fresh
+    steps (1), backups onto an invalid rival PR last (0)"""
+    return 0 if backup else (2 if (points or 0) >= 100 else 1)
+
+
+def claim_unheld(gid, prio=1):
     """d46: lease for an unheld step right before the push. Any refusal = PR without a lease (an unheld step still
     gets its PR); a pause answer stops all desk calls (claim -> set_pause)."""
     if not LEASES_ON or PAUSED[0] or DRY or not PR_TOKEN or time.time() < NO_DESK_UNTIL:
         return None, "no lease (desk off or paused)"
     if not take_slot(gid):
         return None, f"no lease: {LEASE_MAX} lease slots busy"
-    if not take_quota(gid):
-        free_slot()
-        return None, "no lease: rollout quota used"
-    lid, why = claim(gid)
+    lid, why = claim(gid, prio)
     if not lid:
         free_slot()
     return lid, why
 
 
-def claim(gid):
+def claim(gid, prio=1):
     """No desk request at all once the desk said the handle is paused: every request while paused extends the pause.
-    One claim per step ever (claim_lock); a 410 (proved first) is final."""
+    One claim per step ever (claim_lock); a 410 (proved first) is final. Order: a lease recorded on claim/<gid> is
+    reused (no token, no desk call); else one team-wide rate token (toolkit ref leaserate/<epoch>_<n>, PC and backup
+    watcher share it), the rollout quota, then the one claim lock. No token or quota = 'no lease:' (PR without one)."""
     if PAUSED[0]:
         return None, "claim skipped: handle paused by the desk"
     if time.time() < NO_DESK_UNTIL:
         return None, "claim skipped: desk off until 07:00 UTC (Lead desk policy; held step skipped, paused)"
+    if DRY or not PR_TOKEN:
+        return None, "claim skipped: dry run"
+    old = dg().lease_of(gid)
+    if old:
+        return old, "reused the lease recorded on claim/" + gid
+    if not dg().rate_take(f"cloud {gid}", wait=RATE_WAIT_S, prio=prio):
+        log("rate cap: no team-wide claim token within", RATE_WAIT_S, "s (rate", dg().rate(), "/min)")
+        return None, f"no lease: rate cap ({dg().rate()}/min team-wide) reached"
+    if not take_quota(gid):
+        return None, "no lease: rollout quota used"
     if not claim_lock(gid):
         old = None if DRY or not PR_TOKEN else dg().lease_of(gid)
         if old:      # D: our own earlier claim (retry or the other opener): reuse its lease, never claim twice
@@ -381,8 +399,8 @@ def claim(gid):
     return str(lid), "claimed" + (" (race)" if isinstance(le, dict) and (le.get("terms") or {}).get("race") else "")
 
 
-def claim_retry(gid):
-    return claim(gid)            # one claim per step, ever: no retries (the desk pauses handles that repeat)
+def claim_retry(gid, prio=1):
+    return claim(gid, prio)            # one claim per step, ever: no retries (the desk pauses handles that repeat)
 
 
 def release(lid, reason):
@@ -422,7 +440,9 @@ def race_ok(gid):
         if g.get("kind") == "value":            # value steps (lane atlas) are not desk steps
             b = race_check(gid)
             return (not b), (f"blocking PRs {b}" if b else "clear"), None
-        held = {x["id"]: x.get("held", 0) for x in curl_json(STATUS, 60)["gaps"]}
+        sg = curl_json(STATUS, 60)["gaps"]
+        held = {x["id"]: x.get("held", 0) for x in sg}
+        prio = rate_prio(bool(pr_list(g)), next((x.get("points") for x in sg if x["id"] == gid), 0))
         if gid not in held:
             return False, "not on the desk", None
         is_h = held[gid] != 0
@@ -434,7 +454,7 @@ def race_ok(gid):
         if b:
             return False, f"blocking PRs {b}", None
         if not is_h:     # unheld: d46 lease right before the push (one claim ever, slots, quota); refused = PR only
-            lid, why = claim_unheld(gid)
+            lid, why = claim_unheld(gid, prio)
             return True, "clear, " + why, lid
         if PAUSED[0] or time.time() < NO_DESK_UNTIL:
             # Lead 20:43: desk off or paused = no claim and no error: open the PR without a lease (as the PC does)
@@ -443,12 +463,11 @@ def race_ok(gid):
             return True, "clear (dry run: held, no claim)", None
         if not take_slot(gid):
             return True, f"clear (held, {LEASE_MAX} lease slots busy: PR without a lease)", None
-        if not take_quota(gid):
-            free_slot()
-            return True, "clear (held, rollout quota used: PR without a lease)", None
-        lid, why = claim_retry(gid)      # held by someone else: our have=proof lease is required before the push
+        lid, why = claim_retry(gid, prio)   # held by someone else: our have=proof lease is required before the push
         if not lid:
             free_slot()
+            if why.startswith("no lease:"):    # rate cap or rollout quota: PR without a lease (Lead 09:50)
+                return True, f"clear (held, {why[10:]}: PR without a lease)", None
             return False, why, None
         return True, "clear, " + why, lid
     except Exception as e:
