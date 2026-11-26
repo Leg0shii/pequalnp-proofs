@@ -18,7 +18,7 @@ Use:  from deskguard import acquire, pause, note_call
 CLI:  deskguard.py acquire L-meta-N | pause EPOCH | status        (exit 0 = allowed)
 Env:  DESKGUARD_REPO = path of a clone whose `origin` is the shared remote (default ~/farm/tk or $WATCH_TK),
       DESKGUARD_GAP (5), DESKGUARD_BUDGET (20), DESKGUARD_HOME (~/.deskguard)."""
-import os, sys, time, json, subprocess, socket
+import os, re, sys, time, json, subprocess, socket
 
 REPO = os.environ.get("DESKGUARD_REPO") or os.environ.get("WATCH_TK") or os.path.expanduser("~/farm/tk")
 REMOTE = os.environ.get("DESKGUARD_REMOTE", "origin")
@@ -89,6 +89,89 @@ def acquire(step, why=None):
         return True
     except Exception as e:
         return no("guard error (fail closed): " + repr(e)[:120])
+
+
+# ---- 2026-11-26 audit (owner: never be paused again; Lead review of the cloud lease patch) ----
+SLOTS = int(os.environ.get("DESKGUARD_SLOTS", "4"))       # team-wide max held leases (handle cap is 5)
+SLOT_STALE_S = 600
+HARMLESS = re.compile(r"proved first|already proved|held by another|another handle|at most one handle|cap reached|"
+                      r"too many held|limit of \d+ held", re.I)
+
+
+def _ref_sha(ref):
+    r = _git("ls-remote", REMOTE, ref)
+    if r.returncode != 0: raise RuntimeError("ls-remote failed: " + r.stderr.strip()[:120])
+    return (r.stdout.split() or [None])[0]
+
+
+def _ref_msg(ref):
+    r = _git("fetch", "-q", REMOTE, f"+{ref}:refs/dgtmp/x")
+    if r.returncode != 0: return None
+    return _git("log", "-1", "--format=%ct %B", "refs/dgtmp/x").stdout.strip()
+
+
+def record_lease(step, lid):
+    """Write the lease id into claim/<step> (D): a retry or the fallback opener reuses it, never a second claim."""
+    ref = f"refs/heads/claim/{step}"
+    try:
+        sha = _ref_sha(ref)
+        if not sha: return False
+        r = _git("push", f"--force-with-lease={ref}:{sha}", REMOTE, f"{_marker('claim ' + step + ' lease ' + str(lid))}:{ref}")
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def lease_of(step):
+    """The lease id recorded on claim/<step> (None if none was recorded)."""
+    m = _ref_msg(f"refs/heads/claim/{step}")
+    mm = re.search(r" lease (\S+)", m or "")
+    return mm.group(1) if mm else None
+
+
+def slot_take(owner, wait=45):
+    """One of SLOTS team-wide lease slots (refs/heads/leaseslot/<k>), waiting up to `wait` s (no desk call while
+    waiting); a slot older than SLOT_STALE_S is taken over. Returns the ref or None (= PR without a lease)."""
+    t0 = time.time()
+    while True:
+        for k in range(SLOTS):
+            ref = f"refs/heads/leaseslot/{k}"
+            try:
+                if _git("push", f"--force-with-lease={ref}:", REMOTE, f"{_marker('slot ' + owner)}:{ref}").returncode == 0:
+                    return ref
+            except Exception:
+                return None
+        for k in range(SLOTS):
+            ref = f"refs/heads/leaseslot/{k}"
+            m = _ref_msg(ref)
+            if m and m.split()[0].isdigit() and time.time() - int(m.split()[0]) > SLOT_STALE_S:
+                sha = _git("rev-parse", "refs/dgtmp/x").stdout.strip()
+                if _git("push", f"--force-with-lease={ref}:{sha}", REMOTE, f"{_marker('slot ' + owner)}:{ref}").returncode == 0:
+                    return ref
+        if time.time() - t0 >= wait: return None
+        time.sleep(5)
+
+
+def slot_free(ref):
+    if ref:
+        try: _git("push", "-q", REMOTE, f":{ref}")
+        except Exception: pass
+
+
+def check_answer(d, what="claim"):
+    """Fail closed (A): a desk answer that is a pause/429, or a claim with no lease that is not a known harmless
+    refusal, or a non-200 release/beat, sets the shared pause for 15 min. Returns True if the answer was fine."""
+    txt = json.dumps(d) if not isinstance(d, str) else d
+    code = str(d.get("_http", "")) if isinstance(d, dict) else ""
+    bad = code == "429" or bool(re.search(r"paus|again and again|repeat|same proof|warn|abuse|slow down", txt, re.I))
+    if not bad and what == "claim":
+        le = d.get("lease") if isinstance(d, dict) else None
+        bad = not le and code != "410" and not HARMLESS.search(txt)
+    if not bad and what in ("release", "beat"):
+        bad = code not in ("", "200", "410")
+    if bad:
+        pause(time.time() + 900)
+    return not bad
 
 
 if __name__ == "__main__":

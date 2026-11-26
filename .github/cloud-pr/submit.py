@@ -210,7 +210,8 @@ def desk(path, post=False):
 PAUSED = [False]
 NO_DESK_UNTIL = 0               # owner 08:12 UTC 26 Nov "Leases on: cloud and PC" (Lead d46): the shared deskguard pause is the switch
 LEASES_ON = True                # d46: claim EVERY step we open (held or unheld), Lease line in the body, release when submitted
-LEASE_MAX = 3                   # at most 3 of the handle's 5 held gaps at once (leaseslot/<k> refs on the toolkit)
+LEASE_MAX = 4                   # team-wide (PC, cloud, backup): deskguard.SLOTS leaseslot/<k> refs, 4 of the handle's 5
+SLOT_WAIT_S = 45                # slots busy: wait up to 45 s (no desk call), then PR without a lease
 LEASE_QUOTA = 1                 # rollout: total leased claims allowed (leasequota/<k> refs): 1, then 6, then 0 = no cap
 SLOT_STALE_S = 600              # a lease slot older than this belongs to a dead run: taken over
 PAUSE_MIN_S = 900               # 4b.5: on a pause or repetition answer, no desk call for at least 15 min
@@ -290,38 +291,20 @@ def _ref_create(ref, msg):
     return r.returncode == 0
 
 
-def _ref_age(ref):
-    g = dg().REPO
-    r = run(["git", "-C", g, "fetch", "-q", "origin", f"+{ref}:refs/tmp/age"], timeout=60)
-    if r.returncode:
-        return None
-    t = run(["git", "-C", g, "log", "-1", "--format=%ct", "refs/tmp/age"]).stdout.strip()
-    return time.time() - int(t) if t.isdigit() else None
-
-
 SLOT = [None]
 
 
 def take_slot(gid):
-    """one of LEASE_MAX lease slots (refs/heads/leaseslot/<k>); a slot older than SLOT_STALE_S is taken over"""
-    for k in range(LEASE_MAX):
-        ref = f"refs/heads/leaseslot/{k}"
-        if _ref_create(ref, f"slot {gid}"):
-            SLOT[0] = ref; return True
-    for k in range(LEASE_MAX):
-        ref = f"refs/heads/leaseslot/{k}"; a = _ref_age(ref)
-        if a is not None and a > SLOT_STALE_S:
-            g = dg().REPO; sha = run(["git", "-C", g, "rev-parse", "refs/tmp/age"]).stdout.strip()
-            r = run(["git", "-C", g, "push", f"--force-with-lease={ref}:{sha}", "origin", f"{dg()._marker('slot ' + gid)}:{ref}"], timeout=60)
-            if r.returncode == 0:
-                log("took over stale lease slot", ref, int(a), "s"); SLOT[0] = ref; return True
-    return False
+    """one of the team-wide lease slots (deskguard.slot_take: PC and backup watcher share them), waiting up to 45 s"""
+    dg().SLOTS = LEASE_MAX
+    SLOT[0] = dg().slot_take(f"cloud {gid}", wait=SLOT_WAIT_S)
+    log("lease slot", SLOT[0] or f"none free after {SLOT_WAIT_S} s: PR without a lease")
+    return SLOT[0] is not None
 
 
 def free_slot():
     if SLOT[0]:
-        r = run(["git", "-C", dg().REPO, "push", "-q", "origin", f":{SLOT[0]}"], timeout=60)
-        log("freed", SLOT[0], "ok" if r.returncode == 0 else r.stderr.strip()[:100]); SLOT[0] = None
+        dg().slot_free(SLOT[0]); log("freed", SLOT[0]); SLOT[0] = None
 
 
 def take_quota(gid):
@@ -357,8 +340,15 @@ def claim(gid):
     if time.time() < NO_DESK_UNTIL:
         return None, "claim skipped: desk off until 07:00 UTC (Lead desk policy; held step skipped, paused)"
     if not claim_lock(gid):
+        old = None if DRY or not PR_TOKEN else dg().lease_of(gid)
+        if old:      # D: our own earlier claim (retry or the other opener): reuse its lease, never claim twice
+            return old, "reused the lease recorded on claim/" + gid
         return None, "claim skipped: this step was claimed once already"
     d = desk(f"next?handle={HANDLE}&gap={gid}&have=proof&another=1")
+    if not dg().check_answer(d, "claim"):      # A: pause, warning or an unknown refusal: shared pause 15 min + alert
+        PAUSED[0] = True
+        set_pause(int(time.time()) + PAUSE_MIN_S, "fail closed on claim answer: " + json.dumps(d))
+        return None, "claim answer not understood, desk calls stopped 15 min: " + json.dumps(d)[:160]
     if d.get("_http") == "410":
         return None, "gone (410): proved first " + json.dumps(d)[:120]
     if d.get("_http") == "429" or PAUSE_RE.search(json.dumps(d)):
@@ -373,6 +363,7 @@ def claim(gid):
     lid = le.get("id") if isinstance(le, dict) else le
     if not lid or (isinstance(gp, dict) and gp.get("id") not in (None, gid)):
         return None, "claim refused: " + json.dumps(d)[:200]
+    dg().record_lease(gid, lid)
     return str(lid), "claimed" + (" (race)" if isinstance(le, dict) and (le.get("terms") or {}).get("race") else "")
 
 
@@ -382,7 +373,11 @@ def claim_retry(gid):
 
 def release(lid, reason):
     if lid and not DRY:
-        log("desk release", reason, json.dumps(desk(f"release?lease={lid}&reason={reason}", post=True))[:120])
+        d = desk(f"release?lease={lid}&reason={reason}", post=True)
+        log("desk release", reason, json.dumps(d)[:120])
+        if not dg().check_answer(d, "release"):   # A: non-200 release = shared pause 15 min
+            PAUSED[0] = True
+            set_pause(int(time.time()) + PAUSE_MIN_S, "fail closed on release answer: " + json.dumps(d))
 
 
 def pr_list(g):
@@ -605,7 +600,10 @@ def main():
     # 3.+4. commit on upstream main, push, PR
     LEASE[0] = lease
     url, why2 = submit(ID, lease)
-    release(LEASE[0], "submitted" if url else "other")
+    if url and url != "dry-run":
+        release(LEASE[0], "submitted")
+    elif LEASE[0]:     # D: failed PR create: keep the lease (recorded on claim/<id>; the retry or PC reuses it, expires 45 min)
+        log("PR not opened: lease", LEASE[0], "kept for the retry")
     free_slot()
     if url == "dry-run":
         finish("dry", why2)
