@@ -239,9 +239,9 @@ def rej_burst():
         prs = []
         for x in (json.loads(r.stdout or "[]") if r.returncode == 0 else []):
             if x.get("merged_at") and (x.get("user") or {}).get("login") != HANDLE:
-                rw = _row(x)                          # v2.1 (Lead 19:44): a unit settled by another author's merge
-                if rw["gid"]:
-                    MERGED.setdefault(rw["gid"], (rw["n"], rw["author"]))
+                t = (x.get("title") or "").strip()     # v2.1 (Lead 19:44): a unit settled by another author's merge;
+                if re.fullmatch(r"L-[a-z0-9]+(-[a-z0-9]+)*-\d+", t):   # title exactly a unit id (not R-L-meta-582-317)
+                    MERGED.setdefault(t, (x["number"], (x.get("user") or {}).get("login")))
                 continue
             if (x.get("user") or {}).get("login") != HANDLE or x.get("merged_at") or not x.get("closed_at"):
                 continue
@@ -338,6 +338,18 @@ def one_pass():
     return len(prs), len(dups), tk is not None
 
 
+if __name__ == "__main__" and sys.argv[1:2] == ["selftest-merged"]:
+    # Lead 19:46 fixture: a merged reduction PR titled "R-L-meta-1-2 ..." must NOT mark L-meta-1 settled; a merged PR
+    # titled exactly "L-meta-1" must
+    m = lambda t: {"number": 9, "title": t, "user": {"login": "riv"}, "merged_at": "2026-11-26T19:40:00Z",
+                   "closed_at": "2026-11-26T19:40:00Z", "body": "", "head": {"ref": "x"}}
+    fx = [m("R-L-meta-1-2 reduction")]
+    real = sh
+    sh = lambda *a, **k: subprocess.CompletedProcess(a, 0, json.dumps(fx), "") if "state=closed" in str(a) else real(*a, **k)
+    REJ["t"] = 0; rej_burst(); a = "L-meta-1" not in MERGED
+    fx[:] = [m("L-meta-1")]; REJ["t"] = 0; rej_burst(); b = "L-meta-1" in MERGED
+    print("MERGED SELFTEST", "OK" if a and b else "FAIL", a, b)
+    sys.exit(0 if a and b else 1)
 if __name__ == "__main__" and sys.argv[1:2] == ["measure"]:
     # Lead 19:30 item 2: one full sweep, print the split and what rule v2 would close; closes nothing
     sp, close2, exposed = exposure(open_prs())
