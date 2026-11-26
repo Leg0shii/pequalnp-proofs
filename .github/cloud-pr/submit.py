@@ -49,6 +49,12 @@ NO_LEASE_NO_PR = os.environ.get("NO_LEASE_NO_PR", "0") == "1"
 UNLEASED_TEST = os.environ.get("UNLEASED_TEST", "0") == "1"
 if UNLEASED_TEST:
     NO_LEASE_NO_PR = False
+# Lead 21:59 UTC 26 Nov FILE_FIRST: units whose mirror template contains this word (kind search: tl6c-not-search,
+# rect46-andor-search, ...) skip the claim and take the bare path (rival_now and the mirror holder check stay).
+# Empty or 0 = off.
+FILE_FIRST = os.environ.get("FILE_FIRST", "search").strip()
+if FILE_FIRST == "0":
+    FILE_FIRST = ""
 LATE_LEASE = False     # GATEWAY v1: no late lease (claims only for finished proofs, before the PR)   # unheld: open the PR, then claim
 # Lead 14:36: LEASE-FIRST (the ready commit message holds the word lease-first): claim BEFORE any PR (a claim after our
 # own PR paid 31 with race: true instead of 110); a grant opens the PR with the Lease line, a refusal or a held step
@@ -584,11 +590,18 @@ def race_ok(gid):
         old = dg().lease_of(gid)
         if old:
             return True, "clear (our recorded lease reused)", old
-        global SLOT_WAIT_S
-        SLOT_WAIT_S = LF_WAIT_S
-        lid, why = claim_unheld(gid, 2)
-        if lid:
-            return True, "clear, " + why, lid
+        tpl = str((g.get("faithful_by_template") or {}).get("template") or "")
+        if FILE_FIRST and FILE_FIRST in tpl:
+            # Lead 21:59 FILE_FIRST: no claim (open-gate claims on a fresh slice all came back held = no PR); the bare
+            # path below decides: PR without a lease when no rival PR and no holder in the mirror. Late lease later.
+            why = f"no lease: file first ({tpl})"
+            log("gate:", gid, "skipped: file first", tpl)
+        else:
+            global SLOT_WAIT_S
+            SLOT_WAIT_S = LF_WAIT_S
+            lid, why = claim_unheld(gid, 2)
+            if lid:
+                return True, "clear, " + why, lid
         case = lf_case(why)
         if case == "bare" and rival_open(gid):
             case = "rival PR"
