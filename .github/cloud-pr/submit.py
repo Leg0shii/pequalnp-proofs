@@ -91,11 +91,13 @@ def step_file_re(step_id):
 
 
 def pr_accepted(number):
-    """Last intake verdict on the PR is ACCEPTED. Any doubt = True (it blocks)."""
+    """True = this rival PR holds the step. Owner 2026-11-25 19:35 (BACKUP SUBMIT, replaces 17:04): no blind backup PRs,
+    so a rival holds unless the intake bot's LAST verdict marks it invalid (REJECTED / REFUSED / FAULT); pending and
+    accepted rivals both hold (oversized ones are released by pr_oversized). Any doubt = True (it blocks)."""
     try:
         out = gh(["pr", "view", str(number), "--repo", UP, "--json", "comments", "--jq",
                   "[.comments[].body | select(test(\"ACCEPTED|REJECTED|REFUSED|FAULT\"))] | last // \"\""]).stdout
-        return "ACCEPTED" in out
+        return not re.search(r"REJECTED|REFUSED|FAULT", out)
     except Exception:
         return True
 
