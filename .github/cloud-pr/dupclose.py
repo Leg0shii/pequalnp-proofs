@@ -102,6 +102,33 @@ def open_prs():
 
 UNIT_RX = re.compile(r"L-[a-z0-9]+(-[a-z0-9]+)*-\d+")
 MFILL = {"n": 0}
+# Lead 22:55: a unit id as a whole token in a title ("Prove L-meta-24990" yes; "R-L-meta-582-317 ..." no)
+TOKEN_RX = re.compile(r"(?<![A-Za-z0-9_-])(L-[a-z0-9]+(?:-[a-z0-9]+)*-\d+)(?![A-Za-z0-9_-])")
+
+
+def title_unit(t):
+    """the one unit id a title names as a whole token, else None (none or several)."""
+    u = set(TOKEN_RX.findall(t or ""))
+    return u.pop() if len(u) == 1 else None
+
+
+MAINF = {"t": 0.0}
+
+
+def main_settled():
+    """Lead 22:55: units whose file is on upstream main (shallow git fetch every 300 s, no API) are settled."""
+    if time.time() - MAINF["t"] < 300 or os.environ.get("FIXTURE_MERGED"):
+        return
+    MAINF["t"] = time.time()
+    g = os.path.join(W, "up.git")
+    if not os.path.isdir(g):
+        sh("git", "init", "-q", "--bare", g)
+    if sh("git", "-C", g, "fetch", "-q", "--depth=1", f"https://github.com/{UP}", "+main:refs/heads/main", timeout=300).returncode:
+        log("upstream main fetch failed"); return
+    for f in sh("git", "-C", g, "ls-tree", "--name-only", "main", "lean/PEqualNP/Outside/").stdout.split():
+        u = os.path.basename(f)[:-5].replace("_", "-") if f.endswith(".lean") else ""
+        if UNIT_RX.fullmatch(u):
+            MERGED.setdefault(u, (0, "upstream-main"))
 
 
 def merged_fill():
@@ -119,8 +146,8 @@ def merged_fill():
                 return
             pg = json.loads(r.stdout or "[]")
         for x in pg:
-            t = (x.get("title") or "").strip()
-            if x.get("merged_at") and (x.get("user") or {}).get("login") != HANDLE and UNIT_RX.fullmatch(t):
+            t = title_unit(x.get("title"))
+            if x.get("merged_at") and (x.get("user") or {}).get("login") != HANDLE and t:
                 MERGED.setdefault(t, (x["number"], (x.get("user") or {}).get("login")))
         if len(pg) < 100:
             return
@@ -268,8 +295,8 @@ def rej_burst():
         prs = []
         for x in (json.loads(r.stdout or "[]") if r.returncode == 0 else []):
             if x.get("merged_at") and (x.get("user") or {}).get("login") != HANDLE:
-                t = (x.get("title") or "").strip()     # v2.1 (Lead 19:44): a unit settled by another author's merge;
-                if re.fullmatch(r"L-[a-z0-9]+(-[a-z0-9]+)*-\d+", t):   # title exactly a unit id (not R-L-meta-582-317)
+                t = title_unit(x.get("title"))         # v2.1 + Lead 22:55: unit id as a whole token in the title
+                if t:                                  # (not R-L-meta-582-317)
                     MERGED.setdefault(t, (x["number"], (x.get("user") or {}).get("login")))
                 continue
             if (x.get("user") or {}).get("login") != HANDLE or x.get("merged_at") or not x.get("closed_at"):
@@ -364,9 +391,13 @@ def one_pass():
         except Exception as e:
             log("ours-unleased feed failed:", repr(e)[:120])
         merged_fill()                                # Lead 19:58: the MERGED close runs ALWAYS (not behind v2_on)
+        try:
+            main_settled()
+        except Exception as e:
+            log("main settled check failed:", repr(e)[:120])
         if True:                                     # v2.1: unit already settled by another author's merged PR
             for p in allp.values():
-                if (p["author"] == HANDLE and p["gid"] in MERGED and not p["lease"] and p["n"] not in CLOSED
+                if (p["author"] == HANDLE and p["gid"] in MERGED and p["n"] not in CLOSED      # Lead 22:55: leased too
                         and age({"createdAt": p["createdAt"]}) >= 20):
                     dups.append((p["n"], p["gid"], int(age({"createdAt": p["createdAt"]}))))
                     log("MERGED-RIVAL", p["n"], p["gid"], "settled by", *MERGED[p["gid"]])
@@ -418,8 +449,10 @@ if __name__ == "__main__" and sys.argv[1:2] == ["selftest-merged"]:
     sh = lambda *a, **k: subprocess.CompletedProcess(a, 0, json.dumps(fx), "") if "state=closed" in str(a) else real(*a, **k)
     REJ["t"] = 0; rej_burst(); a = "L-meta-1" not in MERGED
     fx[:] = [m("L-meta-1")]; REJ["t"] = 0; rej_burst(); b = "L-meta-1" in MERGED
-    print("MERGED SELFTEST", "OK" if a and b else "FAIL", a, b)
-    sys.exit(0 if a and b else 1)
+    MERGED.clear(); fx[:] = [m("Prove L-meta-24990")]; REJ["t"] = 0; rej_burst(); c = "L-meta-24990" in MERGED
+    MERGED.clear(); fx[:] = [m("L-meta-1 and L-meta-2")]; REJ["t"] = 0; rej_burst(); d = not MERGED
+    print("MERGED SELFTEST", "OK" if a and b and c and d else "FAIL", a, b, c, d)
+    sys.exit(0 if a and b and c and d else 1)
 if __name__ == "__main__" and sys.argv[1:2] == ["measure"]:
     # Lead 19:30 item 2: one full sweep, print the split and what rule v2 would close; closes nothing
     sp, close2, exposed = exposure(open_prs())
