@@ -19,6 +19,7 @@ DRY = os.environ.get("DRY", "0") == "1"
 END = time.time() + float(os.environ.get("MINUTES", "58")) * 60
 W = os.environ.get("W") or tempfile.mkdtemp()
 CLOSED = set()
+FIRST = []
 REJ = {"t": 0.0, "alerted": 0.0}
 REJ_EVERY, REJ_WIN, REJ_MIN = 60, 600, 3      # Lead 18:42: REJ-BURST n at 3 or more in 10 min, once per 10 min
 
@@ -102,6 +103,26 @@ def alert_ref(msg, kind):
     return sh("git", *auth(), "-C", g, "push", "-q", TK, f"{c}:refs/heads/alert/{kind}-{int(time.time())}").returncode == 0
 
 
+HB = {"t": 0.0}
+
+
+def heartbeat(n, d, fresh):
+    """Lead 18:45: liveness. Force-push toolkit ref status/dupclose every 30 s; message
+    `dupclose <epoch> open=N dups=D closed=C taken=fresh|stale run=<id>`. The infra box alerts DUPCLOSE-DEAD when the
+    newest one is older than 2 min and dispatches the workflow once."""
+    if DRY or time.time() - HB["t"] < 30:
+        return
+    HB["t"] = time.time()
+    g = os.path.join(W, "taken.git")
+    tree = subprocess.run(["git", "-C", g, "mktree"], input="", capture_output=True, text=True).stdout.strip()
+    env = dict(os.environ, GIT_AUTHOR_NAME="dupclose", GIT_AUTHOR_EMAIL="dupclose@localhost",
+               GIT_COMMITTER_NAME="dupclose", GIT_COMMITTER_EMAIL="dupclose@localhost")
+    msg = (f"dupclose {int(time.time())} open={n} dups={d} closed={len(CLOSED)} taken={'fresh' if fresh else 'stale'} "
+           f"run={os.environ.get('GITHUB_RUN_ID', '-')}")
+    c = subprocess.run(["git", "-C", g, "commit-tree", tree, "-m", msg], capture_output=True, text=True, env=env).stdout.strip()
+    sh("git", *auth(), "-C", g, "push", "-q", "-f", TK, f"{c}:refs/heads/status/dupclose", timeout=60)
+
+
 def rej_burst():
     """Lead 18:42 (PAUSE-CAUSE.md addendum 18:40): our PRs closed UNMERGED in the last 10 min whose comments carry the
     checker text 'proved first'. 3 or more -> REJ-BURST n (alert ref, relayed to the bus), once per 10 min. GitHub
@@ -172,7 +193,9 @@ if __name__ == "__main__":
     while True:
         try:
             n, d, fresh = one_pass()
-            if d or once:
+            heartbeat(n, d, fresh)
+            if d or once or not FIRST:
+                FIRST.append(1)
                 log("pass:", n, "open PRs of ours,", d, "duplicates", "(taken list fresh)" if fresh else "(taken list stale: file search)")
         except Exception as e:
             log("error", repr(e)[:160])
