@@ -55,9 +55,10 @@ def note_call():
 
 def paused_until():
     """Newest shared pause epoch (0 if none). Raises on git failure: callers fail closed."""
-    r = _git("ls-remote", REMOTE, "refs/heads/deskpause/*")
+    r = _git("ls-remote", REMOTE, "refs/heads/deskpause/*", "refs/heads/deskstop/*")   # deskstop = STOP DRILL test pause
     if r.returncode != 0: raise RuntimeError("ls-remote failed: " + r.stderr.strip()[:120])
-    ep = [float(l.rsplit("/", 1)[1]) for l in r.stdout.split("\n") if "/deskpause/" in l and l.rsplit("/", 1)[1].replace(".", "").isdigit()]
+    ep = [float(l.rsplit("/", 1)[1]) for l in r.stdout.split("\n") if ("/deskpause/" in l or "/deskstop/" in l)
+          and l.rsplit("/", 1)[1].replace(".", "").isdigit()]
     return max(ep or [0])
 
 
@@ -412,7 +413,7 @@ def call_take(owner, wait=60):
         if start - t0 > wait:
             return False
         time.sleep(max(0.0, start - 4.0 - time.time()))        # take the token up to 4 s ahead, send at the slot start
-        ref = f"refs/heads/deskcall/{k}"
+        ref = f"refs/heads/deskcall/{int(round(start * 10))}"     # slot start in 0.1 s: one winner per slot
         try:
             ok = _git("push", f"--force-with-lease={ref}:", REMOTE, f"{_marker('call ' + owner)}:{ref}").returncode == 0
         except Exception:
@@ -434,11 +435,67 @@ def _call_clean(k, st):
     try:
         r = _git("ls-remote", REMOTE, "refs/heads/deskcall/*")
         old = [l.split()[1] for l in r.stdout.split("\n") if re.search(r"/deskcall/(\d+)$", l)
-               and int(re.search(r"/deskcall/(\d+)$", l).group(1)) < k - int(600 / st)]
+               and int(re.search(r"/deskcall/(\d+)$", l).group(1)) / 10 < time.time() - 900]
         if old:
             _git("push", "-q", REMOTE, *[":" + x for x in old[:80]])
     except Exception:
         pass
+
+
+def call_times(since=None):
+    """Start times of the team's desk-host request slots taken (all machines) since `since` (default: 15 min ago),
+    from the deskcall/<deciseconds> refs: the LIVE COUNTER (Lead 16:30 item 3). An upper bound: a token whose send
+    window was missed is counted too. Git failure = None."""
+    try:
+        r = _git("ls-remote", REMOTE, "refs/heads/deskcall/*")
+        if r.returncode:
+            return None
+        ts = sorted(int(m.group(1)) / 10 for m in re.finditer(r"/deskcall/(\d+)$", r.stdout, re.M))
+        return [t for t in ts if t >= (since if since is not None else time.time() - 900)]
+    except Exception:
+        return None
+
+
+def req_rate(window=60):
+    """Most desk-host requests in any `window` s over the last 15 min, and in the last `window` s: (max, last)."""
+    ts = call_times()
+    if ts is None:
+        return None, None
+    now = time.time()
+    mx = max((sum(1 for y in ts if x <= y < x + window) for x in ts), default=0)
+    return mx, sum(1 for t in ts if t > now - window)
+
+
+def stop_drill(hold=90, grace=15, look=60):
+    """STOP DRILL (Lead 16:30 item 2): set a test pause deskstop/<now+hold> that every sender honours like a deskpause
+    (paused_until reads both), wait grace + look s, and require ZERO desk-host request slots taken in the last `look`
+    s. Skipped while a batch lists (batchon) or a real pause runs. Returns (ok or None if skipped, line)."""
+    if batch_active():
+        return None, "STOPDRILL SKIP a batch is listing"
+    t0 = time.time()
+    try:
+        if t0 < paused_until():
+            return None, "STOPDRILL SKIP a desk pause runs (nothing to prove)"
+    except Exception as e:
+        return False, "STOPDRILL FAIL pause refs unreadable: " + repr(e)[:80]
+    ref = f"refs/heads/deskstop/{int(t0 + hold)}"
+    if _git("push", "-q", REMOTE, f"{_marker('stopdrill')}:{ref}").returncode:
+        return False, "STOPDRILL FAIL could not set the test pause"
+    time.sleep(grace + look)
+    ts = call_times(t0 + grace)
+    try:
+        r = _git("ls-remote", REMOTE, "refs/heads/deskstop/*")
+        old = [l.split()[1] for l in r.stdout.split("\n") if re.search(r"/deskstop/(\d+)$", l)
+               and int(re.search(r"/deskstop/(\d+)$", l).group(1)) < time.time() - 600]
+        if old:
+            _git("push", "-q", REMOTE, *[":" + x for x in old[:50]])
+    except Exception:
+        pass
+    if ts is None:
+        return False, "STOPDRILL FAIL deskcall refs unreadable"
+    if ts:
+        return False, f"STOPDRILL FAIL {len(ts)} desk-host request slot(s) taken {grace}-{grace + look} s into a test pause"
+    return True, f"STOPDRILL OK 0 desk-host requests {grace}-{grace + look} s into a {hold} s test pause (all machines)"
 
 
 def note_answer(code, body=""):
