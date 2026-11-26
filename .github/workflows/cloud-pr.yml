@@ -84,10 +84,20 @@ jobs:
       - name: Fetch open-goat main (guards and PR base)
         run: |
           set -euo pipefail
+          # Lead 13:45: the full checkout took 9-12 s on the hot path. Blobless + sparse (0.4 s + 0.3 s measured):
+          # trees only, then the files the guards read (.github, STOP, the project's own modules, and any
+          # outside module the proof imports); the commit and push need trees only (push of a probe: 1.8 s)
+          OUT_IMPORTS=$(grep -oE '^import PEqualNP\.Outside\.[A-Za-z0-9_.]+' "$PROOF" | sed 's/^import //; s#\.#/#g; s#^#/lean/#; s#$#.lean#' || true)
           for i in 1 2 3; do
-            git clone -q --depth 1 --single-branch --branch main https://github.com/open-goat/pequalnp-proofs.git "$W/tree" && break
+            git clone -q --depth 1 --filter=blob:none --no-checkout --single-branch --branch main \
+                https://github.com/open-goat/pequalnp-proofs.git "$W/tree" &&
+              git -C "$W/tree" sparse-checkout set --no-cone '/.github/' '/STOP' '/CONTRIBUTING.md' '/lean/PEqualNP/' \
+                '!/lean/PEqualNP/Outside/' $OUT_IMPORTS &&
+              git -C "$W/tree" checkout -q main && break
             rm -rf "$W/tree"; sleep $((i * 5))
           done
+          [ -d "$W/tree/.github/scripts" ] || { echo "upstream checkout failed"; exit 1; }
+          mkdir -p "$W/tree/lean/PEqualNP/Outside"      # sparse: the guards copy the proof file in here
           echo "TREE=$W/tree" >> "$GITHUB_ENV"
           git -C "$W/tree" log -1 --format='upstream main %h %s'
 

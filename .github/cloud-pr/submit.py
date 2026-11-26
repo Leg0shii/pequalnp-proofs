@@ -40,6 +40,7 @@ DRY = os.environ.get("DRY", "0") == "1"
 READ_TOKEN = os.environ.get("READ_TOKEN", ""); PR_TOKEN = os.environ.get("PR_TOKEN", "")
 REL = f"lean/PEqualNP/Outside/{MOD}.lean"
 KIND = ""          # gaps.json kind of the step (set by race_ok)
+MASK_RE = re.compile(r"PEqualNP\.Represents\.Represents \(fun u v : Fin \d+ => \(\d+ : ℕ\)\.testBit")
 LATE_LEASE = os.environ.get("LATE_LEASE", "1") == "1"     # unheld: open the PR, then claim, then add the Lease line
 PRIO = [1]
 LEASE = [None]     # the lease the PR carries (held: race_ok; unheld: claimed right before gh pr create)
@@ -463,6 +464,9 @@ def race_ok(gid):
         if b:
             return False, f"blocking PRs {b}", None
         if not is_h:     # unheld: d46 lease right before the push (one claim ever, slots, quota); refused = PR only
+            if MASK_RE.search(open(PROOF, errors="replace").read()):
+                # Lead 13:50: mask steps are claimed by the PC only (its claim lock is local); none from the cloud
+                return True, "clear (mask step: the PC is the only claimer, PR without a lease here)", None
             if LATE_LEASE and not DRY:
                 # Lead 13:37: PR FIRST, the claim after it (the claim chain cost 8 s on 19564 while rivals opened)
                 PRIO[0] = prio
