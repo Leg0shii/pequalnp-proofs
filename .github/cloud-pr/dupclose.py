@@ -19,6 +19,8 @@ DRY = os.environ.get("DRY", "0") == "1"
 END = time.time() + float(os.environ.get("MINUTES", "58")) * 60
 W = os.environ.get("W") or tempfile.mkdtemp()
 CLOSED = set()
+REJ = {"t": 0.0, "alerted": 0.0}
+REJ_EVERY, REJ_WIN, REJ_MIN = 60, 600, 3      # Lead 18:42: REJ-BURST n at 3 or more in 10 min, once per 10 min
 
 
 def log(*a):
@@ -89,6 +91,47 @@ def rival_lower(gid, num):
         return False
 
 
+def alert_ref(msg, kind):
+    g = os.path.join(W, "taken.git")
+    if not os.path.isdir(g):
+        sh("git", "init", "-q", "--bare", g)
+    tree = subprocess.run(["git", "-C", g, "mktree"], input="", capture_output=True, text=True).stdout.strip()
+    env = dict(os.environ, GIT_AUTHOR_NAME="dupclose", GIT_AUTHOR_EMAIL="dupclose@localhost",
+               GIT_COMMITTER_NAME="dupclose", GIT_COMMITTER_EMAIL="dupclose@localhost")
+    c = subprocess.run(["git", "-C", g, "commit-tree", tree, "-m", msg], capture_output=True, text=True, env=env).stdout.strip()
+    return sh("git", *auth(), "-C", g, "push", "-q", TK, f"{c}:refs/heads/alert/{kind}-{int(time.time())}").returncode == 0
+
+
+def rej_burst():
+    """Lead 18:42 (PAUSE-CAUSE.md addendum 18:40): our PRs closed UNMERGED in the last 10 min whose comments carry the
+    checker text 'proved first'. 3 or more -> REJ-BURST n (alert ref, relayed to the bus), once per 10 min. GitHub
+    only; it alerts, it never stops filing. Returns the count (None = not checked this pass)."""
+    if time.time() - REJ["t"] < REJ_EVERY:
+        return None
+    REJ["t"] = time.time()
+    if os.environ.get("FIXTURE_CLOSED"):
+        prs = json.load(open(os.environ["FIXTURE_CLOSED"]))
+    else:
+        r = sh("gh", "pr", "list", "--repo", UP, "--author", HANDLE, "--state", "closed", "--limit", "60",
+               "--json", "number,closedAt,mergedAt,comments", env=ghenv())
+        prs = json.loads(r.stdout or "[]") if r.returncode == 0 else []
+    now = time.time()
+
+    def t(x):
+        try:
+            return time.mktime(time.strptime(x[:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone
+        except Exception:
+            return 0
+    n = sum(1 for p in prs if not p.get("mergedAt") and p.get("closedAt") and now - t(p["closedAt"]) <= REJ_WIN
+            and any("proved first" in (c.get("body") or "").lower() for c in p.get("comments") or []))
+    if n >= REJ_MIN and now - REJ["alerted"] >= REJ_WIN:
+        REJ["alerted"] = now
+        if not DRY:
+            alert_ref(f"REJ-BURST {n}", "rejburst")
+        log("REJ-BURST", n, "(dry)" if DRY else "")
+    return n
+
+
 def one_pass():
     prs = [p for p in ours() if p["number"] not in CLOSED]
     tk = taken()
@@ -116,14 +159,11 @@ def one_pass():
         if r.returncode == 0:
             CLOSED.add(n)
     if len(dups) >= 3 and not DRY:
-        g = os.path.join(W, "taken.git")
-        tree = subprocess.run(["git", "-C", g, "mktree"], input="", capture_output=True, text=True).stdout.strip()
-        env = dict(os.environ, GIT_AUTHOR_NAME="dupclose", GIT_AUTHOR_EMAIL="dupclose@localhost",
-                   GIT_COMMITTER_NAME="dupclose", GIT_COMMITTER_EMAIL="dupclose@localhost")
-        c = subprocess.run(["git", "-C", g, "commit-tree", tree, "-m", f"DUP-OPEN {len(dups)}"], capture_output=True,
-                           text=True, env=env).stdout.strip()
-        sh("git", *auth(), "-C", g, "push", "-q", TK, f"{c}:refs/heads/alert/dupopen-{int(time.time())}")
+        alert_ref(f"DUP-OPEN {len(dups)}", "dupopen")
         log("DUP-OPEN", len(dups))
+    rb = rej_burst()
+    if rb:
+        log("rejections of ours in the last 10 min:", rb)
     return len(prs), len(dups), tk is not None
 
 
