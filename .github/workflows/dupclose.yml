@@ -1,6 +1,6 @@
 # DUPCLOSE (Lead 17:55 UTC 26 Nov, team/lead/PAUSE-CAUSE.md): every 20 s, close our own open PRs without a lease whose
 # unit's first PR (toolkit taken list) is another author's lower-numbered PR, before the desk's checker rejects them as
-# second proofs (bursts of those start our pauses). 58-min jobs, cron every 5 min, one job at a time.
+# second proofs (bursts of those start our pauses). 58-min jobs, one at a time, chained by self-dispatch (no cron here).
 # 3 or more duplicates in one pass -> toolkit ref alert/dupopen-<epoch> "DUP-OPEN n" (relayed to the bus alert channel).
 name: dupclose
 
@@ -13,6 +13,10 @@ on:
         description: Longest run in minutes
         type: string
         default: '58'
+      chain:
+        description: Start the next run when this one ends (schedules do not fire on this fork)
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -39,3 +43,10 @@ jobs:
           [ -n "${PR_TOKEN:-}" ] || { echo "no PR_TOKEN secret: stop"; exit 0; }
           MIN=${IN_MIN:-58}; case "$MIN" in ''|*[!0-9]*) MIN=58;; esac
           MINUTES=$MIN W=$GITHUB_WORKSPACE/work python3 -I "$GITHUB_WORKSPACE/src/.github/cloud-pr/dupclose.py"
+      - name: Chain the next run (schedules do not fire on this fork)
+        if: always() && (github.event_name == 'schedule' || inputs.chain)
+        env:
+          GH_TOKEN: ${{ secrets.PR_TOKEN }}
+        run: |
+          for i in 1 2 3 4 5; do gh workflow run dupclose.yml --repo "$GITHUB_REPOSITORY" --ref main -f chain=true && exit 0; sleep $((i * 10)); done
+          echo "could not start the next run"; exit 1
