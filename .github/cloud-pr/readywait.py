@@ -15,6 +15,8 @@ MIN_AGE = 60
 PACE = float(os.environ.get("PACE_S", "4"))
 G = os.path.join(os.environ.get("W", "/tmp"), "rw.git")
 first_seen, done = {}, set()
+TRIES = {}      # gid -> (re-pushes, last epoch): a run that ended "waiting" (gaps.json behind desk/status) keeps the
+RETRY_S, MAX_TRIES = 60, 4   # branch; it is re-pushed again after RETRY_S, at most MAX_TRIES times per job
 
 
 def run(cmd, timeout=60):
@@ -37,6 +39,25 @@ def listed():
         except Exception:
             pass
     return ids
+
+
+TK = os.environ.get("TOOLKIT_URL", "https://github.com/Leg0shii/pnp-toolkit.git")
+SIG_REF = "refs/heads/status/listed"     # Lead 12:33: the PC publishes its earliest listing signal here (listed.txt:
+SIG = {"sha": None, "ids": set()}        # one "L-meta-N <first-seen epoch> <source>" per line); read by ref sha, no API
+
+
+def signal():
+    """ids the PC saw listed first (desk/status, gaps.json or feed, whichever is earliest): one ls-remote, a fetch only
+    when the ref moved. Missing ref or any error: the old set (this source is an addition, never the only one)."""
+    r = run(["git", "ls-remote", TK, SIG_REF], 30)
+    sha = (r.stdout.split() or [None])[0] if r.returncode == 0 else None
+    if sha and sha != SIG["sha"]:
+        if run(["git", "-C", G, "fetch", "-q", "--depth=1", TK, f"+{SIG_REF}:refs/sig"], 60).returncode == 0:
+            txt = run(["git", "-C", G, "show", "refs/sig:listed.txt"]).stdout
+            SIG["ids"] = {l.split()[0] for l in txt.splitlines() if l.strip() and not l.startswith("#")}
+            SIG["sha"] = sha
+            log("SIGNAL", sha[:8], len(SIG["ids"]), "ids")
+    return SIG["ids"]
 
 
 def branches():
@@ -85,17 +106,23 @@ while time.time() < END:
         first_seen.setdefault((gid, sha), now)
     if now - last_l >= 10:
         ids = listed() or ids; last_l = now
+    ids = ids | signal()
     # once per step per job (a re-push changes the sha, so the step id is the key)
+    for g in list(done):      # still there RETRY_S after our re-push = that run waited or failed: allow another
+        k, t = TRIES.get(g, (0, 0))
+        if g in br and k < MAX_TRIES and now - t >= RETRY_S:
+            done.discard(g)
     todo = [(g, s) for g, s in br.items() if g not in done and g in ids and now - first_seen[(g, s)] >= MIN_AGE]
     for gid, sha in sorted(todo, key=lambda x: first_seen[x]):
         if not re.fullmatch(r"L-[a-z0-9]+(-[a-z0-9]+)*", gid):
-            done.add(gid); continue
+            done.add(gid); TRIES[gid] = (MAX_TRIES, 0); continue
         f = ready_file(gid, sha)
         done.add(gid)
         if not f:
+            TRIES[gid] = (MAX_TRIES, 0)
             log("SKIP", gid, "no single ready/ file"); continue
         r = repush(gid, sha, f)
-        n += 1
+        n += 1; TRIES[gid] = (TRIES.get(gid, (0, 0))[0] + 1, time.time())
         log("REPUSH" if r.returncode == 0 else "REPUSH-FAIL", gid, f, (r.stderr or "").strip()[:150])
         if r.returncode:
             done.discard(gid)
