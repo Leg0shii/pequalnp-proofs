@@ -113,13 +113,15 @@ def _ref_msg(ref):
     return _git("log", "-1", "--format=%ct %B", "refs/dgtmp/x").stdout.strip()
 
 
-def record_lease(step, lid):
-    """Write the lease id into claim/<step> (D): a retry or the fallback opener reuses it, never a second claim."""
+def record_lease(step, lid, terms=None):
+    """Write the lease id into claim/<step> (D): a retry or the fallback opener reuses it, never a second claim.
+    terms (the grant's level / kind / points / race) go into the same message as compact JSON (Lead 14:36 grants.tsv)."""
     ref = f"refs/heads/claim/{step}"
     try:
         sha = _ref_sha(ref)
         if not sha: return False
-        r = _git("push", f"--force-with-lease={ref}:{sha}", REMOTE, f"{_marker('claim ' + step + ' lease ' + str(lid))}:{ref}")
+        t = (" terms " + json.dumps(terms, separators=(",", ":"))) if isinstance(terms, dict) and terms else ""
+        r = _git("push", f"--force-with-lease={ref}:{sha}", REMOTE, f"{_marker('claim ' + step + ' lease ' + str(lid) + t)}:{ref}")
         return r.returncode == 0
     except Exception:
         return False
@@ -181,19 +183,20 @@ def rate():
 
 def rate_take(owner, wait=45, prio=2):
     """One team-wide claim token (cloud opener, PC, backup watcher): tokens are refs ratetok/<minute>/<k>, k < rate(),
-    created atomically, so at most rate() claims start in any wall-clock minute across all machines. Waits up to
-    `wait` s (no desk call meanwhile), then False = PR without a lease. prio 2 (high weight, no rival PR) tries at once
-    in each minute, prio 1 after 3 s, prio 0 after 6 s, so the better steps get a minute's tokens first.
-    Best effort cleanup: deletes token refs older than 10 min."""
+    created atomically, so at most rate() claims start in any wall-clock minute across all machines. Token k opens at
+    second k * 60 / rate() of its minute (Lead 14:40, join.txt "one request every few seconds at most": 8 a minute =
+    one claim start every 7.5 s team-wide, never a burst at the top of the minute). Waits up to `wait` s (no desk call
+    meanwhile), then False = PR without a lease. prio 2 (high weight, no rival PR) tries each open token at once,
+    prio 1 after 3 s, prio 0 after 6 s, so the better steps get them first. Best effort cleanup of refs over 10 min old."""
     t0 = time.time(); R = rate()
     if R <= 0:
         return False
+    step = 60.0 / R
     while True:
         now = time.time(); minute = int(now // 60); into = now - minute * 60
-        delay = {2: 0, 1: 3, 0: 6}.get(prio, 6)
-        if into < delay:
-            time.sleep(delay - into)
-        for k in range(R):
+        kc = int(into // step)                       # the slot of this moment; a missed slot is gone (no catch-up burst)
+        delay = min({2: 0, 1: 3, 0: 6}.get(prio, 6), step * 0.8)   # inside the slot: prio 2 first, then 1, then 0
+        for k in ([kc] if kc < R and into - kc * step >= delay else []):
             ref = f"refs/heads/ratetok/{minute}/{k}"
             try:
                 if _git("push", f"--force-with-lease={ref}:", REMOTE, f"{_marker('rate ' + owner)}:{ref}").returncode == 0:
@@ -201,10 +204,11 @@ def rate_take(owner, wait=45, prio=2):
                     return True
             except Exception:
                 return False
-        nxt = (minute + 1) * 60
+        k_next = kc + 1 if into - kc * step >= delay else kc
+        nxt = minute * 60 + k_next * step + delay if k_next < R else (minute + 1) * 60 + delay
         if nxt - t0 > wait:
             return False
-        time.sleep(max(0.0, nxt - time.time()))
+        time.sleep(max(0.2, nxt - time.time()))
 
 
 def _rate_clean(minute):

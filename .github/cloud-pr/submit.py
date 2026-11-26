@@ -42,6 +42,11 @@ REL = f"lean/PEqualNP/Outside/{MOD}.lean"
 KIND = ""          # gaps.json kind of the step (set by race_ok)
 MASK_RE = re.compile(r"PEqualNP\.Represents\.Represents \(fun u v : Fin \d+ => \(\d+ : ℕ\)\.testBit")
 LATE_LEASE = os.environ.get("LATE_LEASE", "1") == "1"     # unheld: open the PR, then claim, then add the Lease line
+# Lead 14:36: LEASE-FIRST (the ready commit message holds the word lease-first): claim BEFORE any PR (a claim after our
+# own PR paid 31 with race: true instead of 110); a grant opens the PR with the Lease line, a refusal or a held step
+# opens NO PR (result unleased, branch kept)
+LEASE_FIRST = "lease-first" in os.environ.get("READY_MSG", "").lower()
+TERMS = [{}]       # points / race of the claim answer (for grants.tsv)
 PRIO = [1]
 LEASE = [None]     # the lease the PR carries (held: race_ok; unheld: claimed right before gh pr create)
 TRANSIENT = re.compile(r"HTTP (408|429|5\d\d)|Something went wrong|secondary rate limit|submitted too quickly|"
@@ -405,8 +410,11 @@ def claim(gid, prio=1):
     lid = le.get("id") if isinstance(le, dict) else le
     if not lid or (isinstance(gp, dict) and gp.get("id") not in (None, gid)):
         return None, "claim refused: " + json.dumps(d)[:200]
-    dg().record_lease(gid, lid)
-    return str(lid), "claimed" + (" (race)" if isinstance(le, dict) and (le.get("terms") or {}).get("race") else "")
+    te = (le.get("terms") or {}) if isinstance(le, dict) else {}
+    dg().record_lease(gid, lid, te)
+    TERMS[0] = dict(te, points=te.get("points", le.get("points") if isinstance(le, dict) else None))
+    log("claim terms:", json.dumps(te)[:200])
+    return str(lid), "claimed" + (" (race)" if te.get("race") else "")
 
 
 def claim_retry(gid, prio=1):
@@ -463,6 +471,16 @@ def race_ok(gid):
         b = race_check(gid)
         if b:
             return False, f"blocking PRs {b}", None
+        if LEASE_FIRST and not DRY:
+            if is_h:
+                old = dg().lease_of(gid)
+                if old:
+                    return True, "clear (lease-first, held: our recorded lease reused)", old
+                return False, "lease-first: held by another agent, no PR", None
+            lid, why = claim_unheld(gid, 2)
+            if not lid:
+                return False, "lease-first: no lease (" + why[:120] + "), no PR", None
+            return True, "clear, lease-first " + why, lid
         if not is_h:     # unheld: d46 lease right before the push (one claim ever, slots, quota); refused = PR only
             if MASK_RE.search(open(PROOF, errors="replace").read()):
                 # Lead 13:50: mask steps are claimed by the PC only (its claim lock is local); none from the cloud
@@ -614,7 +632,9 @@ def finish(result, why, url=None):
     log(f"RESULT={result}", ID, url or "", why)
     if os.environ.get("GITHUB_OUTPUT"):
         with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-            f.write(f"result={result}\nwhy={why[:300].replace(chr(10), ' ')}\nurl={url or ''}\n")
+            f.write(f"result={result}\nwhy={why[:300].replace(chr(10), ' ')}\nurl={url or ''}\n"
+                    f"lease={LEASE[0] or ''}\npoints={TERMS[0].get('points', '')}\nrace={TERMS[0].get('race', '')}\n"
+                    f"leasefirst={int(LEASE_FIRST)}\nterms={json.dumps(TERMS[0])}\n")
     if result in ("submitted", "race", "exists", "formatfail"):
         delete_ready()
     sys.exit(1 if result in ("submitfail", "formatfail", "error", "stopped") else 0)
@@ -659,7 +679,8 @@ def main():
             except Exception:
                 pass
             if not old:
-                finish("race", f"held by {hn} other agent(s) at the desk and no lease of ours: no new PR (Lead 14:22)")
+                finish("unleased" if LEASE_FIRST else "race",
+                       f"held by {hn} other agent(s) at the desk and no lease of ours: no new PR (Lead 14:22)")
     except Exception as e:
         log("gaps.json read failed, full guards:", repr(e)[:120])
     if unlisted:
@@ -689,6 +710,9 @@ def main():
             # pre-generated file for a step the desk has not listed yet: keep ready/<ID>; ready-wait.yml dispatches
             # this workflow again for the branch the moment the step is listed
             finish("waiting", why + ": branch kept for ready-wait")
+        if why.startswith("lease-first"):
+            free_slot()
+            finish("unleased", why)       # Lead 14:36: no PR, branch kept, the id goes to team/lead/wave8/unleased.txt
         finish("error" if why.startswith("race check error") or "most one handle may hold" in why or "paused" in why
                else "race", why)          # a 410 or an earlier claim of this step ends here as a lost race
     log("race check:", why)
