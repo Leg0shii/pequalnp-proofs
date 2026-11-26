@@ -27,11 +27,18 @@ G=$T/.github/scripts/outside-guard.mjs
 MOD=$(echo "$ID" | tr - _)                      # L-meta-3420 -> L_meta_3420
 REL=${REL_OVERRIDE:-lean/PEqualNP/Outside/$MOD.lean}
 
+if [ -n "$PRESTAGE_IMPORTS" ]; then
+  # step not listed yet (pnp-toolkit checkcore.sh STAGED lane): the gap guard cannot run; the imports/format,
+  # CONTRIBUTING and closure guards run against the file's own imports (a JSON list) instead
+  echo "$PRESTAGE_IMPORTS" > $LOG/in/imports.json; echo "${GUARD_KIND:-check}" > $LOG/in/gap.kind
+  echo "1 gap skipped (prestage, kind $(cat $LOG/in/gap.kind))"
+else
 if [ -n "$GAPS_FILE" ]; then cp "$GAPS_FILE" $LOG/in/gaps.json || fail "copy $GAPS_FILE"
 else curl -sf https://data.pequalnp.com/data/desk/gaps.json -o $LOG/in/gaps.json || fail "download gaps.json"; fi
 $NODE $G gap $LOG/in/gaps.json "$ID" "$REL" $LOG/in ${GUARD_KIND:-check} > $LOG/gap.log 2>&1 || { cat $LOG/gap.log; fail "guard gap"; }
 grep -q REFUSED $LOG/gap.log && { cat $LOG/gap.log; fail "guard gap"; }
 echo "1 gap ok (kind $(cat $LOG/in/gap.kind))"
+fi
 
 $NODE $G imports "$F" $LOG/in/imports.json "$REL" "$(cat $LOG/in/gap.kind)" > $LOG/imports.log 2>&1 || { cat $LOG/imports.log; fail "guard imports/format"; }
 grep -q REFUSED $LOG/imports.log && { cat $LOG/imports.log; fail "guard imports/format"; }

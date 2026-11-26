@@ -610,6 +610,20 @@ def main():
     env = dict(os.environ, NODE=subprocess.run(["sh", "-c", "command -v node"], capture_output=True, text=True).stdout.strip())
     if MOD != ID.replace("-", "_"):
         env["REL_OVERRIDE"] = REL
+    # 12:19 UTC 26 Nov (L-meta-19447): a file for a proposed, not yet listed step failed the gap guard as formatfail and
+    # its ready/ branch was deleted, so the ready-wait path never ran. Unlisted: guards in prestage mode (no gap guard,
+    # the file's own imports), then keep the branch; ready-wait.yml dispatches this job again at listing.
+    unlisted = False
+    try:
+        gj0 = curl_json(GAPS, 60)
+        unlisted = not any(x.get("id") == ID for x in gj0.get("gaps") or []) and ID not in (gj0.get("withdrawn") or {}) \
+            and not any((x.get("id") if isinstance(x, dict) else x) == ID for x in gj0.get("checked") or [])
+    except Exception as e:
+        log("gaps.json read failed, full guards:", repr(e)[:120])
+    if unlisted:
+        imps = re.findall(r"^import\s+(\S+)", open(PROOF, errors="replace").read(), re.M) or ["PEqualNP.Defs"]
+        env["PRESTAGE_IMPORTS"] = json.dumps(imps)
+        log("not listed yet: prestage guards (imports", imps, ")")
     r = run(["bash", os.path.join(os.path.dirname(os.path.abspath(__file__)), "checkcore.sh"), PROOF, ID, TREE,
              os.path.join(W, "guard"), "--quick"], env=env, timeout=600)
     print(r.stdout[-3000:], r.stderr[-2000:], sep="\n", flush=True)
@@ -617,6 +631,8 @@ def main():
     if r.returncode:
         finish("formatfail", "guards: " + ((r.stdout + r.stderr).strip().splitlines() or ["?"])[-1][:200])
     log(f"guards passed ({time.time() - t0:.0f}s)")
+    if unlisted:
+        finish("waiting", "not posted: prestage guards passed, branch kept for ready-wait")
     pu = read_pause()
     if pu > time.time():
         PAUSED[0] = True
