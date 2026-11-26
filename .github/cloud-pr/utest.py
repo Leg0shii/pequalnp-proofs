@@ -3,7 +3,7 @@
 refs/heads/utest/on exists, and only from workflow unleased-test.yml (workflow_dispatch, one concurrency group).
 
 Queue: fork branches utest/<ID> (same layout as ready/<ID>: one file ready/<module>.lean on fork main), newest step
-first, ONE at a time, at most UTEST_PER_MIN (2) PRs a minute. Each goes through submit.py with UNLEASED_TEST=1: a PR
+first, ONE at a time, at most UTEST_PER_MIN (2) PRs a minute, 4 after 15 min with the pause frozen (Lead 16:24). Each goes through submit.py with UNLEASED_TEST=1: a PR
 only if gaps.json (static data host) shows the unit free right then (no pr_open, no pr_numbers, no holder); no lease
 and ZERO requests to the desk host of any kind.
 Auto-stop, checked before every PR and every 20 s: our paused_until in gaps.json moved after the test began, or our
@@ -21,6 +21,8 @@ ON_REF = "refs/heads/utest/on"
 HANDLE = "Leg0shii"
 PER_MIN = float(os.environ.get("UTEST_PER_MIN", "2"))
 END = time.time() + float(os.environ.get("MINUTES", "50")) * 60
+T_START = time.time()
+RAMP_S = float(os.environ.get("UTEST_RAMP_S", "900")); RAMP_TO = float(os.environ.get("UTEST_RAMP_TO", "4"))
 
 
 def gaps():
@@ -77,7 +79,9 @@ def main():
         if not q:
             log("queue empty: test ends after", n, "PRs")
             return
-        wait = last_pr + 60.0 / PER_MIN - time.time()
+        # Lead 16:24: frozen for 15 min of filing -> 4 a minute
+        per_min = PER_MIN if time.time() - T_START < RAMP_S else max(PER_MIN, RAMP_TO)
+        wait = last_pr + 60.0 / per_min - time.time()
         if wait > 0:
             time.sleep(min(wait, 20))
             continue
