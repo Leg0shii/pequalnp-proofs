@@ -52,7 +52,7 @@ def rdenv():
 # ---- v2 (Lead 19:30, team/lead/DUPCLOSE-V2.md): an earlier PR number does NOT win; a holder's later PR beats our
 # earlier unleased one. REST only (no search API): one full sweep of upstream open PRs every FULL_S, the newest pages
 # every pass. Map unit -> every open PR (number, author, Lease line).
-FULL_S, NEW_PAGES = 300, 2
+FULL_S, NEW_PAGES = 600, 1
 ID_RX = re.compile(r"(?<![A-Za-z0-9])(L-[a-z]+(?:-[a-z0-9]+)*-\d+)(?![0-9])")
 LEASE_RX = re.compile(r"(?m)^Lease:\s*\S")
 OPEN = {"t": 0.0, "prs": {}}       # number -> {"n", "gid", "author", "lease", "created"}
