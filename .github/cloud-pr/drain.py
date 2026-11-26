@@ -82,7 +82,11 @@ def pending():
     return sorted(out, key=lambda x: -num(x[0]))          # newest step first
 
 
+T_ONE = {}
+
+
 def one(sid, sha, prefix="ready", extra=None):
+    T_ONE[sid] = time.time()
     d = tempfile.mkdtemp(prefix=sid + "-", dir=W)
     lref = f"refs/drain/{sid}"
     with FETCH:                                           # one shallow fetch at a time in the shared checkout
@@ -118,7 +122,13 @@ def one(sid, sha, prefix="ready", extra=None):
     env.update(extra or {})
     if DRY:
         return "dry", f"would run submit.py for {sid} {mod} ({os.path.getsize(proof)} bytes, sha {got[:8]})"
+    t_sub = time.time()
     r = sh(sys.executable, "-I", os.path.join(SRC, ".github", "cloud-pr", "submit.py"), env=env, timeout=900)
+    # Lead 19:14: the per-stage seconds of every unit in the drain log (prep = fetch of the ready commit + upstream
+    # checkout before submit.py starts)
+    for l in (r.stdout or "").splitlines():
+        if " TIMES " in l or " gate: " in l or " SKIP " in l:
+            log(sid, l.strip()[:200], f"prep={t_sub - T_ONE.get(sid, t_sub):.1f}" if " TIMES " in l else "")
     res = dict(l.split("=", 1) for l in open(outp).read().splitlines() if "=" in l) if os.path.exists(outp) else {}
     tail = (r.stdout + r.stderr).strip().splitlines()[-1:] or [""]
     now = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
