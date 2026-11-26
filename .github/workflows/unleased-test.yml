@@ -1,0 +1,50 @@
+# UNLEASED-TEST (Lead 16:14 UTC 26 Nov): a controlled test of whether PRs alone move our desk pause. OFF by default:
+# it runs only on a manual dispatch AND while the toolkit ref utest/on exists (the Lead's word turns it on).
+# Queue: fork branches utest/<ID> (one file ready/<module>.lean on fork main), one at a time, 2 PRs a minute, no lease,
+# ZERO desk-host requests; a PR only if gaps.json shows the unit free. Auto-stop when our paused_until moves.
+# Logic: .github/cloud-pr/utest.py (uses drain.py's checkout and submit.py with UNLEASED_TEST=1).
+name: unleased-test
+
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: Longest run in minutes
+        type: string
+        default: '50'
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: unleased-test
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          path: src
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Unleased test queue (utest/ branches)
+        env:
+          SRC: ${{ github.workspace }}/src
+          W: ${{ github.workspace }}/work
+          READ_TOKEN: ${{ github.token }}
+          PR_TOKEN: ${{ secrets.PR_TOKEN }}
+          MINUTES: ${{ inputs.minutes || '50' }}
+        run: |
+          [ -n "${PR_TOKEN:-}" ] || { echo "no PR_TOKEN secret: stop"; exit 0; }
+          case "$MINUTES" in ''|*[!0-9]*) MINUTES=50;; esac
+          python3 -I "$GITHUB_WORKSPACE/src/.github/cloud-pr/utest.py" 2>&1 | tee "$W.log"
+          grep -E " (DONE|STOP|test ends|unleased test start) " "$W.log" | tail -100 | sed 's/^/    /' >> "$GITHUB_STEP_SUMMARY" || true

@@ -82,11 +82,11 @@ def pending():
     return sorted(out, key=lambda x: -num(x[0]))          # newest step first
 
 
-def one(sid, sha):
+def one(sid, sha, prefix="ready", extra=None):
     d = tempfile.mkdtemp(prefix=sid + "-", dir=W)
     lref = f"refs/drain/{sid}"
     with FETCH:                                           # one shallow fetch at a time in the shared checkout
-        f = sh("git", "-C", SRC, "fetch", "-q", "--depth", "1", URL, f"+refs/heads/ready/{sid}:{lref}", timeout=120)
+        f = sh("git", "-C", SRC, "fetch", "-q", "--depth", "1", URL, f"+refs/heads/{prefix}/{sid}:{lref}", timeout=120)
     if f.returncode:
         return "gone", "branch gone before the fetch"
     got = sh("git", "-C", SRC, "rev-parse", lref).stdout.strip()
@@ -113,8 +113,8 @@ def one(sid, sha):
         return "error", "upstream checkout failed"
     os.makedirs(os.path.join(tree, "lean", "PEqualNP", "Outside"), exist_ok=True)
     outp = os.path.join(d, "out")
-    env = dict(os.environ, ID=sid, MOD=mod, PROOF=proof, TREE=tree, W=d, DRY="0", GITHUB_REF_NAME=f"ready/{sid}",
-               GITHUB_OUTPUT=outp, PR_GATE_DIR=W, PR_GATE_N="2", READY_MSG=msg)
+    env = dict(os.environ, ID=sid, MOD=mod, PROOF=proof, TREE=tree, W=d, DRY="0", GITHUB_REF_NAME=f"{prefix}/{sid}",
+               GITHUB_OUTPUT=outp, PR_GATE_DIR=W, PR_GATE_N="2", READY_MSG=msg, **(extra or {}))
     if DRY:
         return "dry", f"would run submit.py for {sid} {mod} ({os.path.getsize(proof)} bytes, sha {got[:8]})"
     r = sh(sys.executable, "-I", os.path.join(SRC, ".github", "cloud-pr", "submit.py"), env=env, timeout=900)

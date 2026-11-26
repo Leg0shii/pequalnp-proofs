@@ -44,6 +44,12 @@ MASK_RE = re.compile(r"PEqualNP\.Represents\.Represents \(fun u v : Fin \d+ => \
 # Lead 15:59 (desk pause incident): lease rule cases 2 and 3 suspended, NO LEASE, NO PR, until the Lead's written word
 # lifts it (then set NO_LEASE_NO_PR=0 here). With it on there is no PR-first late lease either.
 NO_LEASE_NO_PR = os.environ.get("NO_LEASE_NO_PR", "1") == "1"
+# Lead 16:14 UNLEASED-TEST (set only by .github/cloud-pr/utest.py): a free unit (gaps.json: no PR, no holder) gets a PR
+# with NO lease and ZERO desk-host requests of any kind (no next, status, step, release), to learn whether PRs alone
+# move our pause.
+UNLEASED_TEST = os.environ.get("UNLEASED_TEST", "0") == "1"
+if UNLEASED_TEST:
+    NO_LEASE_NO_PR = False
 LATE_LEASE = os.environ.get("LATE_LEASE", "0" if NO_LEASE_NO_PR else "1") == "1"   # unheld: open the PR, then claim
 # Lead 14:36: LEASE-FIRST (the ready commit message holds the word lease-first): claim BEFORE any PR (a claim after our
 # own PR paid 31 with race: true instead of 110); a grant opens the PR with the Lease line, a refusal or a held step
@@ -515,6 +521,11 @@ def race_ok(gid):
         live = [n for n in pr_list(g) if own_pr(n) or (pr_accepted(n) and not pr_oversized(n, gid))]
         if live:
             return False, f"PR already open {live}", None
+        if UNLEASED_TEST:
+            if (g.get("pr_open") or 0) or g.get("pr_numbers") or (g.get("holders_now") or 0) or g.get("held_now"):
+                return False, "unleased test: not free in gaps.json (pr_open / pr_numbers / holder)", None
+            b = race_check(gid)
+            return (not b), (f"blocking PRs {b}" if b else "clear (unleased test: free in gaps.json, no desk request)"), None
         if g.get("kind") == "value":            # value steps (lane atlas) are not desk steps
             b = race_check(gid)
             return (not b), (f"blocking PRs {b}" if b else "clear"), None
@@ -690,10 +701,11 @@ def submit(gid, lease):
 
 
 def delete_ready():
-    if DRY or os.environ.get("GITHUB_REF_NAME") != f"ready/{ID}":     # push, or a dispatch on the ready/ branch
+    pre = "utest" if UNLEASED_TEST else "ready"
+    if DRY or os.environ.get("GITHUB_REF_NAME") != f"{pre}/{ID}":     # push, or a dispatch on the ready/ branch
         return
-    r = run(["git"] + auth_cfg() + ["-C", TREE, "push", "-q", f"https://github.com/{FORK}.git", "--delete", f"ready/{ID}"], timeout=120)
-    log("deleted ready/" + ID if r.returncode == 0 else "could not delete ready/" + ID + ": " + r.stderr.strip()[:120])
+    r = run(["git"] + auth_cfg() + ["-C", TREE, "push", "-q", f"https://github.com/{FORK}.git", "--delete", f"{pre}/{ID}"], timeout=120)
+    log(f"deleted {pre}/" + ID if r.returncode == 0 else f"could not delete {pre}/" + ID + ": " + r.stderr.strip()[:120])
 
 
 def finish(result, why, url=None):
@@ -764,7 +776,7 @@ def main():
     log(f"guards passed ({time.time() - t0:.0f}s)")
     if unlisted:
         finish("waiting", "not posted: prestage guards passed, branch kept for ready-wait")
-    pu = read_pause()
+    pu = 0 if UNLEASED_TEST else read_pause()      # the test makes no desk request at all, so the pause gate is moot
     if pu > time.time():
         PAUSED[0] = True
         log("the desk paused this handle until", time.strftime("%H:%M:%S", time.gmtime(pu)), "UTC: no desk requests in this run")
