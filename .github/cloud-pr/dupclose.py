@@ -57,7 +57,8 @@ ID_RX = re.compile(r"(?<![A-Za-z0-9])(L-[a-z]+(?:-[a-z0-9]+)*-\d+)(?![0-9])")
 LEASE_RX = re.compile(r"(?m)^Lease:\s*\S")
 OPEN = {"t": 0.0, "prs": {}}       # number -> {"n", "gid", "author", "lease", "created"}
 EXPO = {"alerted": 0.0}
-V2_REF = "refs/heads/dupclose/v2_on"   # close rule v2 only while this toolkit ref exists (infra pushes it on the Lead's word)
+V2_REF = "refs/heads/dupclose/v2_on"
+MERGED = {}                            # v2.1: unit -> (number, author) of another author's MERGED PR (closed list)   # close rule v2 only while this toolkit ref exists (infra pushes it on the Lead's word)
 
 
 def _page(k):
@@ -237,6 +238,11 @@ def rej_burst():
         r = sh("gh", "api", f"repos/{UP}/pulls?state=closed&sort=updated&direction=desc&per_page=100", env=rdenv(), timeout=60)
         prs = []
         for x in (json.loads(r.stdout or "[]") if r.returncode == 0 else []):
+            if x.get("merged_at") and (x.get("user") or {}).get("login") != HANDLE:
+                rw = _row(x)                          # v2.1 (Lead 19:44): a unit settled by another author's merge
+                if rw["gid"]:
+                    MERGED.setdefault(rw["gid"], (rw["n"], rw["author"]))
+                continue
             if (x.get("user") or {}).get("login") != HANDLE or x.get("merged_at") or not x.get("closed_at"):
                 continue
             ca = x["closed_at"]
@@ -288,8 +294,16 @@ def one_pass():
             EXPO["alerted"] = time.time()
             alert_ref(f"EXPOSED {len(exposed)}", "exposed")
             log("EXPOSED", len(exposed))
+        if v2:                                       # v2.1: unit already settled by another author's merged PR
+            for p in allp.values():
+                if (p["author"] == HANDLE and p["gid"] in MERGED and not p["lease"] and p["n"] not in CLOSED
+                        and age({"createdAt": p["createdAt"]}) >= 20):
+                    dups.append((p["n"], p["gid"], int(age({"createdAt": p["createdAt"]}))))
+                    log("MERGED-RIVAL", p["n"], p["gid"], "settled by", *MERGED[p["gid"]])
         if v2:                                       # rule v2: rival lower number OR rival with a Lease line
             for n, gid, ra, rn, rl in close2:
+                if any(x[0] == n for x in dups):
+                    continue
                 p = allp.get(n)
                 if p and age({"createdAt": p["createdAt"]}) >= 20:
                     dups.append((n, gid, int(age({"createdAt": p["createdAt"]}))))
