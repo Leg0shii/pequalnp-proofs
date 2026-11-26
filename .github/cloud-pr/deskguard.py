@@ -181,7 +181,34 @@ def rate():
         return RATE_DEFAULT
 
 
-def rate_take(owner, wait=45, prio=2):
+BATCH_YIELD_S = 90          # a batchon ref younger than this = a batch is listing: prio 0/1 claimers yield (Lead 15:17 item 4)
+
+
+def batch_on(owner):
+    """The asker marks a listing batch (refs/heads/batchon/<epoch>, refreshed on every batch ask; old ones dropped)."""
+    now = int(time.time())
+    try:
+        _git("push", "-q", REMOTE, f"{_marker('batch ' + owner)}:refs/heads/batchon/{now}")
+        r = _git("ls-remote", REMOTE, "refs/heads/batchon/*")
+        old = [l.split()[1] for l in r.stdout.split("\n") if re.search(r"/batchon/(\d+)$", l)
+               and int(re.search(r"/batchon/(\d+)$", l).group(1)) < now - 600]
+        if old:
+            _git("push", "-q", REMOTE, *[":" + x for x in old[:50]])
+    except Exception:
+        pass
+
+
+def batch_active():
+    """True while a batchon ref is under BATCH_YIELD_S old. Git failure = False (the claim guards still hold)."""
+    try:
+        r = _git("ls-remote", REMOTE, "refs/heads/batchon/*")
+        ts = [int(m.group(1)) for m in re.finditer(r"/batchon/(\d+)$", r.stdout, re.M)]
+        return bool(ts) and time.time() - max(ts) < BATCH_YIELD_S
+    except Exception:
+        return False
+
+
+def rate_take(owner, wait=45, prio=2, cap=None):
     """One team-wide claim token (cloud opener, PC, backup watcher): tokens are refs ratetok/<minute>/<k>, k < rate(),
     created atomically, so at most rate() claims start in any wall-clock minute across all machines. Token k opens at
     second k * 60 / rate() of its minute (Lead 14:40, join.txt "one request every few seconds at most": 8 a minute =
@@ -189,6 +216,10 @@ def rate_take(owner, wait=45, prio=2):
     meanwhile), then False = PR without a lease. prio 2 (high weight, no rival PR) tries each open token at once,
     prio 1 after 3 s, prio 0 after 6 s, so the better steps get them first. Best effort cleanup of refs over 10 min old."""
     t0 = time.time(); R = rate()
+    if prio < 2 and batch_active():    # Lead 15:17 item 4: while a batch lists, the sweep and other low claimers yield
+        return False
+    if cap is not None:                # a step outside a raised-rate wave keeps the base rate (owner 14:12: 8/min wave only)
+        R = min(R, cap)
     if R <= 0:
         return False
     step = 60.0 / R
@@ -237,11 +268,228 @@ def check_answer(d, what="claim"):
     if not bad and what == "claim":
         le = d.get("lease") if isinstance(d, dict) else None
         bad = not le and code != "410" and not HARMLESS.search(txt)
+    if not bad and what == "ask":
+        # desk/next without a gap (trial, 4c pre-check 14:00 UTC 26 Nov): a lease must name a gap of the form L-x-N and
+        # a lease id; no lease is fine only as "no step right now" or a hold limit; 410 / head start / anything else = pause
+        le = d.get("lease") if isinstance(d, dict) else None
+        gp = d.get("gap") if isinstance(d, dict) else None
+        if le:
+            lid = le.get("id") if isinstance(le, dict) else le
+            bad = not (isinstance(gp, dict) and isinstance(gp.get("id"), str) and re.fullmatch(r"L-[a-z]+-\d+", gp["id"])
+                       and isinstance(lid, (str, int)) and str(lid).strip())
+        else:
+            bad = code not in ("", "200") or not (isinstance(d, dict) and not gp and ASK_NONE.search(txt))
     if not bad and what in ("release", "beat"):
         bad = code not in ("", "200", "410")
     if bad:
         pause(time.time() + 900)
     return not bad
+
+
+# ---- desk/next trial (owner card 13:55 UTC 26 Nov "PC only, 2 asks a minute"; Lead 13:57 + 14:01; 4c pre-check in
+# team/lead/DESK-AUDIT.md 14:00). Used only by watch/asknext.py, which is off unless WATCH_ASK=1. ----
+ASK_RATE = int(os.environ.get("DESKGUARD_ASK_RATE", "2"))      # asks a minute, team-wide (they also take a ratetok)
+ASK_HOLDS = int(os.environ.get("DESKGUARD_ASK_HOLDS", "3"))    # asked steps held at once, team-wide
+ASK_BUDGET = int(os.environ.get("DESKGUARD_ASK_BUDGET", "150"))  # owner go 14:41 UTC (wave, inside BUDGET 170); back to 12 with BUDGET 20 # no ask once this many of BUDGET calls / 10 min are used
+ASK_PAUSE_AGE = 3600                                            # Lead 14:01: no ask while a deskpause ref under 60 min old
+ASK_NONE = re.compile(r"no step right now|ask again in a few minutes|no (open |free )?(step|gap)s? (is |are )?(free|open|offerable|left|right now)|"
+                      r"nothing (is )?offerable|too many held|limit of \d+ held|at most \d+ (gaps|steps)|cap reached", re.I)
+
+
+def recent_pause(age=ASK_PAUSE_AGE):
+    """True if any deskpause ref ends later than now - age (a pause set within the last hour, or still running).
+    Raises on git failure: callers fail closed."""
+    return paused_until() > time.time() - age
+
+
+def ask_hold_take(owner):
+    """One of ASK_HOLDS team-wide hold refs (askhold/<k>), created atomically; None = no ask now (never waits)."""
+    for k in range(ASK_HOLDS):
+        ref = f"refs/heads/askhold/{k}"
+        try:
+            if _git("push", f"--force-with-lease={ref}:", REMOTE, f"{_marker('askhold ' + owner)}:{ref}").returncode == 0:
+                return ref
+        except Exception:
+            return None
+    for k in range(ASK_HOLDS):           # a hold older than 40 min is left over (holds end at 30 min): take it over
+        ref = f"refs/heads/askhold/{k}"
+        m = _ref_msg(ref)
+        if m and m.split()[0].isdigit() and time.time() - int(m.split()[0]) > 2400:
+            sha = _git("rev-parse", "refs/dgtmp/x").stdout.strip()
+            if _git("push", f"--force-with-lease={ref}:{sha}", REMOTE, f"{_marker('askhold ' + owner)}:{ref}").returncode == 0:
+                return ref
+    return None
+
+
+def ask_token(owner, n=None):
+    """One of ASK_RATE (or n: batch mode passes the team claim rate) ask tokens of this wall-clock minute
+    (asktok/<minute>/<k>), atomic, team-wide; never waits."""
+    minute = int(time.time() // 60)
+    for k in range(ASK_RATE if n is None else n):
+        ref = f"refs/heads/asktok/{minute}/{k}"
+        try:
+            if _git("push", f"--force-with-lease={ref}:", REMOTE, f"{_marker('ask ' + owner)}:{ref}").returncode == 0:
+                try:          # best effort: drop ask tokens older than 10 min
+                    r = _git("ls-remote", REMOTE, "refs/heads/asktok/*")
+                    old = [l.split()[1] for l in r.stdout.split("\n") if re.search(r"/asktok/(\d+)/", l)
+                           and int(re.search(r"/asktok/(\d+)/", l).group(1)) < minute - 10]
+                    if old: _git("push", "-q", REMOTE, *[":" + x for x in old[:50]])
+                except Exception:
+                    pass
+                return ref
+        except Exception:
+            return None
+    return None
+
+
+# ---- 16:00 UTC 26 Nov pause (Lead restart conditions 2-5): ONE budget for every desk-host request ----
+# Every request to pequalnp.com/desk/* (next, beat, release, status, step, lease, board: reads included) from every
+# machine (PC watcher and helpers, cloud opener, backup watcher, workers) takes ONE token here first. Tokens are refs
+# deskcall/<slot> with slot = floor(epoch / STEP_S), created atomically (one winner per slot, all machines), and the
+# request is sent inside [slot start, slot start + SEND_WIN] only, so any two desk-host requests of the team are at
+# least STEP_S - SEND_WIN apart and any 60 s hold at most ceil(60 / STEP_S). The rate is the newest toolkit ref
+# callrate/<epoch>_<n> (n requests a minute, at most CALL_MAX; 0 = no desk-host request at all), else CALL_DEFAULT.
+# Ramp (condition 5): callrate 6 and leaserate 4 for the first 30 min, then 10 and 8. A 429 (or a pause answer)
+# anywhere sets deskpause for all machines (note_answer); no retry on 429 or 5xx.
+CALL_DEFAULT = int(os.environ.get("DESKGUARD_CALL_RATE", "6"))
+CALL_MAX = 10
+SEND_WIN = 0.2
+_CP = {"t": 0.0, "until": 0.0, "rate_t": 0.0, "rate": None, "n": 0}
+
+
+def call_rate():
+    """Team-wide desk-host requests a minute (all kinds). Newest ref callrate/<epoch>_<n>; none = CALL_DEFAULT; cached
+    30 s; git failure = CALL_DEFAULT (never more)."""
+    if _CP["rate"] is not None and time.time() - _CP["rate_t"] < 30:
+        return _CP["rate"]
+    n = CALL_DEFAULT
+    try:
+        r = _git("ls-remote", REMOTE, "refs/heads/callrate/*")
+        best = None
+        for l in r.stdout.split("\n"):
+            m = re.search(r"/callrate/(\d+)_(\d+)$", l)
+            if m and (best is None or int(m.group(1)) > best[0]):
+                best = (int(m.group(1)), int(m.group(2)))
+        if r.returncode == 0 and best:
+            n = best[1]
+    except Exception:
+        pass
+    _CP["rate"], _CP["rate_t"] = max(0, min(CALL_MAX, n)), time.time()
+    return _CP["rate"]
+
+
+def step_s(rate=None):
+    """Seconds between two desk-host request slots: 60 / rate, never under 6.5 (join.txt: one request every few
+    seconds; Lead: at least 6 s between any two, and SEND_WIN plus curl start-up stay inside the 0.5 s margin)."""
+    R = call_rate() if rate is None else rate
+    return max(6.5, 60.0 / R) if R > 0 else float("inf")
+
+
+def paused_cached(ttl=20):
+    """paused_until() read at most every ttl s on this process; unreadable = paused for 60 s (fail closed)."""
+    if time.time() - _CP["t"] > ttl:
+        try:
+            _CP["until"] = paused_until()
+        except Exception:
+            _CP["until"] = time.time() + 60
+        _CP["t"] = time.time()
+    return _CP["until"]
+
+
+def call_take(owner, wait=60):
+    """True = send ONE desk-host request now (we are inside our slot's send window). False = paused, rate 0, or no
+    slot within `wait` s: make no request (and do not retry in a loop; the caller's next normal round asks again)."""
+    t0 = time.time()
+    while True:
+        if time.time() < paused_cached(0):     # fresh read every time: a 429 elsewhere stops us before our next send
+            return False
+        st = step_s()
+        if st == float("inf"):
+            return False
+        now = time.time()
+        k = int(now // st) + 1 if now - (now // st) * st > SEND_WIN / 2 else int(now // st)
+        start = k * st
+        if start - t0 > wait:
+            return False
+        time.sleep(max(0.0, start - 4.0 - time.time()))        # take the token up to 4 s ahead, send at the slot start
+        ref = f"refs/heads/deskcall/{k}"
+        try:
+            ok = _git("push", f"--force-with-lease={ref}:", REMOTE, f"{_marker('call ' + owner)}:{ref}").returncode == 0
+        except Exception:
+            return False
+        if ok:
+            time.sleep(max(0.0, start - time.time()))
+            if time.time() <= start + SEND_WIN:
+                _CP["n"] += 1
+                if _CP["n"] % 10 == 1:
+                    _call_clean(k, st)
+                return True
+            # token taken too late (slow push): the window is gone, no request in this slot
+        if time.time() - t0 > wait:
+            return False
+        time.sleep(max(0.0, start + SEND_WIN - time.time()))
+
+
+def _call_clean(k, st):
+    try:
+        r = _git("ls-remote", REMOTE, "refs/heads/deskcall/*")
+        old = [l.split()[1] for l in r.stdout.split("\n") if re.search(r"/deskcall/(\d+)$", l)
+               and int(re.search(r"/deskcall/(\d+)$", l).group(1)) < k - int(600 / st)]
+        if old:
+            _git("push", "-q", REMOTE, *[":" + x for x in old[:80]])
+    except Exception:
+        pass
+
+
+def note_answer(code, body=""):
+    """After every desk-host answer: 429, or an answer that names a pause, sets the shared pause for every machine
+    (1 h, or the time the answer names if later). Returns True if a pause was set. 5xx: no pause, but no retry."""
+    code = str(code or "").strip()
+    low = (body or "")[:2000].lower()
+    if code == "429" or (not code.startswith("2") and code != "000" and "pause" in low):
+        until = time.time() + 3600
+        m = re.search(r"(\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d)?)Z?", body or "")
+        if m:
+            try:
+                import calendar
+                fmt = "%Y-%m-%dT%H:%M:%S" if len(m.group(1)) > 16 else "%Y-%m-%dT%H:%M"
+                until = max(until, calendar.timegm(time.strptime(m.group(1), fmt)) + 60)
+            except ValueError:
+                pass
+        try:
+            pause(until)
+        except Exception:
+            pass
+        _CP["until"], _CP["t"] = max(_CP["until"], until), time.time()
+        return True
+    return False
+
+
+DESK_HOST = os.environ.get("DESKGUARD_DESK_HOST", "https://pequalnp.com/desk/")   # drill: a local stub desk
+_RC = {}
+
+
+def desk_request(path, owner, post=False, cache_s=0, wait=60, model="unknown"):
+    """The one sender for pequalnp.com/desk/<path>: call token, curl once (no retry), note_answer, optional cache for
+    reads (cache_s, per process). Returns (http code str, body str); ("000", reason) when no request was made."""
+    if model and "model=" not in path and not path.startswith(("status", "board")):
+        path += ("&" if "?" in path else "?") + "model=" + model
+    if cache_s and path in _RC and time.time() - _RC[path][0] < cache_s:
+        return _RC[path][1]
+    if not call_take(owner, wait):
+        return "000", "no desk call token (paused, rate 0 or no slot in time)"
+    r = subprocess.run(["curl", "-sS", "--max-time", "30", "-w", "\n%{http_code}"] + (["-X", "POST"] if post else [])
+                       + [DESK_HOST + path], capture_output=True, text=True, timeout=45)
+    try:
+        note_call()
+    except Exception:
+        pass
+    body, _, code = (r.stdout or "").rpartition("\n")
+    code = code.strip() or "000"
+    note_answer(code, body)
+    if cache_s and code == "200":
+        _RC[path] = (time.time(), (code, body))
+    return code, body
 
 
 if __name__ == "__main__":
@@ -250,6 +498,11 @@ if __name__ == "__main__":
         w = []; ok = acquire(a[1], w); print("OK" if ok else "NO", a[1], w[0]); sys.exit(0 if ok else 1)
     if a[:1] == ["pause"] and len(a) == 2:
         sys.exit(0 if pause(float(a[1])) else 1)
+    if a[:1] == ["call"] and len(a) >= 2:           # shell callers: deskguard.py call OWNER -> exit 0 = send now
+        sys.exit(0 if call_take(a[1], float(a[2]) if len(a) > 2 else 60) else 1)
+    if a[:1] == ["answer"] and len(a) >= 2:         # shell callers: deskguard.py answer CODE [BODYFILE]
+        b = open(a[2], errors="replace").read() if len(a) > 2 and os.path.exists(a[2]) else ""
+        sys.exit(1 if note_answer(a[1], b) else 0)
     if a[:1] == ["status"]:
         pu = paused_until(); print("paused until", time.strftime("%H:%M:%S UTC", time.gmtime(pu)) if time.time() < pu else "-", "| calls last 10 min here:", len(_calls()), "of", BUDGET); sys.exit(0)
     print(__doc__); sys.exit(2)

@@ -41,7 +41,10 @@ READ_TOKEN = os.environ.get("READ_TOKEN", ""); PR_TOKEN = os.environ.get("PR_TOK
 REL = f"lean/PEqualNP/Outside/{MOD}.lean"
 KIND = ""          # gaps.json kind of the step (set by race_ok)
 MASK_RE = re.compile(r"PEqualNP\.Represents\.Represents \(fun u v : Fin \d+ => \(\d+ : ℕ\)\.testBit")
-LATE_LEASE = os.environ.get("LATE_LEASE", "1") == "1"     # unheld: open the PR, then claim, then add the Lease line
+# Lead 15:59 (desk pause incident): lease rule cases 2 and 3 suspended, NO LEASE, NO PR, until the Lead's written word
+# lifts it (then set NO_LEASE_NO_PR=0 here). With it on there is no PR-first late lease either.
+NO_LEASE_NO_PR = os.environ.get("NO_LEASE_NO_PR", "1") == "1"
+LATE_LEASE = os.environ.get("LATE_LEASE", "0" if NO_LEASE_NO_PR else "1") == "1"   # unheld: open the PR, then claim
 # Lead 14:36: LEASE-FIRST (the ready commit message holds the word lease-first): claim BEFORE any PR (a claim after our
 # own PR paid 31 with race: true instead of 110); a grant opens the PR with the Lease line, a refusal or a held step
 # opens NO PR (result unleased, branch kept)
@@ -65,32 +68,24 @@ def run(cmd, timeout=300, env=None, cwd=None):
         return subprocess.CompletedProcess(cmd, 1, "", "timeout")
 
 
-def _desk_read(url, timeout):
-    """Desk-host reads (desk/status, desk/step) from all drain workers of this run share ONE lock: at least 3 s between
-    any two (join.txt "one request every few seconds at most"), desk/status cached 15 s for every worker, and no retry
-    (a 429 is an answer: the run backs off). 15:58 UTC 26 Nov: 4 workers x 190 branches read desk/status at about one
-    request a second and got 429 while the handle was paused."""
+def _desk_http(path, post=False, cache_s=0):
+    """EVERY desk-host request of this run (claims, releases, the rare read): one per-run lock (drain workers queue here
+    and make no request while they wait) and then the team's one call token (deskguard.desk_request: shared slots on
+    every machine, at least 6 s apart, at most 10 a minute, no retry, 429 = shared pause). Lead 16:02 conditions 2-3.
+    Returns (code, body); ("000", why) = no request made."""
     import fcntl
     gd = os.environ.get("PR_GATE_DIR") or W
     os.makedirs(gd, exist_ok=True)
-    stamp = os.path.join(gd, "deskread.t"); cache = os.path.join(gd, "deskstatus.json")
-    with open(os.path.join(gd, "deskread.lock"), "a") as lf:
+    with open(os.path.join(gd, "deskcall.lock"), "a") as lf:
         fcntl.flock(lf, fcntl.LOCK_EX)
-        if url == STATUS and os.path.exists(cache) and time.time() - os.path.getmtime(cache) < 15:
-            return json.load(open(cache))
-        try:
-            last = float(open(stamp).read() or 0)
-        except (OSError, ValueError):
-            last = 0.0
-        time.sleep(max(0.0, last + 3 - time.time()))
-        r = run(["curl", "-sSf", "--max-time", str(timeout), url], timeout=timeout + 10)
-        open(stamp, "w").write(str(time.time()))
-        if r.returncode == 0:
-            d = json.loads(r.stdout)
-            if url == STATUS:
-                open(cache + ".tmp", "w").write(r.stdout); os.replace(cache + ".tmp", cache)
-            return d
-    raise RuntimeError(f"curl {url}: {r.stderr.strip()[:200]}")
+        return dg().desk_request(path, "cloud " + path.split("?")[0], post=post, cache_s=cache_s, wait=60, model=DESK_MODEL)
+
+
+def _desk_read(url, timeout):
+    code, body = _desk_http(url[len(DESK):], cache_s=15)
+    if code == "200":
+        return json.loads(body)
+    raise RuntimeError(f"desk read {url}: {code} {body.strip()[:160]}")
 
 
 def curl_json(url, timeout=60):
@@ -238,19 +233,11 @@ def with_model(path):
 
 
 def desk(path, post=False):
-    path = with_model(path)
-    time.sleep(max(0, _DESK_T[0] + 3 - time.time()))      # the desk asks for one request every few seconds
-    r = run(["curl", "-sS", "--max-time", "30", "-w", "\n%{http_code}"] + (["-X", "POST"] if post else []) + [DESK + path], timeout=40)
-    _DESK_T[0] = time.time()
-    try:
-        dg().note_call()
-    except Exception:
-        pass
-    body, _, code = r.stdout.rpartition("\n")
+    code, body = _desk_http(with_model(path), post=post)
     try:
         d = json.loads(body)
     except Exception:
-        d = {"error": (body or r.stderr).strip()[:200]}
+        d = {"error": (body or "no request").strip()[:200]}
     if isinstance(d, dict):
         d["_http"] = code.strip()
     return d
@@ -531,16 +518,12 @@ def race_ok(gid):
         if g.get("kind") == "value":            # value steps (lane atlas) are not desk steps
             b = race_check(gid)
             return (not b), (f"blocking PRs {b}" if b else "clear"), None
-        sg = curl_json(STATUS, 60)["gaps"]
-        held = {x["id"]: x.get("held", 0) for x in sg}
-        prio = rate_prio(bool(pr_list(g)), next((x.get("points") for x in sg if x["id"] == gid), 0))
-        if gid not in held:
-            return False, "not on the desk", None
-        is_h = held[gid] != 0
-        if not is_h:
-            st = curl_json(STEP + gid, 30)
-            if st.get("state") not in ("open", "pr_open"):
-                return False, f"desk state {st.get('state')}", None
+        # 16:00 pause (Lead condition 2): no desk/status or desk/step read; gaps.json (static export) carries
+        # held_now / holders_now / offerable_now for every listed step
+        prio = rate_prio(bool(pr_list(g)), g.get("points") or g.get("weight") or 0)
+        is_h = bool(g.get("held_now")) or (g.get("holders_now") or 0) > 0
+        if not is_h and g.get("offerable_now") is False:
+            return False, "not offerable on the desk now (gaps.json)", None
         b = race_check(gid)
         if b:
             return False, f"blocking PRs {b}", None
@@ -809,6 +792,9 @@ def main():
             finish("unleased", why)       # Lead 14:36: no PR, branch kept, the id goes to team/lead/wave8/unleased.txt
         finish("error" if why.startswith("race check error") or "most one handle may hold" in why or "paused" in why
                else "race", why)          # a 410 or an earlier claim of this step ends here as a lost race
+    if NO_LEASE_NO_PR and not lease and not DRY:
+        free_slot()
+        finish("unleased", "no lease, no PR (Lead 15:59, cases 2 and 3 suspended): " + why[:120])
     log("race check:", why)
     # 3.+4. commit on upstream main, push, PR
     late = lease == "LATE"

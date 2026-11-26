@@ -3,7 +3,7 @@
 fork main, so the run uses today's opener code).
 
 cloud-pr ends 'waiting' and keeps ready/<ID> when the step is not listed yet (pre-generated waves). This loop polls the
-listing (data.pequalnp.com gaps.json and pequalnp.com/desk/status: plain reads, no handle, no claim) and the fork's
+listing (data.pequalnp.com gaps.json only since the 16:00 pause; no desk-host read, no handle, no claim) and the fork's
 ready/ branches, and re-pushes each listed one on current fork main once per step per job. A branch must be at
 least MIN_AGE s old, so the push run of a fresh branch is never doubled. Dispatches are paced (GitHub allows about
 2 PR creations in parallel; cloud-pr retries refusals)."""
@@ -32,7 +32,9 @@ def log(*a):
 
 def listed():
     ids = set()
-    for url, key in (("https://data.pequalnp.com/data/desk/gaps.json", "gaps"), ("https://pequalnp.com/desk/status", "gaps")):
+    # 16:00 pause (Lead condition 2): gaps.json only, never a desk-host read (desk/status every 10 s here kept our
+    # handle in the pause window until 16:06)
+    for url, key in (("https://data.pequalnp.com/data/desk/gaps.json", "gaps"),):
         r = run(["curl", "-sS", "-m", "30", url], 40)
         try:
             ids |= {g["id"] for g in json.loads(r.stdout)[key]}
@@ -102,7 +104,26 @@ def repush(gid, sha, f):
 run(["git", "init", "-q", "--bare", G])
 n = 0; last_l = 0; ids = set()
 T0 = time.time(); listed_at = {}     # gid -> first time seen listed in this job (ids listed at the start count as old)
+_PZ = [0.0, 0.0]
+
+
+def paused():
+    """Shared deskguard pause (toolkit refs deskpause/<epoch>), read at most every 20 s; unreadable = paused. While it
+    runs there is no re-push at all (a re-push starts a cloud-pr run)."""
+    if time.time() - _PZ[0] > 20:
+        r = run(["git", "ls-remote", TK, "refs/heads/deskpause/*"], 60)
+        if r.returncode:
+            _PZ[:] = [time.time(), time.time() + 60]
+        else:
+            ts = [int(l.rsplit("/", 1)[1]) for l in r.stdout.splitlines() if l.rsplit("/", 1)[-1].isdigit()]
+            _PZ[:] = [time.time(), max(ts or [0])]
+    return time.time() < _PZ[1]
+
+
 while time.time() < END:
+    if paused():
+        time.sleep(20)
+        continue
     br = branches()
     now = time.time()
     for gid, sha in br.items():

@@ -61,11 +61,8 @@ def gaps():
 
 
 def status_ids():
-    r = run(["curl", "-sS", "-m", "20", "https://pequalnp.com/desk/status"], 30)
-    try:
-        return {g["id"] for g in json.loads(r.stdout)["gaps"]}
-    except Exception:
-        return set()
+    # 16:00 pause (Lead condition 2): no desk-host read from any Action; the static gaps.json is the only listing
+    return set()
 
 
 def taken():
