@@ -417,6 +417,40 @@ def claim(gid, prio=1):
     return str(lid), "claimed" + (" (race)" if te.get("race") else "")
 
 
+LF_WAIT_S = float(os.environ.get("LF_WAIT_S", "180"))      # owner 15:17:26 lease rule: wait up to 3 min for a token
+_LF_HELD = re.compile(r"gets a head start|was handed this step|bring your proof back|held by another|another handle|"
+                      r"at most one handle|retry_after", re.I)
+
+
+def lf_case(why):
+    """owner 15:17:26 lease rule: held (another agent holds it) / stop (pause, warning, answer not understood, desk
+    off) / final (410) = no PR; bare (any other refusal) = PR without a lease if no rival PR."""
+    w = why or ""
+    if w.startswith("claim refused") and _LF_HELD.search(w) and "handle paused" not in w:
+        return "held"
+    if ("paus" in w or "not understood" in w or "desk off" in w or w.startswith("no lease (desk off")
+            or "dry run" in w):
+        return "stop"
+    if "410" in w or "proved first" in w:
+        return "final"
+    return "bare"
+
+
+def rival_open(gid):
+    """A PR from someone else is on the step: the taken list (first PR per step), else the PR search; fail closed."""
+    try:
+        tl = taken_list()
+        if tl is not None:
+            return gid in tl and tl.get(gid) != HANDLE
+        out = gh(["pr", "list", "--repo", UP, "--state", "open", "--search", gid.split("-")[-1], "--limit", "100",
+                  "--json", "number,files,author"]).stdout
+        return any((p.get("author") or {}).get("login") != HANDLE and any(step_file_re(gid).fullmatch(f["path"]) for f in p["files"])
+                   for p in json.loads(out))
+    except Exception as e:
+        log("rival check failed (no PR without a lease):", repr(e)[:120])
+        return True
+
+
 def claim_retry(gid, prio=1):
     return claim(gid, prio)            # one claim per step, ever: no retries (the desk pauses handles that repeat)
 
@@ -472,15 +506,27 @@ def race_ok(gid):
         if b:
             return False, f"blocking PRs {b}", None
         if LEASE_FIRST and not DRY:
+            # owner 15:17:26 UTC "go Lead's lease rule" (= upstream tools/pnp.sh submit): claim first (slot and token
+            # wait up to LF_WAIT_S = 3 min). Held by another agent, pause/warning, proved first: NO PR. Any other
+            # refusal (cap, not open, reserved, unreachable, no token or slot in 3 min): PR WITHOUT a lease at once,
+            # provided no rival PR is on the step.
             if is_h:
                 old = dg().lease_of(gid)
                 if old:
                     return True, "clear (lease-first, held: our recorded lease reused)", old
                 return False, "lease-first: held by another agent, no PR", None
+            global SLOT_WAIT_S, RATE_WAIT_S
+            SLOT_WAIT_S = RATE_WAIT_S = LF_WAIT_S
             lid, why = claim_unheld(gid, 2)
-            if not lid:
-                return False, "lease-first: no lease (" + why[:120] + "), no PR", None
-            return True, "clear, lease-first " + why, lid
+            if lid:
+                return True, "clear, lease-first " + why, lid
+            case = lf_case(why)
+            if case == "bare" and rival_open(gid):
+                case = "rival PR"
+            if case != "bare":
+                return False, f"lease-first: {case} (" + why[:120] + "), no PR", None
+            TERMS[0] = {"bare": why[:160]}
+            return True, "clear, lease-first refused (" + why[:100] + "): PR without a lease (owner 15:17 rule)", None
         if not is_h:     # unheld: d46 lease right before the push (one claim ever, slots, quota); refused = PR only
             if MASK_RE.search(open(PROOF, errors="replace").read()):
                 # Lead 13:50: mask steps are claimed by the PC only (its claim lock is local); none from the cloud
