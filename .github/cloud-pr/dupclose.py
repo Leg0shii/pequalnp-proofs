@@ -100,6 +100,32 @@ def open_prs():
     return OPEN["prs"]
 
 
+UNIT_RX = re.compile(r"L-[a-z0-9]+(-[a-z0-9]+)*-\d+")
+MFILL = {"n": 0}
+
+
+def merged_fill():
+    """Lead 19:58: every pass (20 s) read the most recently updated closed upstream PRs and record units another author's
+    MERGED PR (title exactly the unit id) settled. First pass after a start: 3 pages (300 PRs), then 1 page."""
+    pages = 3 if MFILL["n"] == 0 else 1
+    MFILL["n"] += 1
+    for k in range(1, pages + 1):
+        if os.environ.get("FIXTURE_MERGED"):
+            pg = json.load(open(os.environ["FIXTURE_MERGED"]))[(k - 1) * 100:k * 100]
+        else:
+            r = sh("gh", "api", f"repos/{UP}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page={k}", env=rdenv(), timeout=60)
+            if r.returncode:
+                log("closed list failed:", r.stderr.strip()[-100:])
+                return
+            pg = json.loads(r.stdout or "[]")
+        for x in pg:
+            t = (x.get("title") or "").strip()
+            if x.get("merged_at") and (x.get("user") or {}).get("login") != HANDLE and UNIT_RX.fullmatch(t):
+                MERGED.setdefault(t, (x["number"], (x.get("user") or {}).get("login")))
+        if len(pg) < 100:
+            return
+
+
 def v2_on():
     g = os.path.join(W, "taken.git")
     if not os.path.isdir(g):
@@ -302,7 +328,8 @@ def one_pass():
             EXPO["alerted"] = time.time()
             alert_ref(f"EXPOSED {len(exposed)}", "exposed")
             log("EXPOSED", len(exposed))
-        if v2:                                       # v2.1: unit already settled by another author's merged PR
+        merged_fill()                                # Lead 19:58: the MERGED close runs ALWAYS (not behind v2_on)
+        if True:                                     # v2.1: unit already settled by another author's merged PR
             for p in allp.values():
                 if (p["author"] == HANDLE and p["gid"] in MERGED and not p["lease"] and p["n"] not in CLOSED
                         and age({"createdAt": p["createdAt"]}) >= 20):
