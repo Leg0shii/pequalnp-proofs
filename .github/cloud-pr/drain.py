@@ -15,7 +15,7 @@ SRC = os.environ["SRC"]; W = os.environ.get("W") or tempfile.mkdtemp()
 FORK = os.environ.get("GITHUB_REPOSITORY", "Leg0shii/pequalnp-proofs-fork")
 URL = f"https://github.com/{FORK}.git"
 PR_TOKEN = os.environ.get("PR_TOKEN", "")
-WORKERS = int(os.environ.get("DRAIN_WORKERS", "10"))   # Lead 17:10: 10 PRs a minute; a filed branch waits ~50 s on the gate
+WORKERS = int(os.environ.get("DRAIN_WORKERS", "14"))   # Lead 17:17: 14 workers = about 10 leased + 10 unleased a minute with the gate open
 MAX_S = float(os.environ.get("DRAIN_MAX_S", "1200")); LINGER = float(os.environ.get("DRAIN_LINGER", "30"))
 UPSTREAM = os.environ.get("DRAIN_UPSTREAM", "https://github.com/open-goat/pequalnp-proofs.git")
 DRY = os.environ.get("DRAIN_DRY", "0") == "1"       # test: everything but submit.py (prints what it would run)
