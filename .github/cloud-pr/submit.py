@@ -650,6 +650,16 @@ def main():
         gj0 = curl_json(GAPS, 60)
         unlisted = not any(x.get("id") == ID for x in gj0.get("gaps") or []) and ID not in (gj0.get("withdrawn") or {}) \
             and not any((x.get("id") if isinstance(x, dict) else x) == ID for x in gj0.get("checked") or [])
+        # Lead 14:22 SAFETY: no new PR on a step another agent holds (holders_now above 0) unless we hold its lease
+        hn = next((x.get("holders_now") or 0 for x in gj0.get("gaps") or [] if x.get("id") == ID), 0)
+        if hn > 0 and os.environ.get("HELD_SKIP", "1") == "1":
+            old = None
+            try:
+                old = dg().lease_of(ID) if PR_TOKEN else None
+            except Exception:
+                pass
+            if not old:
+                finish("race", f"held by {hn} other agent(s) at the desk and no lease of ours: no new PR (Lead 14:22)")
     except Exception as e:
         log("gaps.json read failed, full guards:", repr(e)[:120])
     if unlisted:
