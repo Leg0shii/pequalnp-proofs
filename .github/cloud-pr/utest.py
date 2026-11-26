@@ -90,7 +90,8 @@ def main():
             time.sleep(20)              # the infra box feeds utest/ branches as w12's list refreshes
             continue
         # Lead 16:24: frozen for 15 min of filing -> 4 a minute
-        per_min = PER_MIN if time.time() - T_START < RAMP_S else max(PER_MIN, RAMP_TO)
+        # Lead 16:41: 4 a minute as soon as the first PR has opened cleanly (or after RAMP_S with the pause frozen)
+        per_min = max(PER_MIN, RAMP_TO) if (n >= 1 or time.time() - T_START >= RAMP_S) else PER_MIN
         wait = last_pr + 60.0 / per_min - time.time()
         if wait > 0:
             time.sleep(min(wait, 20))
