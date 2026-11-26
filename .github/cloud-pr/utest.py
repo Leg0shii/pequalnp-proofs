@@ -22,6 +22,7 @@ HANDLE = "Leg0shii"
 PER_MIN = float(os.environ.get("UTEST_PER_MIN", "2"))
 END = time.time() + float(os.environ.get("MINUTES", "50")) * 60
 T_START = time.time()
+SKIP = set()
 RAMP_S = float(os.environ.get("UTEST_RAMP_S", "900")); RAMP_TO = float(os.environ.get("UTEST_RAMP_TO", "4"))
 
 
@@ -84,7 +85,7 @@ def main():
         if not on():
             log("utest/on removed: test stopped after", n, "PRs")
             return
-        q = queue()
+        q = [x for x in queue() if x[0] not in SKIP]
         if not q:
             time.sleep(20)              # the infra box feeds utest/ branches as w12's list refreshes
             continue
@@ -95,14 +96,15 @@ def main():
             time.sleep(min(wait, 20))
             continue
         sid, sha = q[0]
-        res, why = D["one"](sid, sha, prefix="utest", extra={"UNLEASED_TEST": "1", "NO_LEASE_NO_PR": "0", "LATE_LEASE": "0",
-                                                             "PR_GATE_N": "1"})
+        res, why = D["one"](sid, sha, prefix="utest", extra={"UNLEASED_TEST": "1", "NO_LEASE_NO_PR": "0", "LATE_LEASE": "0"})
         log("DONE", sid, res, why)
         if res == "submitted":
             n += 1; last_pr = time.time()
-        elif res not in ("exists",):
-            # not free, lost race or an error: drop this branch from the queue so the next one runs
+        elif res in ("race", "unleased", "formatfail", "gone"):
+            # not free, lost race or a bad file: drop this branch from the queue so the next one runs
             sh("git", *auth(), "push", "-q", URL, "--delete", f"utest/{sid}", timeout=60)
+        else:
+            SKIP.add(sid)               # error or anything else: keep the branch, skip it in this run
     log("time limit: test ends after", n, "PRs")
 
 
