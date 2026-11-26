@@ -1,0 +1,13 @@
+name: nodesk
+# GATEWAY v1 section 3: fails if any tracked file under .github names the desk host (deskgate on the PC is the one door)
+on:
+  push:
+    branches: [main, desk-budget, gateway-v1]
+  workflow_dispatch:
+jobs:
+  nodesk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 .github/cloud-pr/nodesk.py

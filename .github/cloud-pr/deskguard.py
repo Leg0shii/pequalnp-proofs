@@ -22,7 +22,7 @@ import os, re, sys, time, json, subprocess, socket
 
 REPO = os.environ.get("DESKGUARD_REPO") or os.environ.get("WATCH_TK") or os.path.expanduser("~/farm/tk")
 REMOTE = os.environ.get("DESKGUARD_REMOTE", "origin")
-GAP = float(os.environ.get("DESKGUARD_GAP", "5")); BUDGET = int(os.environ.get("DESKGUARD_BUDGET", "20"))
+GAP = float(os.environ.get("DESKGUARD_GAP", "5")); BUDGET = int(os.environ.get("DESKGUARD_BUDGET", "170"))   # 8x8 wave only (owner 14:17 UTC: 8 claims + 8 releases a min): back to 20 with leaserate 4
 HOME = os.environ.get("DESKGUARD_HOME", os.path.expanduser("~/.deskguard")); os.makedirs(HOME, exist_ok=True)
 CALLS = os.path.join(HOME, "calls.json")
 
@@ -344,7 +344,7 @@ def ask_token(owner, n=None):
 
 
 # ---- 16:00 UTC 26 Nov pause (Lead restart conditions 2-5): ONE budget for every desk-host request ----
-# Every request to pequalnp.com/desk/* (next, beat, release, status, step, lease, board: reads included) from every
+# (history) Every request to the desk host (next, beat, release, status, step, lease, board: reads included) from every
 # machine (PC watcher and helpers, cloud opener, backup watcher, workers) takes ONE token here first. Tokens are refs
 # deskcall/<slot> with slot = floor(epoch / STEP_S), created atomically (one winner per slot, all machines), and the
 # request is sent inside [slot start, slot start + SEND_WIN] only, so any two desk-host requests of the team are at
@@ -354,6 +354,10 @@ def ask_token(owner, n=None):
 # anywhere sets deskpause for all machines (note_answer); no retry on 429 or 5xx.
 CALL_DEFAULT = int(os.environ.get("DESKGUARD_CALL_RATE", "6"))
 CALL_MAX = 10
+# Lead 16:40: the budget must hold over 30 min too. Calibration: keeperxy (3 leased PRs a minute 15:30-15:39, about 6
+# handle calls a minute) stayed paused; zakpgrove (1-3 a minute, about 2-6 calls) too. So a 30-min average well under
+# 2 a minute: CALL_30 = 45 requests in any 30 min (1.5 a minute), bursts still at most 10 a minute.
+CALL_30 = int(os.environ.get("DESKGUARD_CALL_30", "45"))
 SEND_WIN = 0.2
 _CP = {"t": 0.0, "until": 0.0, "rate_t": 0.0, "rate": None, "n": 0}
 
@@ -407,6 +411,9 @@ def call_take(owner, wait=60):
         st = step_s()
         if st == float("inf"):
             return False
+        ts = call_times(time.time() - 1800)       # 30-min cap (Lead 16:40), all machines; unreadable = no token
+        if ts is None or len(ts) >= CALL_30:
+            return False
         now = time.time()
         k = int(now // st) + 1 if now - (now // st) * st > SEND_WIN / 2 else int(now // st)
         start = k * st
@@ -435,7 +442,7 @@ def _call_clean(k, st):
     try:
         r = _git("ls-remote", REMOTE, "refs/heads/deskcall/*")
         old = [l.split()[1] for l in r.stdout.split("\n") if re.search(r"/deskcall/(\d+)$", l)
-               and int(re.search(r"/deskcall/(\d+)$", l).group(1)) / 10 < time.time() - 900]
+               and int(re.search(r"/deskcall/(\d+)$", l).group(1)) / 10 < time.time() - 2400]   # keep 40 min (30-min cap)
         if old:
             _git("push", "-q", REMOTE, *[":" + x for x in old[:80]])
     except Exception:
@@ -443,7 +450,8 @@ def _call_clean(k, st):
 
 
 def call_times(since=None):
-    """Start times of the team's desk-host request slots taken (all machines) since `since` (default: 15 min ago),
+    """Start times of the team's desk-host request slots taken (all machines) since `since` (default: 15 min ago;
+    refs are kept 40 min for the 30-min cap),
     from the deskcall/<deciseconds> refs: the LIVE COUNTER (Lead 16:30 item 3). An upper bound: a token whose send
     window was missed is counted too. Git failure = None."""
     try:
@@ -522,31 +530,7 @@ def note_answer(code, body=""):
     return False
 
 
-DESK_HOST = os.environ.get("DESKGUARD_DESK_HOST", "https://pequalnp.com/desk/")   # drill: a local stub desk
-_RC = {}
-
-
-def desk_request(path, owner, post=False, cache_s=0, wait=60, model="unknown"):
-    """The one sender for pequalnp.com/desk/<path>: call token, curl once (no retry), note_answer, optional cache for
-    reads (cache_s, per process). Returns (http code str, body str); ("000", reason) when no request was made."""
-    if model and "model=" not in path and not path.startswith(("status", "board")):
-        path += ("&" if "?" in path else "?") + "model=" + model
-    if cache_s and path in _RC and time.time() - _RC[path][0] < cache_s:
-        return _RC[path][1]
-    if not call_take(owner, wait):
-        return "000", "no desk call token (paused, rate 0 or no slot in time)"
-    r = subprocess.run(["curl", "-sS", "--max-time", "30", "-w", "\n%{http_code}"] + (["-X", "POST"] if post else [])
-                       + [DESK_HOST + path], capture_output=True, text=True, timeout=45)
-    try:
-        note_call()
-    except Exception:
-        pass
-    body, _, code = (r.stdout or "").rpartition("\n")
-    code = code.strip() or "000"
-    note_answer(code, body)
-    if cache_s and code == "200":
-        _RC[path] = (time.time(), (code, body))
-    return code, body
+# GATEWAY v1 (Lead 16:50 UTC 26 Nov): the desk sender that lived here is deleted; watch/deskgate.py is the one door.
 
 
 if __name__ == "__main__":
@@ -555,8 +539,6 @@ if __name__ == "__main__":
         w = []; ok = acquire(a[1], w); print("OK" if ok else "NO", a[1], w[0]); sys.exit(0 if ok else 1)
     if a[:1] == ["pause"] and len(a) == 2:
         sys.exit(0 if pause(float(a[1])) else 1)
-    if a[:1] == ["call"] and len(a) >= 2:           # shell callers: deskguard.py call OWNER -> exit 0 = send now
-        sys.exit(0 if call_take(a[1], float(a[2]) if len(a) > 2 else 60) else 1)
     if a[:1] == ["answer"] and len(a) >= 2:         # shell callers: deskguard.py answer CODE [BODYFILE]
         b = open(a[2], errors="replace").read() if len(a) > 2 and os.path.exists(a[2]) else ""
         sys.exit(1 if note_answer(a[1], b) else 0)

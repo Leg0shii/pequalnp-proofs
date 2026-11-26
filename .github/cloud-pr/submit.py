@@ -24,9 +24,6 @@ import base64, fcntl, json, os, re, subprocess, sys, tempfile, time
 
 UP = "open-goat/pequalnp-proofs"
 GAPS = "https://data.pequalnp.com/data/desk/gaps.json"
-STATUS = "https://pequalnp.com/desk/status"
-STEP = "https://pequalnp.com/desk/step?gap="
-DESK = "https://pequalnp.com/desk/"
 HANDLE = "Leg0shii"
 EMAIL = "46093332+Leg0shii@users.noreply.github.com"
 SIZE_LIMIT = 524288
@@ -43,14 +40,16 @@ KIND = ""          # gaps.json kind of the step (set by race_ok)
 MASK_RE = re.compile(r"PEqualNP\.Represents\.Represents \(fun u v : Fin \d+ => \(\d+ : ℕ\)\.testBit")
 # Lead 15:59 (desk pause incident): lease rule cases 2 and 3 suspended, NO LEASE, NO PR, until the Lead's written word
 # lifts it (then set NO_LEASE_NO_PR=0 here). With it on there is no PR-first late lease either.
-NO_LEASE_NO_PR = os.environ.get("NO_LEASE_NO_PR", "1") == "1"
+# GATEWAY v1 section 4 (Lead 16:50): replaced by the filing rule in race_ok (lease within 60 s, else unleased if no
+# rival PR and no holder, else skip). Off by default.
+NO_LEASE_NO_PR = os.environ.get("NO_LEASE_NO_PR", "0") == "1"
 # Lead 16:14 UNLEASED-TEST (set only by .github/cloud-pr/utest.py): a free unit (gaps.json: no PR, no holder) gets a PR
 # with NO lease and ZERO desk-host requests of any kind (no next, status, step, release), to learn whether PRs alone
 # move our pause.
 UNLEASED_TEST = os.environ.get("UNLEASED_TEST", "0") == "1"
 if UNLEASED_TEST:
     NO_LEASE_NO_PR = False
-LATE_LEASE = os.environ.get("LATE_LEASE", "0" if NO_LEASE_NO_PR else "1") == "1"   # unheld: open the PR, then claim
+LATE_LEASE = False     # GATEWAY v1: no late lease (claims only for finished proofs, before the PR)   # unheld: open the PR, then claim
 # Lead 14:36: LEASE-FIRST (the ready commit message holds the word lease-first): claim BEFORE any PR (a claim after our
 # own PR paid 31 with race: true instead of 110); a grant opens the PR with the Lease line, a refusal or a held step
 # opens NO PR (result unleased, branch kept)
@@ -74,36 +73,60 @@ def run(cmd, timeout=300, env=None, cwd=None):
         return subprocess.CompletedProcess(cmd, 1, "", "timeout")
 
 
-def _desk_http(path, post=False, cache_s=0):
-    """EVERY desk-host request of this run (claims, releases, the rare read): one per-run lock (drain workers queue here
-    and make no request while they wait) and then the team's one call token (deskguard.desk_request: shared slots on
-    every machine, at least 6 s apart, at most 10 a minute, no retry, 429 = shared pause). Lead 16:02 conditions 2-3.
-    Returns (code, body); ("000", why) = no request made."""
-    import fcntl
-    gd = os.environ.get("PR_GATE_DIR") or W
-    os.makedirs(gd, exist_ok=True)
-    with open(os.path.join(gd, "deskcall.lock"), "a") as lf:
-        fcntl.flock(lf, fcntl.LOCK_EX)
-        return dg().desk_request(path, "cloud " + path.split("?")[0], post=post, cache_s=cache_s, wait=60, model=DESK_MODEL)
-
-
-def _desk_read(url, timeout):
-    code, body = _desk_http(url[len(DESK):], cache_s=15)
-    if code == "200":
-        return json.loads(body)
-    raise RuntimeError(f"desk read {url}: {code} {body.strip()[:160]}")
+def _desk_host(url):
+    """GATEWAY v1: this opener never contacts the desk host (deskgate on the PC is the one door); data mirror only."""
+    h = re.sub(r"^https?://([^/:]+).*", r"\1", url or "")
+    return h.endswith("pequalnp.com") and h != "data.pequalnp.com"
 
 
 def curl_json(url, timeout=60):
-    # the desk refuses python urllib (Cloudflare), so curl, like the PC watcher
-    if "pequalnp.com/desk/" in url:
-        return _desk_read(url, timeout)
+    if _desk_host(url):
+        raise RuntimeError("GATEWAY v1: no desk-host request from the opener")
     for att in range(3):
         r = run(["curl", "-sSf", "--max-time", str(timeout), url], timeout=timeout + 10)
         if r.returncode == 0:
             return json.loads(r.stdout)
         time.sleep(3 * (att + 1))
     raise RuntimeError(f"curl {url}: {r.stderr.strip()[:200]}")
+
+
+GATE_WAIT_S = float(os.environ.get("GATE_WAIT_S", "60"))   # GATEWAY 4: lease ok within 60 s
+
+
+def _gate(req, gid, wait):
+    """Ref fallback of deskgate (GATEWAY 1): push toolkit ref gatereq/<gid> whose commit message is the request, then
+    wait for a NEW toolkit ref lease/<gid> (sha differs from before the request); its message is the desk-rep line
+    `lease <gid> ok <lease>` | `lease <gid> held|refused|nobudget|closed|gone|released`. None = no answer in time."""
+    m = dg(); g = m.REPO
+    ref, ans = f"refs/heads/gatereq/{gid}", f"refs/heads/lease/{gid}"
+
+    def sha_of(r):
+        o = run(["git", "-C", g, "ls-remote", "origin", r], timeout=30).stdout.split()
+        return o[0] if o else None
+    before = sha_of(ans)
+    r = run(["git", "-C", g, "push", "-f", "origin", f"{m._marker(req)}:{ref}"], timeout=60)
+    if r.returncode:
+        log("gate request push failed:", r.stderr.strip()[-120:])
+        return None
+    t_end = time.time() + wait
+    while time.time() < t_end:
+        time.sleep(3)
+        now = sha_of(ans)
+        if now and now != before:
+            run(["git", "-C", g, "fetch", "-q", "origin", f"+{ans}:refs/gate-ans"], timeout=60)
+            line = run(["git", "-C", g, "log", "-1", "--format=%s", "refs/gate-ans"], timeout=30).stdout.strip()
+            if line.startswith(f"lease {gid} "):
+                return line
+    run(["git", "-C", g, "push", "-q", "origin", f":{ref}"], timeout=60)     # unanswered: withdraw the request
+    return None
+
+
+def gate_claim(gid):
+    """(class, lease id or None): ok / held / refused / nobudget / closed / gone / timeout."""
+    line = _gate(f"claim {gid} cloud", gid, GATE_WAIT_S)
+    p = (line or "").split()
+    cls = p[2] if len(p) >= 3 else "timeout"
+    return cls, (p[3] if cls == "ok" and len(p) >= 4 else None)
 
 
 def gh(args, write=False, timeout=120):
@@ -231,22 +254,6 @@ _DESK_T = [0.0]
 
 
 DESK_MODEL = os.environ.get("DESK_MODEL", "unknown")     # owner 15:40:27 UTC "Yes to both": &model= on every desk call
-
-
-def with_model(path):
-    """join.txt "Always send &model= with the model you are and its version, or unknown": every handle call gets it."""
-    return path if re.search(r"[?&]model=", path) else path + ("&" if "?" in path else "?") + "model=" + DESK_MODEL
-
-
-def desk(path, post=False):
-    code, body = _desk_http(with_model(path), post=post)
-    try:
-        d = json.loads(body)
-    except Exception:
-        d = {"error": (body or "no request").strip()[:200]}
-    if isinstance(d, dict):
-        d["_http"] = code.strip()
-    return d
 
 
 PAUSED = [False]
@@ -386,8 +393,8 @@ def rate_prio(backup, points):
 def claim_unheld(gid, prio=1):
     """d46: lease for an unheld step right before the push. Any refusal = PR without a lease (an unheld step still
     gets its PR); a pause answer stops all desk calls (claim -> set_pause)."""
-    if not LEASES_ON or PAUSED[0] or DRY or not PR_TOKEN or time.time() < NO_DESK_UNTIL:
-        return None, "no lease (desk off or paused)"
+    if not LEASES_ON or DRY or not PR_TOKEN:
+        return None, "no lease (dry run or no token)"
     if not take_slot(gid):
         return None, f"no lease: {LEASE_MAX} lease slots busy"
     lid, why = claim(gid, prio)
@@ -410,58 +417,37 @@ def claim(gid, prio=1):
     old = dg().lease_of(gid)
     if old:
         return old, "reused the lease recorded on claim/" + gid
-    if not dg().rate_take(f"cloud {gid}", wait=RATE_WAIT_S, prio=prio):
-        log("rate cap: no team-wide claim token within", RATE_WAIT_S, "s (rate", dg().rate(), "/min)")
-        return None, f"no lease: rate cap ({dg().rate()}/min team-wide) reached"
-    if not take_quota(gid):
-        return None, "no lease: rollout quota used"
+    # GATEWAY v1: no caller rate token or quota (the budget lives in deskgate); one claim per step stays (claim_lock)
     if not claim_lock(gid):
         old = None if DRY or not PR_TOKEN else dg().lease_of(gid)
         if old:      # D: our own earlier claim (retry or the other opener): reuse its lease, never claim twice
             return old, "reused the lease recorded on claim/" + gid
-        if "paused" in LOCK_WHY[0]:   # shared pause set after this run started (10:08 UTC: 19235 lost its PR)
-            PAUSED[0] = True
-            return None, "no lease: shared desk pause (" + LOCK_WHY[0][:60] + ")"
         return None, "claim skipped: this step was claimed once already"
-    d = desk(f"next?handle={HANDLE}&gap={gid}&have=proof&another=1")
-    if not dg().check_answer(d, "claim"):      # A: pause, warning or an unknown refusal: shared pause 15 min + alert
-        PAUSED[0] = True
-        set_pause(int(time.time()) + PAUSE_MIN_S, "fail closed on claim answer: " + json.dumps(d))
-        return None, "claim answer not understood, desk calls stopped 15 min: " + json.dumps(d)[:160]
-    if d.get("_http") == "410":
-        return None, "gone (410): proved first " + json.dumps(d)[:120]
-    if d.get("_http") == "429" or PAUSE_RE.search(json.dumps(d)):
-        PAUSED[0] = True
-        try:
-            ra = int(d.get("retry_after_s") or 3600)
-            set_pause(int(time.time()) + max(ra, PAUSE_MIN_S), json.dumps(d))
-        except Exception as e:
-            log("could not record the desk pause:", e)
-        return None, "claim refused: handle paused: " + json.dumps(d)[:160]
-    le = d.get("lease"); gp = d.get("gap") or {}
-    lid = le.get("id") if isinstance(le, dict) else le
-    if not lid or (isinstance(gp, dict) and gp.get("id") not in (None, gid)):
-        return None, "claim refused: " + json.dumps(d)[:200]
-    te = (le.get("terms") or {}) if isinstance(le, dict) else {}
-    dg().record_lease(gid, lid, te)
-    TERMS[0] = dict(te, points=te.get("points", le.get("points") if isinstance(le, dict) else None))
-    log("claim terms:", json.dumps(te)[:200])
-    return str(lid), "claimed" + (" (race)" if te.get("race") else "")
+    t = time.time()
+    cls, lid = gate_claim(gid)
+    log("gate:", gid, cls, lid or "", f"{time.time() - t:.0f}s")
+    if cls == "gone":
+        return None, "gone (410): proved first (gate)"
+    if cls == "held":
+        return None, "claim refused: held by another agent (gate)"
+    if cls != "ok" or not lid:
+        return None, f"no lease: gate {cls}"
+    dg().record_lease(gid, lid, {})
+    return str(lid), "claimed (gate)"
 
 
-LF_WAIT_S = float(os.environ.get("LF_WAIT_S", "180"))      # owner 15:17:26 lease rule: wait up to 3 min for a token
+LF_WAIT_S = float(os.environ.get("LF_WAIT_S", "15"))      # GATEWAY 4: slot wait short, the gate answers within 60 s      # owner 15:17:26 lease rule: wait up to 3 min for a token
 _LF_HELD = re.compile(r"gets a head start|was handed this step|bring your proof back|held by another|another handle|"
                       r"at most one handle|retry_after", re.I)
 
 
 def lf_case(why):
-    """owner 15:17:26 lease rule: held (another agent holds it) / stop (pause, warning, answer not understood, desk
-    off) / final (410) = no PR; bare (any other refusal) = PR without a lease if no rival PR."""
+    """GATEWAY 4: held (another agent holds it) = no PR; final (proved first) = no PR; anything else (gate closed,
+    paused, no budget, refused, no answer in 60 s) = bare: PR without a lease if no rival PR and no holder."""
     w = why or ""
-    if w.startswith("claim refused") and _LF_HELD.search(w) and "handle paused" not in w:
+    if w.startswith("claim refused") and _LF_HELD.search(w):
         return "held"
-    if ("paus" in w or "not understood" in w or "desk off" in w or w.startswith("no lease (desk off")
-            or "dry run" in w):
+    if "dry run" in w:
         return "stop"
     if "410" in w or "proved first" in w:
         return "final"
@@ -488,12 +474,11 @@ def claim_retry(gid, prio=1):
 
 
 def release(lid, reason):
-    if lid and not DRY:
-        d = desk(f"release?lease={lid}&reason={reason}", post=True)
-        log("desk release", reason, json.dumps(d)[:120])
-        if not dg().check_answer(d, "release"):   # A: non-200 release = shared pause 15 min
-            PAUSED[0] = True
-            set_pause(int(time.time()) + PAUSE_MIN_S, "fail closed on release answer: " + json.dumps(d))
+    """GATEWAY v1: release(submitted) through the gate's ref fallback; no wait (the gate drains releases after claims)."""
+    if lid and not DRY and reason == "submitted":
+        m = dg()
+        r = run(["git", "-C", m.REPO, "push", "-f", "origin", f"{m._marker(f'release {ID} {lid} cloud')}:refs/heads/gatereq/{ID}"], timeout=60)
+        log("gate release request", lid, "ok" if r.returncode == 0 else "push failed")
 
 
 def pr_list(g):
@@ -538,49 +523,33 @@ def race_ok(gid):
         b = race_check(gid)
         if b:
             return False, f"blocking PRs {b}", None
-        if LEASE_FIRST and not DRY:
-            # owner 15:17:26 UTC "go Lead's lease rule" (= upstream tools/pnp.sh submit): claim first (slot and token
-            # wait up to LF_WAIT_S = 3 min). Held by another agent, pause/warning, proved first: NO PR. Any other
-            # refusal (cap, not open, reserved, unreachable, no token or slot in 3 min): PR WITHOUT a lease at once,
-            # provided no rival PR is on the step.
-            if is_h:
-                old = dg().lease_of(gid)
-                if old:
-                    return True, "clear (lease-first, held: our recorded lease reused)", old
-                return False, "lease-first: held by another agent, no PR", None
-            global SLOT_WAIT_S, RATE_WAIT_S
-            SLOT_WAIT_S = RATE_WAIT_S = LF_WAIT_S
-            lid, why = claim_unheld(gid, 2)
-            if lid:
-                return True, "clear, lease-first " + why, lid
-            case = lf_case(why)
-            if case == "bare" and rival_open(gid):
-                case = "rival PR"
-            if case != "bare":
-                return False, f"lease-first: {case} (" + why[:120] + "), no PR", None
-            TERMS[0] = {"bare": why[:160]}
-            return True, "clear, lease-first refused (" + why[:100] + "): PR without a lease (owner 15:17 rule)", None
-        if not is_h:     # unheld: d46 lease right before the push (one claim ever, slots, quota); refused = PR only
-            if MASK_RE.search(open(PROOF, errors="replace").read()):
-                # Lead 13:50: mask steps are claimed by the PC only (its claim lock is local); none from the cloud
-                return True, "clear (mask step: the PC is the only claimer, PR without a lease here)", None
-            if LATE_LEASE and not DRY:
-                # Lead 13:37: PR FIRST, the claim after it (the claim chain cost 8 s on 19564 while rivals opened)
-                PRIO[0] = prio
-                return True, "clear (PR first, lease claim after it)", "LATE"
-            lid, why = claim_unheld(gid, prio)
-            return True, "clear, " + why, lid
-        if PAUSED[0] or time.time() < NO_DESK_UNTIL:
-            # Lead 20:43: desk off or paused = no claim and no error: open the PR without a lease (as the PC does)
-            return True, "clear (held, desk off: PR without a lease, no desk call)", None
         if DRY:
-            return True, "clear (dry run: held, no claim)", None
-        # Lead 10:30: the first agent handed a step gets a ~30 min head start and later claims are refused, so a held
-        # step gets no claim: our own recorded lease if there is one, else a PR without a lease at once
+            return True, "clear (dry run: no gate request)", None
+        # GATEWAY v1 section 4 (Lead 16:50 UTC 26 Nov), in code: finished proof -> ask deskgate for the lease. Lease ok
+        # within 60 s -> PR with the lease. Else, if GitHub shows no rival PR now and the mirror shows no holder -> PR
+        # without a lease. Else skip (no backup PRs). Gate closed or paused -> the unleased branch.
         old = dg().lease_of(gid)
         if old:
-            return True, "clear (held, our recorded lease reused)", old
-        return True, "clear (held by another agent: PR without a lease, no desk call)", None
+            return True, "clear (our recorded lease reused)", old
+        global SLOT_WAIT_S
+        SLOT_WAIT_S = LF_WAIT_S
+        lid, why = claim_unheld(gid, 2)
+        if lid:
+            return True, "clear, " + why, lid
+        case = lf_case(why)
+        if case == "bare" and rival_open(gid):
+            case = "rival PR"
+        if case == "bare":
+            try:
+                g2 = next((x for x in curl_json(GAPS, 60)["gaps"] if x["id"] == gid), None)
+            except Exception:
+                g2 = {"held_now": True}          # cannot tell: treat as held (fail closed)
+            if g2 and (g2.get("held_now") or (g2.get("holders_now") or 0) > 0):
+                case = "held in the mirror"
+        if case != "bare":
+            return False, f"lease-first: {case} (" + why[:120] + "), no PR", None
+        TERMS[0] = {"bare": why[:160]}
+        return True, "clear, no lease (" + why[:100] + "): PR without a lease (GATEWAY 4)", None
     except Exception as e:
         return False, f"race check error {e}", None
 
@@ -776,19 +745,7 @@ def main():
     log(f"guards passed ({time.time() - t0:.0f}s)")
     if unlisted:
         finish("waiting", "not posted: prestage guards passed, branch kept for ready-wait")
-    pu = 0 if UNLEASED_TEST else read_pause()      # the test makes no desk request at all, so the pause gate is moot
-    if pu > time.time():
-        PAUSED[0] = True
-        log("the desk paused this handle until", time.strftime("%H:%M:%S", time.gmtime(pu)), "UTC: no desk requests in this run")
-        # Lead 15:58 UTC 26 Nov: while paused, no PR and no desk read at all; only a step whose lease we already hold
-        # may open. The branch is kept (result paused: the drain runs it again after the pause)
-        held_lease = None
-        try:
-            held_lease = dg().lease_of(ID) if PR_TOKEN else None
-        except Exception:
-            pass
-        if not held_lease:
-            finish("paused", "shared desk pause until " + time.strftime("%H:%M:%S", time.gmtime(pu)) + " UTC: no PR, no desk read, branch kept")
+    # GATEWAY v1 section 4: a pause never stops filing (the gate answers closed and the unleased branch decides)
     if not DRY and stopped():
         finish("stopped", "STOP file on upstream main: no PR, no lease (branch kept; re-run the job once STOP is gone)")
     # 2. race check right before the push

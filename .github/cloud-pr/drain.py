@@ -153,7 +153,13 @@ _PZ = [0.0, 0.0]          # (checked at, paused until)
 
 
 def paused():
-    """Shared deskguard pause (toolkit refs deskpause/<epoch>), read at most every 20 s; unreadable = paused."""
+    """GATEWAY v1 section 4 (Lead 16:50 UTC 26 Nov): a pause never stops filing. The opener asks deskgate for the lease
+    and goes to the unleased branch when the gate is closed, so the drain never idles on a pause."""
+    return False
+
+
+def _paused_old():
+    """(before GATEWAY v1) Shared deskguard pause (toolkit refs deskpause/<epoch>), read at most every 20 s."""
     if time.time() - _PZ[0] > 20:
         r = sh("git", *auth(), "ls-remote", "https://github.com/Leg0shii/pnp-toolkit.git", "refs/heads/deskpause/*", timeout=60)
         if r.returncode:
