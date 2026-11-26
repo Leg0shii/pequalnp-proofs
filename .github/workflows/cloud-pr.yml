@@ -36,19 +36,44 @@ permissions:
   contents: read
   pull-requests: read
 
-concurrency:
-  group: cloud-pr-${{ github.ref }}-${{ inputs.step }}
-  cancel-in-progress: false
-
 defaults:
   run:
     shell: bash
 
 jobs:
-  submit:
-    if: github.event.deleted != true
+  # DRAIN MODE (Lead 14:10 UTC 26 Nov): every ready/ push lands in ONE group; one run works, one waits, GitHub
+  # cancels the other waiting ones. The working run takes all pending ready/ branches newest step first, 4 at a time,
+  # each through the same submit.py, PR creations gated to 2 in flight. See .github/cloud-pr/drain.py.
+  drain:
+    if: github.event_name == 'push' && github.event.deleted != true
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    concurrency:
+      group: cloud-pr-drain
+      cancel-in-progress: false
+    steps:
+      - name: Check out fork main (drain.py, submit.py, guards)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: src
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Drain every pending ready/ branch, newest first
+        env:
+          SRC: ${{ github.workspace }}/src
+          W: ${{ github.workspace }}/work
+          READ_TOKEN: ${{ github.token }}
+          PR_TOKEN: ${{ secrets.PR_TOKEN }}
+        run: python3 -I "$GITHUB_WORKSPACE/src/.github/cloud-pr/drain.py"
+
+  submit:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    concurrency:
+      group: cloud-pr-${{ github.ref }}-${{ inputs.step }}
+      cancel-in-progress: false
     env:
       W: ${{ github.workspace }}/work
       IN_STEP: ${{ inputs.step }}

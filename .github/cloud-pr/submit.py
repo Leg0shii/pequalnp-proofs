@@ -20,7 +20,7 @@ Environment: ID, MOD (L_meta_N or V_meta_N__kK), PROOF (file), TREE (shallow clo
 READ_TOKEN (the run's GITHUB_TOKEN, for reads), PR_TOKEN (secret, for the push and the PR), DRY=1 (no claim, no
 push, no PR, no branch delete). Prints RESULT=<...> and writes result=<...> to $GITHUB_OUTPUT.
 """
-import base64, json, os, re, subprocess, sys, tempfile, time
+import base64, fcntl, json, os, re, subprocess, sys, tempfile, time
 
 UP = "open-goat/pequalnp-proofs"
 GAPS = "https://data.pequalnp.com/data/desk/gaps.json"
@@ -536,6 +536,27 @@ def push_branch(c, gid):
     return r.stderr.strip()[:300]
 
 
+class pr_gate:
+    """Drain mode (drain.py, many submit.py at once on one runner): at most PR_GATE_N (2) PR creations in flight,
+    by flock on PR_GATE_DIR/slot<k> (GitHub refuses PR-creation bursts). No PR_GATE_DIR (one run per branch): no gate."""
+    def __enter__(self):
+        self.f = None
+        d = os.environ.get("PR_GATE_DIR")
+        while d:
+            for k in range(int(os.environ.get("PR_GATE_N", "2"))):
+                f = open(os.path.join(d, f"slot{k}"), "w")
+                try:
+                    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB); self.f = f; return self
+                except OSError:
+                    f.close()
+            time.sleep(0.2)
+        return self
+
+    def __exit__(self, *a):
+        if self.f:
+            self.f.close()
+
+
 def submit(gid, lease):
     base = git("rev-parse", "HEAD").stdout.strip()
     if not base:
@@ -568,8 +589,9 @@ def submit(gid, lease):
         if stopped():                    # STOP may appear while this PR waited for a retry
             return None, "STOP file on upstream main"
         body = DESC + (f"\n\nLease: {lease}" if lease else "") + FOOTER
-        r = run(["gh", "pr", "create", "--repo", UP, "--head", f"{HANDLE}:{gid}", "--base", "main",
-                 "--title", gid, "--body", body], timeout=120, env=dict(os.environ, GH_TOKEN=PR_TOKEN))
+        with pr_gate():
+            r = run(["gh", "pr", "create", "--repo", UP, "--head", f"{HANDLE}:{gid}", "--base", "main",
+                     "--title", gid, "--body", body], timeout=120, env=dict(os.environ, GH_TOKEN=PR_TOKEN))
         if re.search(r"https://\S+", r.stdout) or "already exists" in r.stderr:
             break                                   # an existing PR for our branch is a success
         if not TRANSIENT.search(r.stderr + r.stdout) or att == 4:
