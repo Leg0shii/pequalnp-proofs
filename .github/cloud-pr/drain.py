@@ -137,7 +137,9 @@ def work(sid, sha):
     except Exception as e:
         res, why = "error", repr(e)[:200]
     with LOCK:
-        SEEN[(sid, sha)] = (res, time.time()); STATS[res] = STATS.get(res, 0) + 1
+        if res != "paused" and not (res == "unleased" and "desk off or paused" in why):
+            SEEN[(sid, sha)] = (res, time.time())          # paused ones run again after the pause
+        STATS[res] = STATS.get(res, 0) + 1
         try:
             save_seen()
         except Exception as e:
@@ -146,8 +148,26 @@ def work(sid, sha):
     return sid
 
 
+_PZ = [0.0, 0.0]          # (checked at, paused until)
+
+
+def paused():
+    """Shared deskguard pause (toolkit refs deskpause/<epoch>), read at most every 20 s; unreadable = paused."""
+    if time.time() - _PZ[0] > 20:
+        r = sh("git", *auth(), "ls-remote", "https://github.com/Leg0shii/pnp-toolkit.git", "refs/heads/deskpause/*", timeout=60)
+        if r.returncode:
+            _PZ[:] = [time.time(), time.time() + 60]
+        else:
+            ts = [int(l.rsplit("/", 1)[1]) for l in r.stdout.splitlines() if l.rsplit("/", 1)[-1].isdigit()]
+            _PZ[:] = [time.time(), max(ts or [0])]
+    return time.time() < _PZ[1]
+
+
 def main():
     os.makedirs(W, exist_ok=True)
+    if paused():                 # Lead 15:58: while the desk pause runs, the drain touches nothing (branches stay queued)
+        log("shared desk pause until", time.strftime("%H:%M:%S", time.gmtime(_PZ[1])), "UTC: drain does nothing")
+        return
     load_seen()
     log("drain start,", len(SEEN), "branches already done in the last 6 h")
     inflight = {}; idle = None
@@ -155,7 +175,12 @@ def main():
         while time.time() - T0 < MAX_S:
             for k in [k for k, fu in inflight.items() if fu.done()]:
                 inflight.pop(k)
-            todo = [x for x in pending() if x not in inflight] if len(inflight) < WORKERS else []
+            if paused():
+                log("shared desk pause started: no new branch, in-flight ones finish"); todo = []
+                if not inflight:
+                    break
+            else:
+                todo = [x for x in pending() if x not in inflight] if len(inflight) < WORKERS else []
             for x in todo[:WORKERS - len(inflight)]:
                 inflight[x] = ex.submit(work, *x)
                 log("START", x[0], x[1][:8], f"({len(todo)} pending)")

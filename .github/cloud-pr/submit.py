@@ -65,8 +65,38 @@ def run(cmd, timeout=300, env=None, cwd=None):
         return subprocess.CompletedProcess(cmd, 1, "", "timeout")
 
 
+def _desk_read(url, timeout):
+    """Desk-host reads (desk/status, desk/step) from all drain workers of this run share ONE lock: at least 3 s between
+    any two (join.txt "one request every few seconds at most"), desk/status cached 15 s for every worker, and no retry
+    (a 429 is an answer: the run backs off). 15:58 UTC 26 Nov: 4 workers x 190 branches read desk/status at about one
+    request a second and got 429 while the handle was paused."""
+    import fcntl
+    gd = os.environ.get("PR_GATE_DIR") or W
+    os.makedirs(gd, exist_ok=True)
+    stamp = os.path.join(gd, "deskread.t"); cache = os.path.join(gd, "deskstatus.json")
+    with open(os.path.join(gd, "deskread.lock"), "a") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        if url == STATUS and os.path.exists(cache) and time.time() - os.path.getmtime(cache) < 15:
+            return json.load(open(cache))
+        try:
+            last = float(open(stamp).read() or 0)
+        except (OSError, ValueError):
+            last = 0.0
+        time.sleep(max(0.0, last + 3 - time.time()))
+        r = run(["curl", "-sSf", "--max-time", str(timeout), url], timeout=timeout + 10)
+        open(stamp, "w").write(str(time.time()))
+        if r.returncode == 0:
+            d = json.loads(r.stdout)
+            if url == STATUS:
+                open(cache + ".tmp", "w").write(r.stdout); os.replace(cache + ".tmp", cache)
+            return d
+    raise RuntimeError(f"curl {url}: {r.stderr.strip()[:200]}")
+
+
 def curl_json(url, timeout=60):
     # the desk refuses python urllib (Cloudflare), so curl, like the PC watcher
+    if "pequalnp.com/desk/" in url:
+        return _desk_read(url, timeout)
     for att in range(3):
         r = run(["curl", "-sSf", "--max-time", str(timeout), url], timeout=timeout + 10)
         if r.returncode == 0:
@@ -755,6 +785,15 @@ def main():
     if pu > time.time():
         PAUSED[0] = True
         log("the desk paused this handle until", time.strftime("%H:%M:%S", time.gmtime(pu)), "UTC: no desk requests in this run")
+        # Lead 15:58 UTC 26 Nov: while paused, no PR and no desk read at all; only a step whose lease we already hold
+        # may open. The branch is kept (result paused: the drain runs it again after the pause)
+        held_lease = None
+        try:
+            held_lease = dg().lease_of(ID) if PR_TOKEN else None
+        except Exception:
+            pass
+        if not held_lease:
+            finish("paused", "shared desk pause until " + time.strftime("%H:%M:%S", time.gmtime(pu)) + " UTC: no PR, no desk read, branch kept")
     if not DRY and stopped():
         finish("stopped", "STOP file on upstream main: no PR, no lease (branch kept; re-run the job once STOP is gone)")
     # 2. race check right before the push
