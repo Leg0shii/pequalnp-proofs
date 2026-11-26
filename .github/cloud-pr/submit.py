@@ -208,7 +208,11 @@ def desk(path, post=False):
 
 
 PAUSED = [False]
-NO_DESK_UNTIL = 1795676400      # 2026-11-26 07:00 UTC: Lead desk policy (desk OFF overnight), no desk call before this
+NO_DESK_UNTIL = 0               # owner 08:12 UTC 26 Nov "Leases on: cloud and PC" (Lead d46): the shared deskguard pause is the switch
+LEASES_ON = True                # d46: claim EVERY step we open (held or unheld), Lease line in the body, release when submitted
+LEASE_MAX = 3                   # at most 3 of the handle's 5 held gaps at once (leaseslot/<k> refs on the toolkit)
+LEASE_QUOTA = 1                 # rollout: total leased claims allowed (leasequota/<k> refs): 1, then 6, then 0 = no cap
+SLOT_STALE_S = 600              # a lease slot older than this belongs to a dead run: taken over
 PAUSE_MIN_S = 900               # 4b.5: on a pause or repetition answer, no desk call for at least 15 min
 PAUSE_RE = re.compile(r"paus|again and again|repeat|same proof", re.I)
 TK_URL = "https://github.com/Leg0shii/pnp-toolkit.git"
@@ -277,6 +281,72 @@ def claim_lock(gid):
     ok = dg().acquire(gid, w)
     log("deskguard", gid, "OK" if ok else "NO", w[0] if w else "")
     return ok
+
+
+def _ref_create(ref, msg):
+    """create toolkit ref (must not exist); True if this run created it"""
+    m = dg(); g = m.REPO
+    r = run(["git", "-C", g, "push", f"--force-with-lease={ref}:", "origin", f"{m._marker(msg)}:{ref}"], timeout=60)
+    return r.returncode == 0
+
+
+def _ref_age(ref):
+    g = dg().REPO
+    r = run(["git", "-C", g, "fetch", "-q", "origin", f"+{ref}:refs/tmp/age"], timeout=60)
+    if r.returncode:
+        return None
+    t = run(["git", "-C", g, "log", "-1", "--format=%ct", "refs/tmp/age"]).stdout.strip()
+    return time.time() - int(t) if t.isdigit() else None
+
+
+SLOT = [None]
+
+
+def take_slot(gid):
+    """one of LEASE_MAX lease slots (refs/heads/leaseslot/<k>); a slot older than SLOT_STALE_S is taken over"""
+    for k in range(LEASE_MAX):
+        ref = f"refs/heads/leaseslot/{k}"
+        if _ref_create(ref, f"slot {gid}"):
+            SLOT[0] = ref; return True
+    for k in range(LEASE_MAX):
+        ref = f"refs/heads/leaseslot/{k}"; a = _ref_age(ref)
+        if a is not None and a > SLOT_STALE_S:
+            g = dg().REPO; sha = run(["git", "-C", g, "rev-parse", "refs/tmp/age"]).stdout.strip()
+            r = run(["git", "-C", g, "push", f"--force-with-lease={ref}:{sha}", "origin", f"{dg()._marker('slot ' + gid)}:{ref}"], timeout=60)
+            if r.returncode == 0:
+                log("took over stale lease slot", ref, int(a), "s"); SLOT[0] = ref; return True
+    return False
+
+
+def free_slot():
+    if SLOT[0]:
+        r = run(["git", "-C", dg().REPO, "push", "-q", "origin", f":{SLOT[0]}"], timeout=60)
+        log("freed", SLOT[0], "ok" if r.returncode == 0 else r.stderr.strip()[:100]); SLOT[0] = None
+
+
+def take_quota(gid):
+    if LEASE_QUOTA <= 0:
+        return True
+    for k in range(LEASE_QUOTA):
+        if _ref_create(f"refs/heads/leasequota/{k}", f"quota {gid}"):
+            log("lease quota", k + 1, "of", LEASE_QUOTA); return True
+    return False
+
+
+def claim_unheld(gid):
+    """d46: lease for an unheld step right before the push. Any refusal = PR without a lease (an unheld step still
+    gets its PR); a pause answer stops all desk calls (claim -> set_pause)."""
+    if not LEASES_ON or PAUSED[0] or DRY or not PR_TOKEN or time.time() < NO_DESK_UNTIL:
+        return None, "no lease (desk off or paused)"
+    if not take_slot(gid):
+        return None, f"no lease: {LEASE_MAX} lease slots busy"
+    if not take_quota(gid):
+        free_slot()
+        return None, f"no lease: rollout quota {LEASE_QUOTA} used"
+    lid, why = claim(gid)
+    if not lid:
+        free_slot()
+    return lid, why
 
 
 def claim(gid):
@@ -354,15 +424,22 @@ def race_ok(gid):
         b = race_check(gid)
         if b:
             return False, f"blocking PRs {b}", None
-        if not is_h:     # unheld: the lease is taken right before gh pr create (watch.py submit, Lead D4)
-            return True, "clear", None
+        if not is_h:     # unheld: d46 lease right before the push (one claim ever, slots, quota); refused = PR only
+            lid, why = claim_unheld(gid)
+            return True, "clear, " + why, lid
         if PAUSED[0] or time.time() < NO_DESK_UNTIL:
             # Lead 20:43: desk off or paused = no claim and no error: open the PR without a lease (as the PC does)
             return True, "clear (held, desk off: PR without a lease, no desk call)", None
         if DRY:
             return True, "clear (dry run: held, no claim)", None
+        if not take_slot(gid):
+            return True, f"clear (held, {LEASE_MAX} lease slots busy: PR without a lease)", None
+        if not take_quota(gid):
+            free_slot()
+            return True, f"clear (held, rollout quota {LEASE_QUOTA} used: PR without a lease)", None
         lid, why = claim_retry(gid)      # held by someone else: our have=proof lease is required before the push
         if not lid:
+            free_slot()
             return False, why, None
         return True, "clear, " + why, lid
     except Exception as e:
@@ -529,6 +606,7 @@ def main():
     LEASE[0] = lease
     url, why2 = submit(ID, lease)
     release(LEASE[0], "submitted" if url else "other")
+    free_slot()
     if url == "dry-run":
         finish("dry", why2)
     if not url and why2 == "file already in upstream main":
