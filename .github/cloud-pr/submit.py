@@ -121,6 +121,30 @@ def _gate(req, gid, wait):
     return None
 
 
+STG = {}          # Lead 19:14: seconds per stage per unit (guards, race, gate, push, pr), printed as one TIMES line
+LAST_GJ = [None]  # the gaps.json read of the race check (mirror pause check of gate_open_now)
+
+
+def gate_open_now():
+    """Lead 19:14: (open, why) without a gate round trip. Closed at once when the toolkit has no deskgate/open/<epoch>
+    ref newer than the newest deskgate/stop/<epoch> ref (if any), or the mirror lists our handle as paused. Then no
+    claim is sent (and the one-claim lock is not used up). A git error = unknown -> ask the gate as before."""
+    gj = LAST_GJ[0] or {}
+    if any((p.get("handle") if isinstance(p, dict) else p) == HANDLE for p in gj.get("paused") or []):
+        return False, "paused in the mirror"
+    try:
+        r = run(["git", "-C", dg().REPO, "ls-remote", "origin", "refs/heads/deskgate/open/*", "refs/heads/deskgate/stop/*"], timeout=30)
+    except Exception:
+        return True, "unknown"
+    if r.returncode:
+        return True, "unknown"
+    ep = lambda k: [int(m.group(1)) for m in re.finditer(rf"/deskgate/{k}/(\d+)$", r.stdout, re.M)]
+    op, st = ep("open"), ep("stop")
+    if not op or max(op) <= max(st or [0]):
+        return False, "no open ref" + (" newer than the stop" if op else "")
+    return True, "open ref " + str(max(op))
+
+
 def gate_claim(gid):
     """(class, lease id or None): ok / held / refused / nobudget / closed / gone / timeout."""
     line = _gate(f"claim {gid} cloud", gid, GATE_WAIT_S)
@@ -417,6 +441,12 @@ def claim(gid, prio=1):
     old = dg().lease_of(gid)
     if old:
         return old, "reused the lease recorded on claim/" + gid
+    t = time.time()
+    op, owhy = gate_open_now()
+    STG["gatecheck"] = round(time.time() - t, 1)
+    if not op:                             # Lead 19:14: a closed gate costs 0 s, not 60 s of waiting for an answer
+        log("gate:", gid, "closed at once:", owhy, f"{time.time() - t:.1f}s")
+        return None, f"no lease: gate closed ({owhy})"
     # GATEWAY v1: no caller rate token or quota (the budget lives in deskgate); one claim per step stays (claim_lock)
     if not claim_lock(gid):
         old = None if DRY or not PR_TOKEN else dg().lease_of(gid)
@@ -425,6 +455,7 @@ def claim(gid, prio=1):
         return None, "claim skipped: this step was claimed once already"
     t = time.time()
     cls, lid = gate_claim(gid)
+    STG["gate"] = round(time.time() - t, 1)
     log("gate:", gid, cls, lid or "", f"{time.time() - t:.0f}s")
     if cls == "gone":
         return None, "gone (410): proved first (gate)"
@@ -516,6 +547,7 @@ def race_ok(gid):
     """(ok, why, lease). have=proof always: we hold a finished file."""
     try:
         gj = curl_json(GAPS, 60)
+        LAST_GJ[0] = gj
         if gid in (gj.get("withdrawn") or {}):
             return False, "withdrawn: " + str(gj["withdrawn"][gid])[:120], None
         g = next((x for x in gj["gaps"] if x["id"] == gid), None)
@@ -667,11 +699,14 @@ def submit(gid, lease):
         return None, "commit-tree failed"
     if DRY:
         return "dry-run", f"would push {c[:12]} as {FORK}:{gid} and open the PR"
+    t = time.time()
     err = push_branch(c, gid)
+    STG["push"] = round(time.time() - t, 1)
     if err:
         return None, "push: " + err
     log("pushed", c[:12], "to", f"{FORK}:{gid}")
     r = None
+    t_pr = time.time()
     if not lease:
         rv = rival_now(gid)               # Lead 18:53: no unleased PR next to a rival's (2-108 s behind them today)
         if rv:
@@ -691,6 +726,7 @@ def submit(gid, lease):
         log("PR retry in", 30 * 2 ** att, "s:", r.stderr.strip()[:150])
         time.sleep(30 * 2 ** att)
     url = (re.findall(r"https://github\.com/\S+/pull/\d+", r.stdout + r.stderr) or [None])[0]
+    STG["pr"] = round(time.time() - t_pr, 1)
     LEASE[0] = lease
     return url, ("ok" if url else r.stderr.strip()[:300])
 
@@ -704,6 +740,7 @@ def delete_ready():
 
 
 def finish(result, why, url=None):
+    log("TIMES", ID, " ".join(f"{k}={v}" for k, v in STG.items()), f"total={time.time() - T_START:.1f}")
     log(f"RESULT={result}", ID, url or "", why)
     if os.environ.get("GITHUB_OUTPUT"):
         with open(os.environ["GITHUB_OUTPUT"], "a") as f:
@@ -713,6 +750,9 @@ def finish(result, why, url=None):
     if result in ("submitted", "race", "exists", "formatfail"):
         delete_ready()
     sys.exit(1 if result in ("submitfail", "formatfail", "error", "stopped") else 0)
+
+
+T_START = time.time()
 
 
 def main():
@@ -769,13 +809,16 @@ def main():
     if r.returncode:
         finish("formatfail", "guards: " + ((r.stdout + r.stderr).strip().splitlines() or ["?"])[-1][:200])
     log(f"guards passed ({time.time() - t0:.0f}s)")
+    STG["guards"] = round(time.time() - t0, 1)
     if unlisted:
         finish("waiting", "not posted: prestage guards passed, branch kept for ready-wait")
     # GATEWAY v1 section 4: a pause never stops filing (the gate answers closed and the unleased branch decides)
     if not DRY and stopped():
         finish("stopped", "STOP file on upstream main: no PR, no lease (branch kept; re-run the job once STOP is gone)")
     # 2. race check right before the push
+    t_rc = time.time()
     ok, why, lease = race_ok(ID)
+    STG["race"] = round(time.time() - t_rc, 1)
     if not ok:
         # an error or the desk's lease cap is not a lost race: keep the branch (re-run the job), the PC still has its copy
         if why in ("not posted", "not on the desk"):
