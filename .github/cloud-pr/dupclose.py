@@ -80,7 +80,7 @@ def _row(x):
 
 def open_prs():
     """{number: row} of all open upstream PRs: full sweep every FULL_S (drops closed ones), else the newest pages."""
-    full = time.time() - OPEN["t"] >= FULL_S
+    full = time.time() - OPEN["t"] >= OPEN.get("every", FULL_S)
     got, k = {}, 1
     while True:
         pg = _page(k)
@@ -91,6 +91,8 @@ def open_prs():
         k += 1
     if full:
         OPEN["prs"], OPEN["t"] = got, time.time()
+        OPEN["every"] = 600 if k > 25 else FULL_S      # Lead 19:33: over 25 pages -> full sweep every 600 s
+        OPEN["pages"] = k
     else:
         OPEN["prs"].update(got)
     return OPEN["prs"]
@@ -212,8 +214,10 @@ def heartbeat(n, d, fresh):
     tree = subprocess.run(["git", "-C", g, "mktree"], input="", capture_output=True, text=True).stdout.strip()
     env = dict(os.environ, GIT_AUTHOR_NAME="dupclose", GIT_AUTHOR_EMAIL="dupclose@localhost",
                GIT_COMMITTER_NAME="dupclose", GIT_COMMITTER_EMAIL="dupclose@localhost")
+    rl = sh("gh", "api", "rate_limit", "--jq", ".resources.core.remaining", env=rdenv(), timeout=30).stdout.strip() or "?"
     msg = (f"dupclose {int(time.time())} open={n} dups={d} closed={len(CLOSED)} taken={'fresh' if fresh else 'stale'} "
-           f"{SPLIT['txt']} run={os.environ.get('GITHUB_RUN_ID', '-')}")
+           f"{SPLIT['txt']} pages={OPEN.get('pages', '-')} rl={rl} tok={'read' if os.environ.get('READ_TOKEN') else 'pr'} "
+           f"run={os.environ.get('GITHUB_RUN_ID', '-')}")
     c = subprocess.run(["git", "-C", g, "commit-tree", tree, "-m", msg], capture_output=True, text=True, env=env).stdout.strip()
     sh("git", *auth(), "-C", g, "push", "-q", "-f", TK, f"{c}:refs/heads/status/dupclose", timeout=60)
 
