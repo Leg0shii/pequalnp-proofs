@@ -306,6 +306,36 @@ def rej_burst():
     return n
 
 
+OU = {"t": 0.0, "txt": None}
+
+
+def ours_unleased(allp):
+    """Lead 21:59: feed for the late-lease loop (infra box). Every 60 s force-push toolkit ref status/ours-unleased,
+    file ours_unleased.tsv: `n<TAB>gid<TAB>created<TAB>lowest` for each of OUR open PRs without a Lease line, oldest
+    first; lowest=1 when no other author's open PR on the unit has a lower number. Only on change."""
+    if DRY or time.time() - OU["t"] < 60:
+        return
+    OU["t"] = time.time()
+    low = {}
+    for q in allp.values():
+        if q["gid"] and q["author"] != HANDLE:
+            low[q["gid"]] = min(low.get(q["gid"], 10 ** 9), q["n"])
+    rows = sorted((p for p in allp.values() if p["author"] == HANDLE and p["gid"] and not p["lease"] and p["n"] not in CLOSED),
+                  key=lambda p: (p["createdAt"], p["n"]))
+    txt = "".join(f"{p['n']}\t{p['gid']}\t{p['createdAt']}\t{int(low.get(p['gid'], 10 ** 9) > p['n'])}\n" for p in rows)
+    if txt == OU["txt"]:
+        return
+    g = os.path.join(W, "taken.git")
+    blob = subprocess.run(["git", "-C", g, "hash-object", "-w", "--stdin"], input=txt, capture_output=True, text=True).stdout.strip()
+    tree = subprocess.run(["git", "-C", g, "mktree"], input=f"100644 blob {blob}\tours_unleased.tsv\n", capture_output=True, text=True).stdout.strip()
+    env = dict(os.environ, GIT_AUTHOR_NAME="dupclose", GIT_AUTHOR_EMAIL="dupclose@localhost",
+               GIT_COMMITTER_NAME="dupclose", GIT_COMMITTER_EMAIL="dupclose@localhost")
+    c = subprocess.run(["git", "-C", g, "commit-tree", tree, "-m", f"ours-unleased {int(time.time())} n={len(rows)}"],
+                       capture_output=True, text=True, env=env).stdout.strip()
+    if sh("git", *auth(), "-C", g, "push", "-q", "-f", TK, f"{c}:refs/heads/status/ours-unleased", timeout=60).returncode == 0:
+        OU["txt"] = txt
+
+
 def one_pass():
     allp = None
     try:
@@ -329,6 +359,10 @@ def one_pass():
             EXPO["alerted"] = time.time()
             alert_ref(f"EXPOSED {len(exposed)}", "exposed")
             log("EXPOSED", len(exposed))
+        try:
+            ours_unleased({k: v for k, v in allp.items() if k not in CLOSED})
+        except Exception as e:
+            log("ours-unleased feed failed:", repr(e)[:120])
         merged_fill()                                # Lead 19:58: the MERGED close runs ALWAYS (not behind v2_on)
         if True:                                     # v2.1: unit already settled by another author's merged PR
             for p in allp.values():
