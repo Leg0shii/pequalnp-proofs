@@ -212,7 +212,8 @@ NO_DESK_UNTIL = 0               # owner 08:12 UTC 26 Nov "Leases on: cloud and P
 LEASES_ON = True                # d46: claim EVERY step we open (held or unheld), Lease line in the body, release when submitted
 LEASE_MAX = 4                   # team-wide (PC, cloud, backup): deskguard.SLOTS leaseslot/<k> refs, 4 of the handle's 5
 SLOT_WAIT_S = 45                # slots busy: wait up to 45 s (no desk call), then PR without a lease
-LEASE_QUOTA = 1                 # rollout: total leased claims allowed (leasequota/<k> refs): 1, then 6, then 0 = no cap
+LEASE_QUOTA = 1                 # rollout default: total leased claims (leasequota/<k> refs); the toolkit ref leasecap/<n> (highest n)
+                                # overrides it without a fork commit: leasecap/6 after the first PR checks out, leasecap/0 is never used
 SLOT_STALE_S = 600              # a lease slot older than this belongs to a dead run: taken over
 PAUSE_MIN_S = 900               # 4b.5: on a pause or repetition answer, no desk call for at least 15 min
 PAUSE_RE = re.compile(r"paus|again and again|repeat|same proof", re.I)
@@ -307,12 +308,23 @@ def free_slot():
         dg().slot_free(SLOT[0]); log("freed", SLOT[0]); SLOT[0] = None
 
 
+def quota():
+    """rollout cap from the toolkit: highest n of refs leasecap/<n> (n >= 999999 = no cap); none = LEASE_QUOTA"""
+    try:
+        r = run(["git", "-C", dg().REPO, "ls-remote", "origin", "refs/heads/leasecap/*"], timeout=60)
+        ns = [int(l.rsplit("/", 1)[1]) for l in r.stdout.split("\n") if "/leasecap/" in l and l.rsplit("/", 1)[1].isdigit()]
+        return max(ns) if ns else LEASE_QUOTA
+    except Exception:
+        return LEASE_QUOTA
+
+
 def take_quota(gid):
-    if LEASE_QUOTA <= 0:
+    q = quota()
+    if q >= 999999:
         return True
-    for k in range(LEASE_QUOTA):
+    for k in range(q):
         if _ref_create(f"refs/heads/leasequota/{k}", f"quota {gid}"):
-            log("lease quota", k + 1, "of", LEASE_QUOTA); return True
+            log("lease quota", k + 1, "of", q); return True
     return False
 
 
@@ -325,7 +337,7 @@ def claim_unheld(gid):
         return None, f"no lease: {LEASE_MAX} lease slots busy"
     if not take_quota(gid):
         free_slot()
-        return None, f"no lease: rollout quota {LEASE_QUOTA} used"
+        return None, "no lease: rollout quota used"
     lid, why = claim(gid)
     if not lid:
         free_slot()
@@ -431,7 +443,7 @@ def race_ok(gid):
             return True, f"clear (held, {LEASE_MAX} lease slots busy: PR without a lease)", None
         if not take_quota(gid):
             free_slot()
-            return True, f"clear (held, rollout quota {LEASE_QUOTA} used: PR without a lease)", None
+            return True, "clear (held, rollout quota used: PR without a lease)", None
         lid, why = claim_retry(gid)      # held by someone else: our have=proof lease is required before the push
         if not lid:
             free_slot()
