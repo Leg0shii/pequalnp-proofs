@@ -217,8 +217,10 @@ def heartbeat(n, d, fresh):
     env = dict(os.environ, GIT_AUTHOR_NAME="dupclose", GIT_AUTHOR_EMAIL="dupclose@localhost",
                GIT_COMMITTER_NAME="dupclose", GIT_COMMITTER_EMAIL="dupclose@localhost")
     rl = sh("gh", "api", "rate_limit", "--jq", ".resources.core.remaining", env=rdenv(), timeout=30).stdout.strip() or "?"
+    # 19:50: PR_TOKEN (Leg0shii, shared with PR creation and the PC) hit 0; rate_limit calls are free
+    rlp = sh("gh", "api", "rate_limit", "--jq", '"\(.resources.core.remaining)/\(.resources.core.reset)"', env=ghenv(), timeout=30).stdout.strip() or "?"
     msg = (f"dupclose {int(time.time())} open={n} dups={d} closed={len(CLOSED)} taken={'fresh' if fresh else 'stale'} "
-           f"{SPLIT['txt']} pages={OPEN.get('pages', '-')} rl={rl} tok={'read' if os.environ.get('READ_TOKEN') else 'pr'} "
+           f"{SPLIT['txt']} pages={OPEN.get('pages', '-')} rl={rl} rl_pr={rlp} tok={'read' if os.environ.get('READ_TOKEN') else 'pr'} "
            f"run={os.environ.get('GITHUB_RUN_ID', '-')}")
     c = subprocess.run(["git", "-C", g, "commit-tree", tree, "-m", msg], capture_output=True, text=True, env=env).stdout.strip()
     sh("git", *auth(), "-C", g, "push", "-q", "-f", TK, f"{c}:refs/heads/status/dupclose", timeout=60)
