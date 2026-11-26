@@ -428,8 +428,8 @@ def claim(gid, prio=1):
     log("gate:", gid, cls, lid or "", f"{time.time() - t:.0f}s")
     if cls == "gone":
         return None, "gone (410): proved first (gate)"
-    if cls == "held":
-        return None, "claim refused: held by another agent (gate)"
+    if cls in ("held", "refused"):         # Lead 18:53: with the gate open, held or refused = NO PR
+        return None, f"claim refused: {cls} by the desk (gate)"
     if cls != "ok" or not lid:
         return None, f"no lease: gate {cls}"
     dg().record_lease(gid, lid, {})
@@ -445,13 +445,34 @@ def lf_case(why):
     """GATEWAY 4: held (another agent holds it) = no PR; final (proved first) = no PR; anything else (gate closed,
     paused, no budget, refused, no answer in 60 s) = bare: PR without a lease if no rival PR and no holder."""
     w = why or ""
-    if w.startswith("claim refused") and _LF_HELD.search(w):
+    if w.startswith("claim refused") and (_LF_HELD.search(w) or "(gate)" in w):
         return "held"
     if "dry run" in w:
         return "stop"
     if "410" in w or "proved first" in w:
         return "final"
     return "bare"
+
+
+def rival_now(gid):
+    """Lead 18:53: right before gh pr create on the unleased branch. One REST call (no search index lag): the newest 100
+    open upstream PRs; a PR of another author whose title or head branch names the unit -> its number. Then the fresh
+    taken list (first PR of another author). Fixture for tests: RIVAL_FIXTURE (the pulls JSON). Error -> rival (skip)."""
+    try:
+        if os.environ.get("RIVAL_FIXTURE"):
+            pulls = json.load(open(os.environ["RIVAL_FIXTURE"]))
+        else:
+            pulls = json.loads(gh(["api", f"repos/{UP}/pulls?state=open&sort=created&direction=desc&per_page=100"]).stdout)
+        pat = re.compile(r"(?<![A-Za-z0-9])(%s|%s)(?![0-9])" % (re.escape(gid), re.escape(gid.replace("-", "_"))))
+        for p in pulls:
+            if (p.get("user") or {}).get("login") != HANDLE and (pat.search(p.get("title") or "") or pat.search((p.get("head") or {}).get("ref") or "")):
+                return f"#{p.get('number')} by {(p.get('user') or {}).get('login')}"
+    except Exception as e:
+        return "rival check failed: " + repr(e)[:80]
+    tl = None if os.environ.get("RIVAL_FIXTURE") else taken_list()
+    if tl is not None and tl.get(gid) not in (None, HANDLE):
+        return f"taken list: first PR by {tl.get(gid)}"
+    return None
 
 
 def rival_open(gid):
@@ -651,6 +672,11 @@ def submit(gid, lease):
         return None, "push: " + err
     log("pushed", c[:12], "to", f"{FORK}:{gid}")
     r = None
+    if not lease:
+        rv = rival_now(gid)               # Lead 18:53: no unleased PR next to a rival's (2-108 s behind them today)
+        if rv:
+            log("SKIP", gid, "unleased PR not opened, rival", rv)
+            return None, "rival PR open: " + rv
     for att in range(5):
         if stopped():                    # STOP may appear while this PR waited for a retry
             return None, "STOP file on upstream main"
@@ -791,7 +817,7 @@ def main():
     free_slot()
     if url == "dry-run":
         finish("dry", why2)
-    if not url and why2 == "file already in upstream main":
+    if not url and (why2 == "file already in upstream main" or why2.startswith("rival PR open")):
         finish("race", why2)
     if not url and why2.startswith("STOP"):
         finish("stopped", why2 + " (branch kept)")
