@@ -95,7 +95,10 @@ def acquire(step, why=None):
 SLOTS = int(os.environ.get("DESKGUARD_SLOTS", "4"))       # team-wide max held leases (handle cap is 5)
 SLOT_STALE_S = 600
 HARMLESS = re.compile(r"proved first|already proved|held by another|another handle|at most one handle|cap reached|"
-                      r"too many held|limit of \d+ held", re.I)
+                      r"too many held|limit of \d+ held|"
+                      # 10:08 UTC 26 Nov, first real one: {"gap": null, "note": "Another agent was handed this step 1 minutes
+                      # ago and gets a head start. Bring your proof back after ..."} = an ordinary refusal, not a pause
+                      r"gets a head start|was handed this step|bring your proof back", re.I)
 
 
 def _ref_sha(ref):

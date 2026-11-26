@@ -284,7 +284,11 @@ def claim_lock(gid):
     w = []
     ok = dg().acquire(gid, w)
     log("deskguard", gid, "OK" if ok else "NO", w[0] if w else "")
+    LOCK_WHY[0] = w[0] if w else ""
     return ok
+
+
+LOCK_WHY = [""]
 
 
 def _ref_create(ref, msg):
@@ -375,6 +379,9 @@ def claim(gid, prio=1):
         old = None if DRY or not PR_TOKEN else dg().lease_of(gid)
         if old:      # D: our own earlier claim (retry or the other opener): reuse its lease, never claim twice
             return old, "reused the lease recorded on claim/" + gid
+        if "paused" in LOCK_WHY[0]:   # shared pause set after this run started (10:08 UTC: 19235 lost its PR)
+            PAUSED[0] = True
+            return None, "no lease: shared desk pause (" + LOCK_WHY[0][:60] + ")"
         return None, "claim skipped: this step was claimed once already"
     d = desk(f"next?handle={HANDLE}&gap={gid}&have=proof&another=1")
     if not dg().check_answer(d, "claim"):      # A: pause, warning or an unknown refusal: shared pause 15 min + alert
