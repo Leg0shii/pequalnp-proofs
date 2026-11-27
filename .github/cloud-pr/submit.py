@@ -143,6 +143,31 @@ def curl_json(url, timeout=60):
     raise RuntimeError(f"curl {url}: {r.stderr.strip()[:200]}")
 
 
+GAPS_MAX_AGE_S = float(os.environ.get("GAPS_MAX_AGE_S", "10"))
+
+
+def gaps_json():
+    """B2 (27 Nov): one gaps.json copy per drain, shared by every worker and read again only when older than
+    GAPS_MAX_AGE_S (7 MB a pull; it was 3 to 4 pulls per unit). The copy is also what the guards read (GAPS_FILE)."""
+    d = os.environ.get("RIVAL_SNAP_DIR") or os.environ.get("PR_GATE_DIR") or W
+    os.makedirs(d, exist_ok=True)
+    f, tf = os.path.join(d, "gaps.json"), os.path.join(d, "gaps.t")
+    with open(os.path.join(d, "gaps.lock"), "w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        try:
+            if 0 <= time.time() - float(open(tf).read()) < GAPS_MAX_AGE_S:
+                return json.load(open(f))
+        except Exception:
+            pass
+        gj = curl_json(GAPS, 60)
+        with open(f + ".tmp", "w") as o:
+            json.dump(gj, o)
+        os.replace(f + ".tmp", f)
+        with open(tf, "w") as o:
+            o.write(str(time.time()))
+        return gj
+
+
 GATE_WAIT_S = float(os.environ.get("GATE_WAIT_S", "60"))   # GATEWAY 4: lease ok within 60 s
 
 
@@ -276,9 +301,13 @@ _TL = []
 TL_HDR = [None]          # header epoch of the last taken list read: every PR created before it is in the list (A19)
 
 
+TL_T = [0.0]
+
+
 def taken_list():
     if not _TL:
         _TL.append(_taken_list())
+        TL_T[0] = time.time()
     return _TL[0]
 
 
@@ -596,7 +625,8 @@ def _build_snapshot(files):
     """taken list (fresh fetch) + every open PR created after its header minus 30 s, with its units by title, branch
     and changed files. Older PRs are in the taken list (takenpub.py maps every open PR by file path). Raises on any
     failed read (fail closed)."""
-    _TL.clear()
+    if time.time() - TL_T[0] > 10:          # canary A2: a list fetched in the last 10 s is reused (1 s a fetch)
+        _TL.clear()
     tl = taken_list()
     if tl is None:
         raise RuntimeError("taken list missing, older than 180 s or truncated (fail closed)")
@@ -708,7 +738,7 @@ def pr_list(g):
 def race_ok(gid):
     """(ok, why, lease). have=proof always: we hold a finished file."""
     try:
-        gj = curl_json(GAPS, 60)
+        gj = gaps_json()
         LAST_GJ[0] = gj
         if gid in (gj.get("withdrawn") or {}):
             return False, "withdrawn: " + str(gj["withdrawn"][gid])[:120], None
@@ -746,7 +776,7 @@ def race_ok(gid):
             if rv:
                 return False, "dry run: rival: " + rv, None
             try:
-                g2 = next((x for x in curl_json(GAPS, 60)["gaps"] if x["id"] == gid), None)
+                g2 = next((x for x in gaps_json()["gaps"] if x["id"] == gid), None)
             except Exception as e:
                 return False, "dry run: fresh gaps read failed " + repr(e)[:80], None
             if g2 is None or g2.get("held_now") or (g2.get("holders_now") or 0) > 0:
@@ -780,7 +810,7 @@ def race_ok(gid):
                 case = "rival: " + rv
         if case == "bare":
             try:
-                g2 = next((x for x in curl_json(GAPS, 60)["gaps"] if x["id"] == gid), None)
+                g2 = next((x for x in gaps_json()["gaps"] if x["id"] == gid), None)
             except Exception:
                 g2 = {"held_now": True}          # cannot tell: treat as held (fail closed)
             if g2 is None:
@@ -1001,7 +1031,8 @@ def main():
     # the file's own imports), then keep the branch; ready-wait.yml dispatches this job again at listing.
     unlisted = False
     try:
-        gj0 = curl_json(GAPS, 60)
+        gj0 = gaps_json()
+        env["GAPS_FILE"] = os.path.join(os.environ.get("RIVAL_SNAP_DIR") or os.environ.get("PR_GATE_DIR") or W, "gaps.json")
         unlisted = not any(x.get("id") == ID for x in gj0.get("gaps") or []) and ID not in (gj0.get("withdrawn") or {}) \
             and not any((x.get("id") if isinstance(x, dict) else x) == ID for x in gj0.get("checked") or [])
         # Lead 14:22 SAFETY: no new PR on a step another agent holds (holders_now above 0) unless we hold its lease

@@ -487,15 +487,17 @@ def cases():
     # A19: the upstream world of 05:40 (81 open PRs, 41 without an id) and one drain: units 3 s apart, one snapshot dir
     f3u = [x for x in rec["f3_units"] if x["meet"]]
     wf3 = upstream_world(3 * len(f3u))
+    gf3 = [unit(u["id"], u["template"]) for u in f3u]          # one export for the whole drain (B2 shares it)
     for i, u in enumerate(f3u):
-        w = {"gid": u["id"], "gaps": [unit(u["id"], u["template"])], "taken": {"L-meta-1": "someone"}, "gate_open": True,
+        w = {"gid": u["id"], "gaps": gf3, "taken": {"L-meta-1": "someone"}, "gate_open": True,
              "gate_answers": {"*": rec["f3_gate_answer"]}, "open_pulls": wf3, "t": 3 * i, "snap": SNAPS + "/f3"}
         out.append(("recorded/F3-" + u["id"], "submit", w, "PR"))
     # A19 budget: a 400-unit mint drained at 20 units a minute against the same world; every unit free
     w400 = upstream_world(3 * 400, base=80000)
+    g400 = [unit("L-meta-%d" % (93000 + i)) for i in range(400)]
     for i in range(400):
         g = "L-meta-%d" % (93000 + i)
-        out.append(("budget/M400-" + g, "submit", {"gid": g, "gaps": [unit(g)], "taken": {"L-meta-1": "someone"},
+        out.append(("budget/M400-" + g, "submit", {"gid": g, "gaps": g400, "taken": {"L-meta-1": "someone"},
                                                     "open_pulls": w400, "t": 3 * i, "snap": SNAPS + "/m400"}, "PR"))
     # F4: yifgu's later merged "Prove L-meta-N" settles our 12 leased PRs: all closed in the first pass
     ours = [our_pr(n, g, lease=l, created=-12000) for n, g, l in rec["f4_ours"]]
@@ -529,6 +531,7 @@ def cases():
              "closed_pulls": [norm_pull(p, T0, i) for i, p in enumerate(x.get("closed_pulls", []))]}
         if k == "X4":                                # listed at the first reads, gone at the fresh holder check
             w["gaps_seq"] = [gl, gl, []]
+            w["env"] = {"GAPS_MAX_AGE_S": "0"}       # B2: the shared copy expired between the reads
         if k == "X8":
             w["proof_statement"] = x["proof_statement"]
         if k == "X3b":                               # Lead 05:32 A20: "steps 0" is legitimate; the closer half decides
@@ -605,7 +608,7 @@ def cases():
     return out, hx
 
 
-BUD = {}
+BUD, BUDG = {}, {}
 
 
 def main():
@@ -630,6 +633,7 @@ def main():
         grp = "F3" if name.startswith("recorded/F3-") else "M400" if name.startswith("budget/M400-") else None
         if grp:
             BUD.setdefault(grp, []).append(rd)
+            BUDG.setdefault(grp, []).append(r.get("gaps_reads", 0) if isinstance(r, dict) else 0)
         if name.startswith("budget/M400-"):
             if not ok:
                 fails.append(name)
@@ -655,6 +659,12 @@ def main():
               f"max {max(v)} (limit avg {lim_avg}" + (f", total < {lim_tot})" if lim_tot else ")"))
         if not okb:
             fails.append(f"budget/{grp}")
+        g = BUDG.get(grp) or [0]
+        okg = sum(g) / len(g) <= 0.5
+        print(("ok  " if okg else "FAIL"), f"budget/{grp}-mirror gaps.json pulls total {sum(g)}, avg {sum(g) / len(g):.2f}/unit "
+              f"(limit 0.5; one shared copy per drain, at most 10 s old)")
+        if not okg:
+            fails.append(f"budget/{grp}-mirror")
     m4 = [f for f in fails if f.startswith("budget/M400-")]
     if m4:
         print(f"FAIL budget/M400 {len(m4)} of 400 units not filed")
