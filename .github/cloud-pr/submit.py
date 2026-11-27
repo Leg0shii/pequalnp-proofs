@@ -143,6 +143,31 @@ def curl_json(url, timeout=60):
     raise RuntimeError(f"curl {url}: {r.stderr.strip()[:200]}")
 
 
+GAPS_MAX_AGE_S = float(os.environ.get("GAPS_MAX_AGE_S", "10"))
+
+
+def gaps_json():
+    """B2 (27 Nov): one gaps.json copy per drain, shared by every worker and read again only when older than
+    GAPS_MAX_AGE_S (7 MB a pull; it was 3 to 4 pulls per unit). The copy is also what the guards read (GAPS_FILE)."""
+    d = os.environ.get("RIVAL_SNAP_DIR") or os.environ.get("PR_GATE_DIR") or W
+    os.makedirs(d, exist_ok=True)
+    f, tf = os.path.join(d, "gaps.json"), os.path.join(d, "gaps.t")
+    with open(os.path.join(d, "gaps.lock"), "w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        try:
+            if 0 <= time.time() - float(open(tf).read()) < GAPS_MAX_AGE_S:
+                return json.load(open(f))
+        except Exception:
+            pass
+        gj = curl_json(GAPS, 60)
+        with open(f + ".tmp", "w") as o:
+            json.dump(gj, o)
+        os.replace(f + ".tmp", f)
+        with open(tf, "w") as o:
+            o.write(str(time.time()))
+        return gj
+
+
 GATE_WAIT_S = float(os.environ.get("GATE_WAIT_S", "60"))   # GATEWAY 4: lease ok within 60 s
 
 
@@ -174,6 +199,19 @@ def _gate(req, gid, wait):
     return None
 
 
+def gate_answer_lease(gid):
+    """the lease id in the gate's last answer ref lease/<gid> ("lease <gid> ok <lease>"), else None"""
+    try:
+        g = dg().REPO
+        if run(["git", "-C", g, "fetch", "-q", "origin", f"+refs/heads/lease/{gid}:refs/gate-ans"], timeout=60).returncode:
+            return None
+        m = re.fullmatch(rf"lease {re.escape(gid)} ok (\S+)",
+                         run(["git", "-C", g, "log", "-1", "--format=%s", "refs/gate-ans"], timeout=30).stdout.strip())
+        return m.group(1) if m else None
+    except Exception:
+        return None
+
+
 STG = {}          # Lead 19:14: seconds per stage per unit (guards, race, gate, push, pr), printed as one TIMES line
 LAST_GJ = [None]  # the gaps.json read of the race check (mirror pause check of gate_open_now)
 
@@ -181,16 +219,22 @@ LAST_GJ = [None]  # the gaps.json read of the race check (mirror pause check of 
 def gate_open_now():
     """Lead 19:14: (open, why) without a gate round trip. Closed at once when the toolkit has no deskgate/open/<epoch>
     ref newer than the newest deskgate/stop/<epoch> ref (if any), or the mirror lists our handle as paused. Then no
-    claim is sent (and the one-claim lock is not used up). A git error = unknown -> ask the gate as before."""
+    claim is sent (and the one-claim lock is not used up). Red team Y2 (Lead 05:35): refs unreadable after 3 tries
+    2 s apart = CLOSED (was "unknown" = open, and the claim went out)."""
     gj = LAST_GJ[0] or {}
     if any((p.get("handle") if isinstance(p, dict) else p) == HANDLE for p in gj.get("paused") or []):
         return False, "paused in the mirror"
-    try:
-        r = run(["git", "-C", dg().REPO, "ls-remote", "origin", "refs/heads/deskgate/open/*", "refs/heads/deskgate/stop/*"], timeout=30)
-    except Exception:
-        return True, "unknown"
-    if r.returncode:
-        return True, "unknown"
+    r = None
+    for k in range(3):
+        try:
+            r = run(["git", "-C", dg().REPO, "ls-remote", "origin", "refs/heads/deskgate/open/*", "refs/heads/deskgate/stop/*"], timeout=30)
+            if r.returncode == 0:
+                break
+        except Exception:
+            r = None
+        time.sleep(2)
+    if r is None or r.returncode:
+        return False, "gate refs unreadable (closed, fail closed)"
     ep = lambda k: [int(m.group(1)) for m in re.finditer(rf"/deskgate/{k}/(\d+)$", r.stdout, re.M)]
     op, st = ep("open"), ep("stop")
     if not op or max(op) <= max(st or [0]):
@@ -276,9 +320,13 @@ _TL = []
 TL_HDR = [None]          # header epoch of the last taken list read: every PR created before it is in the list (A19)
 
 
+TL_T = [0.0]
+
+
 def taken_list():
     if not _TL:
         _TL.append(_taken_list())
+        TL_T[0] = time.time()
     return _TL[0]
 
 
@@ -520,6 +568,10 @@ def claim(gid, prio=1):
         old = None if DRY or not PR_TOKEN else dg().lease_of(gid)
         if old:      # D: our own earlier claim (retry or the other opener): reuse its lease, never claim twice
             return old, "reused the lease recorded on claim/" + gid
+        rec = gate_answer_lease(gid)     # W6 B10: the earlier run died after the grant, before record_lease
+        if rec:
+            dg().record_lease(gid, rec)
+            return rec, "recovered the lease from the gate's answer lease/" + gid
         return None, "claim skipped: this step was claimed once already"
     t = time.time()
     cls, lid = gate_claim(gid)
@@ -579,7 +631,8 @@ def pr_files(n):
     return _FILES[n]
 
 
-SNAP_MAX_AGE_S = 5       # A19: one snapshot shared by every drain worker (and the second check before the PR)
+SNAP_MAX_AGE_S = 5       # A19: one snapshot shared by every drain worker
+SNAP_CREATE_AGE_S = float(os.environ.get("SNAP_CREATE_AGE_S", "2"))   # Lead 06:12: at gh pr create at most 2 s old
 SNAP_DIR = os.environ.get("RIVAL_SNAP_DIR") or os.environ.get("PR_GATE_DIR") or W
 FILE_UNIT_RX = re.compile(r"lean/PEqualNP/Outside/(L_[a-z0-9]+(?:_[a-z0-9]+)*_\d+|V_[a-z0-9]+(?:_[a-z0-9]+)*_\d+__k\d+)\.lean")
 
@@ -596,7 +649,8 @@ def _build_snapshot(files):
     """taken list (fresh fetch) + every open PR created after its header minus 30 s, with its units by title, branch
     and changed files. Older PRs are in the taken list (takenpub.py maps every open PR by file path). Raises on any
     failed read (fail closed)."""
-    _TL.clear()
+    if time.time() - TL_T[0] > 10:          # canary A2: a list fetched in the last 10 s is reused (1 s a fetch)
+        _TL.clear()
     tl = taken_list()
     if tl is None:
         raise RuntimeError("taken list missing, older than 180 s or truncated (fail closed)")
@@ -628,8 +682,9 @@ def _build_snapshot(files):
     raise RuntimeError(f"more than {RIVAL_MAX_PAGES} pages of open PRs since the taken list (fail closed)")
 
 
-def rival_snapshot():
-    """the shared snapshot, at most SNAP_MAX_AGE_S old (flock in SNAP_DIR; one builder at a time)"""
+def rival_snapshot(max_age=None):
+    """the shared snapshot, at most max_age (default SNAP_MAX_AGE_S) old (flock in SNAP_DIR; one builder at a time)"""
+    max_age = SNAP_MAX_AGE_S if max_age is None else max_age
     os.makedirs(SNAP_DIR, exist_ok=True)
     f = os.path.join(SNAP_DIR, "rival_snap.json")
     with open(os.path.join(SNAP_DIR, "rival_snap.lock"), "w") as lk:
@@ -637,7 +692,7 @@ def rival_snapshot():
         old = {}
         try:
             old = json.load(open(f))
-            if 0 <= time.time() - old["t"] <= SNAP_MAX_AGE_S:
+            if 0 <= time.time() - old["t"] <= max_age:
                 return old
         except Exception:
             pass
@@ -650,15 +705,16 @@ def rival_snapshot():
         return snap
 
 
-def rival_now(gid):
+def rival_now(gid, max_age=None):
     """Another author's PR on the unit, right before we decide and again right before gh pr create (A19 design, Lead
     05:40): the taken list is the authority for every PR created before its header (REST publisher, units by title,
     branch AND changed files of every open PR); open PRs created after the header minus 30 s are read here, with their
     file paths, once per snapshot shared by all drain workers. Any failed read = rival (no PR)."""
     try:
-        snap = rival_snapshot()
+        snap = rival_snapshot(max_age)
     except Exception as e:
         return "rival check failed: " + str(e)[:120]
+    STG["snap_age"] = round(time.time() - snap["t"], 1)
     who = snap["taken"].get(gid)
     if who not in (None, HANDLE):
         return f"taken list: first PR by {who}"
@@ -708,7 +764,7 @@ def pr_list(g):
 def race_ok(gid):
     """(ok, why, lease). have=proof always: we hold a finished file."""
     try:
-        gj = curl_json(GAPS, 60)
+        gj = gaps_json()
         LAST_GJ[0] = gj
         if gid in (gj.get("withdrawn") or {}):
             return False, "withdrawn: " + str(gj["withdrawn"][gid])[:120], None
@@ -746,7 +802,7 @@ def race_ok(gid):
             if rv:
                 return False, "dry run: rival: " + rv, None
             try:
-                g2 = next((x for x in curl_json(GAPS, 60)["gaps"] if x["id"] == gid), None)
+                g2 = next((x for x in gaps_json()["gaps"] if x["id"] == gid), None)
             except Exception as e:
                 return False, "dry run: fresh gaps read failed " + repr(e)[:80], None
             if g2 is None or g2.get("held_now") or (g2.get("holders_now") or 0) > 0:
@@ -780,7 +836,7 @@ def race_ok(gid):
                 case = "rival: " + rv
         if case == "bare":
             try:
-                g2 = next((x for x in curl_json(GAPS, 60)["gaps"] if x["id"] == gid), None)
+                g2 = next((x for x in gaps_json()["gaps"] if x["id"] == gid), None)
             except Exception:
                 g2 = {"held_now": True}          # cannot tell: treat as held (fail closed)
             if g2 is None:
@@ -807,13 +863,34 @@ def stopped():
     return r.stdout.strip() == "200"
 
 
+def fork_head(gid):
+    """sha of this fork's branch <gid> (the PR head), None when it does not exist. A git read, no API call. Raises when
+    unreadable (callers fail closed: no push, no PR)."""
+    for k in range(3):
+        r = run(["git"] + (auth_cfg() if PR_TOKEN else []) + ["ls-remote", f"https://github.com/{FORK}.git", f"refs/heads/{gid}"],
+                timeout=60)
+        if r.returncode == 0:
+            o = r.stdout.split()
+            return o[0] if o else None
+        time.sleep(2)
+    raise RuntimeError("fork branch unreadable")
+
+
+def our_prs_on_branch(gid, state):
+    out = gh(["api", f"repos/{UP}/pulls?head={HANDLE}:{gid}&state={state}", "--jq", ".[].html_url"])
+    if out.returncode:
+        raise RuntimeError(f"PR lookup failed rc={out.returncode}")
+    return out.stdout.split()
+
+
 def open_pr_for_branch(gid):
-    """Our own open PR whose head is this fork's branch <gid> (exact, no search index lag). Skipped (no API call) when
-    the fresh taken list has no PR at all for the step."""
+    """Our own open PR whose head is this fork's branch <gid> (exact, no search index lag). No API call when neither
+    the fresh taken list nor the fork has anything for the step (W6 mintfail: a PR younger than the taken list header
+    was missed and a re-run pushed onto it)."""
     tl = taken_list()
-    if tl is not None and gid not in tl:
+    if tl is not None and gid not in tl and fork_head(gid) is None:
         return None
-    out = gh(["api", f"repos/{UP}/pulls?head={HANDLE}:{gid}&state=open", "--jq", ".[].html_url"]).stdout.split()
+    out = our_prs_on_branch(gid, "open")
     return out[0] if out else None
 
 
@@ -835,7 +912,9 @@ def push_branch(c, gid):
     if nums:
         git("fetch", "-q", "--depth=1", url, f"{nums[0][1]}:refs/fork/tip", timeout=180)
     for att in range(4):
-        r = run(["git"] + auth_cfg() + ["-C", TREE, "push", "-q", "-f", url, f"{c}:refs/heads/{gid}"], timeout=600)
+        # create-only (Lead 06:12): the ref must not exist yet; an existing head is never rewritten
+        r = run(["git"] + auth_cfg() + ["-C", TREE, "push", "-q", f"--force-with-lease=refs/heads/{gid}:", url,
+                                        f"{c}:refs/heads/{gid}"], timeout=600)
         if r.returncode == 0 or not TRANSIENT.search(r.stderr):
             return r.stderr.strip()[:300] if r.returncode else None
         log("push retry", r.stderr.strip()[:150].replace("\n", " | "))
@@ -843,9 +922,52 @@ def push_branch(c, gid):
     return r.stderr.strip()[:300]
 
 
+PR_PER_MIN = int(os.environ.get("PR_PER_MIN", "70"))       # Lead 06:12: GitHub documents 80/min and 500/hour per token
+PR_PER_HOUR = int(os.environ.get("PR_PER_HOUR", "480"))
+
+
+def bucket_wait(d, now):
+    """PR-create budget shared by every worker of a drain (file PR_GATE_DIR/creates.log under flock): 0 = take a
+    create now (recorded), else the seconds to wait. A stall (PR_GATE_DIR/stall: epoch until) after a 403/429 blocks
+    every worker until it ends."""
+    with open(os.path.join(d, "creates.lock"), "w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        try:
+            until = float(open(os.path.join(d, "stall")).read())
+        except Exception:
+            until = 0.0
+        if now < until:
+            return until - now
+        f = os.path.join(d, "creates.log")
+        try:
+            ts = [float(x) for x in open(f).read().split() if now - float(x) < 3600]
+        except Exception:
+            ts = []
+        last_min = [t for t in ts if now - t < 60]
+        if len(last_min) >= PR_PER_MIN:
+            return 60 - (now - min(last_min)) + 0.05
+        if len(ts) >= PR_PER_HOUR:
+            return 3600 - (now - min(ts)) + 0.05
+        ts.append(now)
+        with open(f + ".tmp", "w") as o:
+            o.write("\n".join(f"{t:.3f}" for t in ts))
+        os.replace(f + ".tmp", f)
+        return 0.0
+
+
+def bucket_stall(d, seconds, why):
+    """after a 403/429 on a create: no worker creates for `seconds` (the retry-after, else 60 s)"""
+    with open(os.path.join(d, "creates.lock"), "w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        with open(os.path.join(d, "stall"), "w") as o:
+            o.write(str(time.time() + seconds))
+    log(f"PR-STALL {seconds:.0f}s: every worker stops creating PRs ({why[:100]})")
+
+
 class pr_gate:
-    """Drain mode (drain.py, many submit.py at once on one runner): at most PR_GATE_N (2) PR creations in flight,
-    by flock on PR_GATE_DIR/slot<k> (GitHub refuses PR-creation bursts). No PR_GATE_DIR (one run per branch): no gate."""
+    """Drain mode (drain.py, many submit.py at once on one runner): at most PR_GATE_N PR creations in flight (flock on
+    PR_GATE_DIR/slot<k>; drain.py sets it from DRAIN_PR_SLOTS), and at most PR_PER_MIN creates a minute and
+    PR_PER_HOUR an hour for the whole drain (bucket_wait). No PR_GATE_DIR (one run per branch): no gate."""
     def __enter__(self):
         self.f = None
         d = os.environ.get("PR_GATE_DIR")
@@ -853,10 +975,21 @@ class pr_gate:
             for k in range(int(os.environ.get("PR_GATE_N", "2"))):
                 f = open(os.path.join(d, f"slot{k}"), "w")
                 try:
-                    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB); self.f = f; return self
+                    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB); self.f = f
+                    break
                 except OSError:
                     f.close()
+            if self.f:
+                break
             time.sleep(0.2)
+        t0 = time.time()
+        while d:
+            w = bucket_wait(d, time.time())
+            if w <= 0:
+                break
+            time.sleep(min(w, 5))
+        if d and time.time() - t0 > 0.5:
+            STG["bucket_wait"] = round(time.time() - t0, 1)
         return self
 
     def __exit__(self, *a):
@@ -865,6 +998,21 @@ class pr_gate:
 
 
 def submit(gid, lease):
+    # Lead 06:12 (W6 mintfail): the head branch Leg0shii:<ID> is created once with a create-only push and never
+    # forced. If it exists: our open PR on it = done; our closed PR on it = stop (nothing reopens, I5); neither = the
+    # earlier run died between push and create: open the PR from the existing commit.
+    try:
+        head = fork_head(gid)
+        if head:
+            op = our_prs_on_branch(gid, "open")
+            if op:
+                return op[0], "ok (our PR on the existing branch)"
+            if our_prs_on_branch(gid, "closed"):
+                return None, "our PR on this branch was closed: no reopen (I5)"
+            log("branch", gid, "exists at", head[:12], "with no PR: opening the PR from it (no push)")
+            return create_pr(gid, lease)
+    except RuntimeError as e:
+        return None, "head check failed (fail closed): " + str(e)[:120]
     base = git("rev-parse", "HEAD").stdout.strip()
     if not base:
         return None, "no upstream main"
@@ -880,7 +1028,9 @@ def submit(gid, lease):
     changed = git("diff-tree", "--name-only", "-r", base, tree).stdout.split()
     if changed != [REL]:
         return None, f"unexpected changed files {changed}"
-    msg = gid + "\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\n"
+    # rule 16.5 (2): a per-opener nonce, so two openers never build the same sha
+    msg = gid + f"\n\nOpener-Nonce: cloud-{os.environ.get('GITHUB_RUN_ID', 'x')}-{os.urandom(6).hex()}" \
+        "\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\n"
     cenv = dict(os.environ, GIT_AUTHOR_NAME=HANDLE, GIT_COMMITTER_NAME=HANDLE, GIT_AUTHOR_EMAIL=EMAIL, GIT_COMMITTER_EMAIL=EMAIL)
     c = git("commit-tree", tree, "-p", base, "-m", msg, env=cenv).stdout.strip()
     if not c:
@@ -893,22 +1043,36 @@ def submit(gid, lease):
     if err:
         return None, "push: " + err
     log("pushed", c[:12], "to", f"{FORK}:{gid}")
+    return create_pr(gid, lease)
+
+
+def create_pr(gid, lease):
     r = None
     t_pr = time.time()
-    if not lease:
-        rv = rival_now(gid)               # Lead 18:53: no unleased PR next to a rival's (2-108 s behind them today)
-        if rv:
-            log("SKIP", gid, "unleased PR not opened, rival", rv)
-            return None, "rival PR open: " + rv
     for att in range(5):
         if stopped():                    # STOP may appear while this PR waited for a retry
             return None, "STOP file on upstream main"
         body = pr_body(lease)
         with pr_gate():
+            # Lead 06:12 a0 (w12 stall drill): before EVERY attempt, after any slot, bucket or backoff wait: the halt
+            # switch, and for an unleased PR a rival snapshot at most SNAP_CREATE_AGE_S old (Lead 18:53)
+            h, hwhy = filing_halted()
+            if h:
+                log("halted:", gid, hwhy, f"(before create attempt {att + 1})")
+                return None, "halted: " + hwhy
+            if not lease:
+                rv = rival_now(gid, SNAP_CREATE_AGE_S)
+                if rv:
+                    log("SKIP", gid, f"unleased PR not opened (attempt {att + 1}), rival", rv)
+                    return None, "rival PR open: " + rv
             r = run(["gh", "pr", "create", "--repo", UP, "--head", f"{HANDLE}:{gid}", "--base", "main",
                      "--title", gid, "--body", body], timeout=120, env=dict(os.environ, GH_TOKEN=PR_TOKEN))
         if re.search(r"https://\S+", r.stdout) or "already exists" in r.stderr:
             break                                   # an existing PR for our branch is a success
+        m403 = re.search(r"HTTP (403|429)|secondary rate limit|submitted too quickly", r.stderr + r.stdout)
+        if m403 and os.environ.get("PR_GATE_DIR"):
+            ra = re.search(r"(?i)retry-after:?\s*(\d+)", r.stderr + r.stdout)
+            bucket_stall(os.environ["PR_GATE_DIR"], float(ra.group(1)) if ra else 60.0, (r.stderr + r.stdout).strip())
         if not TRANSIENT.search(r.stderr + r.stdout) or att == 4:
             break
         log("PR retry in", 30 * 2 ** att, "s:", r.stderr.strip()[:150])
@@ -991,7 +1155,15 @@ def main():
     if url and DRY:
         log("dry run: our PR is already open, testing the rest anyway:", url)
     elif url:
-        finish("exists", "our PR for this branch is already open (PC watcher or an earlier run)", url)
+        old = None
+        try:
+            old = dg().lease_of(ID) if PR_TOKEN else None
+        except Exception:
+            pass
+        if old:                          # W6: the earlier run died before its release; the PR is open, so release now
+            release(old, "submitted")
+        finish("exists", "our PR for this branch is already open (PC watcher or an earlier run)"
+               + (f"; lease {old} released" if old else ""), url)
     # 1. guards (= formatscan on the PC)
     env = dict(os.environ, NODE=subprocess.run(["sh", "-c", "command -v node"], capture_output=True, text=True).stdout.strip())
     if MOD != ID.replace("-", "_"):
@@ -1001,7 +1173,8 @@ def main():
     # the file's own imports), then keep the branch; ready-wait.yml dispatches this job again at listing.
     unlisted = False
     try:
-        gj0 = curl_json(GAPS, 60)
+        gj0 = gaps_json()
+        env["GAPS_FILE"] = os.path.join(os.environ.get("RIVAL_SNAP_DIR") or os.environ.get("PR_GATE_DIR") or W, "gaps.json")
         unlisted = not any(x.get("id") == ID for x in gj0.get("gaps") or []) and ID not in (gj0.get("withdrawn") or {}) \
             and not any((x.get("id") if isinstance(x, dict) else x) == ID for x in gj0.get("checked") or [])
         # Lead 14:22 SAFETY: no new PR on a step another agent holds (holders_now above 0) unless we hold its lease
@@ -1088,6 +1261,8 @@ def main():
         finish("race", why2)
     if not url and why2.startswith("STOP"):
         finish("stopped", why2 + " (branch kept)")
+    if not url and why2.startswith("halted: "):
+        finish("halted", why2[8:] + (f"; lease {LEASE[0]} kept on claim/{ID}" if LEASE[0] else ""))
     finish("submitted" if url else "submitfail", f"{why2}; {time.time() - t0:.0f}s after start", url)
 
 

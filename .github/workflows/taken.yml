@@ -1,8 +1,11 @@
-# TAKEN LIST: which posted steps already have a PR from anyone, from the GitHub search API, always on.
+# TAKEN LIST: which units already have a PR from anyone, from the REST pulls API (A19: no search API, every open PR
+# mapped by its changed files), always on.
 #
 # The Lead's team/lead/takenpub.py (copy in .github/taken/), run here for up to 58 min per job; cron every 5 min with
 # one job at a time (concurrency group), so the next job takes over within minutes. gaps.json pr_numbers lags up to
-# 20 min in a wave; this list is about 20 s fresh.
+# 20 min in a wave; this list is about 20 s fresh: every pass (18 s apart) is pushed as soon as it is written, and the
+# header epoch is the pass start (every PR created before it is in the list). A failed read skips the write, so the
+# header goes stale and readers stop filing by themselves.
 # Published as taken.txt on pnp-toolkit branch status/taken (one commit, force-pushed whenever the list changes and
 # at least every 60 s so the 'updated' line stays fresh). Format: line 1 '# updated <epoch> <HH:MM:SS> steps N', then
 # 'L-meta-N <first PR number> <author> <created HH:MM:SS>'. Readers ignore it when 'updated' is older than 180 s.
@@ -66,10 +69,10 @@ jobs:
           pid=$!
           last=""; lastpush=0; n=0; fails=0
           while kill -0 $pid 2>/dev/null; do
-            sleep 20
+            sleep 5
             [ -s "$TAKEN_OUT" ] || continue
-            body=$(tail -n +2 "$TAKEN_OUT" | sha1sum)
-            [ "$body" = "$last" ] && [ $(( $(date +%s) - lastpush )) -lt 60 ] && continue
+            body=$(head -1 "$TAKEN_OUT")                   # a new pass = a new header (pass start epoch): push it
+            [ "$body" = "$last" ] && continue
             blob=$(git -C "$G" hash-object -w "$TAKEN_OUT")
             tree=$(printf '100644 blob %s\ttaken.txt\n' "$blob" | git -C "$G" mktree)
             c=$(git -C "$G" commit-tree "$tree" -m "taken list ($(head -1 "$TAKEN_OUT" | cut -d' ' -f4-))")

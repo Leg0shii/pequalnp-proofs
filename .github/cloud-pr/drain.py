@@ -15,6 +15,7 @@ SRC = os.environ["SRC"]; W = os.environ.get("W") or tempfile.mkdtemp()
 FORK = os.environ.get("GITHUB_REPOSITORY", "Leg0shii/pequalnp-proofs-fork")
 URL = f"https://github.com/{FORK}.git"
 PR_TOKEN = os.environ.get("PR_TOKEN", "")
+PR_SLOTS = int(os.environ.get("DRAIN_PR_SLOTS", "2"))   # Lead 06:12: PR creations in flight (w12 load drill: 6)
 WORKERS = int(os.environ.get("DRAIN_WORKERS", "14"))   # Lead 17:17: 14 workers = about 10 leased + 10 unleased a minute with the gate open
 MAX_S = float(os.environ.get("DRAIN_MAX_S", "1200")); LINGER = float(os.environ.get("DRAIN_LINGER", "30"))
 UPSTREAM = os.environ.get("DRAIN_UPSTREAM", "https://github.com/open-goat/pequalnp-proofs.git")
@@ -88,13 +89,34 @@ def save_seen():
         sh("git", *auth(), "-C", SRC, "push", "-q", "-f", URL, f"{c}:refs/heads/drain-state", timeout=120)
 
 
+RETRYABLE = ("failed", "submitfail", "error")     # W6 mintfail: a child that died or failed half way is tried again
+RETRY_MAX = 3
+RETRY_WAIT = (0, 60, 300)                         # seconds after the 1st, 2nd, 3rd failure
+
+
+def attempts(v):
+    """(result, failures so far) of a SEEN value 'result' or 'result#n'"""
+    if not v:
+        return None, 0
+    r, _, n = v[0].partition("#")
+    return r, (int(n) if n.isdigit() else (1 if r in RETRYABLE else 0))
+
+
+def retry_due(v):
+    if v is None:
+        return True
+    r, n = attempts(v)
+    # seen.txt rounds the time to whole seconds: allow 1 s
+    return r in RETRYABLE and n < RETRY_MAX and time.time() - v[1] >= RETRY_WAIT[min(n, len(RETRY_WAIT)) - 1] - 1
+
+
 def pending():
     r = sh("git", "ls-remote", URL, "refs/heads/ready/*", timeout=60)
     out = []
     for l in r.stdout.splitlines():
         sha, ref = l.split()
         sid = ref[len("refs/heads/ready/"):]
-        if re.fullmatch(r"L-[a-z0-9]+(-[a-z0-9]+)*", sid) and (sid, sha) not in SEEN:
+        if re.fullmatch(r"L-[a-z0-9]+(-[a-z0-9]+)*", sid) and retry_due(SEEN.get((sid, sha))):
             out.append((sid, sha))
     def num(s):
         m = re.search(r"(\d+)$", s)
@@ -138,7 +160,7 @@ def one(sid, sha, prefix="ready", extra=None):
     os.makedirs(os.path.join(tree, "lean", "PEqualNP", "Outside"), exist_ok=True)
     outp = os.path.join(d, "out")
     env = dict(os.environ, ID=sid, MOD=mod, PROOF=proof, TREE=tree, W=d, DRY="0", GITHUB_REF_NAME=f"{prefix}/{sid}",
-               GITHUB_OUTPUT=outp, PR_GATE_DIR=W, PR_GATE_N="2", READY_MSG=msg, RIVAL_SNAP_DIR=W)
+               GITHUB_OUTPUT=outp, PR_GATE_DIR=W, PR_GATE_N=str(PR_SLOTS), READY_MSG=msg, RIVAL_SNAP_DIR=W)
     env.update(extra or {})
     if DRY:
         return "dry", f"would run submit.py for {sid} {mod} ({os.path.getsize(proof)} bytes, sha {got[:8]})"
@@ -169,7 +191,13 @@ def work(sid, sha):
         res, why = "error", repr(e)[:200]
     with LOCK:
         if res not in ("paused", "halted") and not (res == "unleased" and "desk off or paused" in why):
-            SEEN[(sid, sha)] = (res, time.time())          # paused ones run again after the pause
+            if res in RETRYABLE:                           # W6: retried up to RETRY_MAX times (submit.py is idempotent:
+                n = attempts(SEEN.get((sid, sha)))[1] + 1  # create-only head, our PR found, lease recovered)
+                SEEN[(sid, sha)] = (f"{res}#{n}", time.time())
+                if n >= RETRY_MAX:
+                    log("GIVE-UP", sid, f"{res} {n} times:", why[:120])
+            else:
+                SEEN[(sid, sha)] = (res, time.time())      # paused ones run again after the pause
         STATS[res] = STATS.get(res, 0) + 1
         try:
             save_seen()

@@ -114,6 +114,9 @@ def child_submit(src, w):
         def gh(args, write=False, timeout=120):
             a = list(args)
             if a[0] == "api" and "/pulls?" in a[1] and "head=" in a[1]:      # open_pr_for_branch: our own PR, exact
+                if "state=closed" in a[1]:                                    # (infra 06:30: closed PRs on the head)
+                    cl = [p for p in st_load()["prs"] if p["head"] == gid and p["state"] == "closed"]
+                    return subprocess.CompletedProcess(a, 0, "".join(UPURL % p["number"] + "\n" for p in cl), "")
                 return subprocess.CompletedProcess(a, 0, "".join(UPURL % p["number"] + "\n" for p in ours_open()), "")
             return md_gh(args, write=write, timeout=timeout)
         S.gh = gh
@@ -138,6 +141,13 @@ def child_submit(src, w):
                 return "fatal: the remote end hung up unexpectedly"
             return None
         S.push_branch = push_branch
+        # infra 06:30: the fork branch state (create-only head) and the gate's persistent answer ref lease/<gid>
+        S.fork_head = lambda g: st_load()["fork"].get(g)
+
+        def gate_answer_lease(g):
+            ok = [x.split()[-1] for x in st_load()["desk"] if x.startswith("claim %s -> ok " % g)]
+            return ok[-1] if ok else None
+        S.gate_answer_lease = gate_answer_lease
 
         def delete_ready():
             if os.environ.get("GITHUB_REF_NAME") == f"ready/{gid}":
