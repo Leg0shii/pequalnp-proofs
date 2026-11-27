@@ -23,12 +23,13 @@ def move(repo, k):
     base = g(repo, "rev-parse", "refs/heads/main")
     blob = g(repo, "hash-object", "-w", "--stdin", inp=f"-- movemain {k} {time.time():.3f}\n")
     tree = T.tree_with_file(repo, base, f"lean/PEqualNP/Outside/L_move_{k}.lean", blob)
+    env = dict(os.environ, GIT_AUTHOR_NAME="movemain", GIT_AUTHOR_EMAIL="movemain@invalid", GIT_COMMITTER_NAME="movemain",
+               GIT_COMMITTER_EMAIL="movemain@invalid")      # the runner has no git identity (moves 5 and 10 failed)
     if k % 5 == 0:
         blob2 = g(repo, "hash-object", "-w", "--stdin", inp=f"movemain {k}\n")
-        c0 = g(repo, "commit-tree", tree, "-p", base, "-m", "tmp", inp="")
+        c0 = subprocess.run(["git", "-C", repo, "commit-tree", tree, "-p", base, "-m", "tmp"], input="", capture_output=True,
+                            text=True, env=env, timeout=60).stdout.strip()
         tree = T.tree_with_file(repo, c0, ".github/movetest.txt", blob2)
-    env = dict(os.environ, GIT_AUTHOR_NAME="movemain", GIT_AUTHOR_EMAIL="movemain@invalid", GIT_COMMITTER_NAME="movemain",
-               GIT_COMMITTER_EMAIL="movemain@invalid")
     c = subprocess.run(["git", "-C", repo, "commit-tree", tree, "-p", base, "-m", f"movemain {k}"], input="", capture_output=True,
                        text=True, env=env, timeout=60).stdout.strip()
     g(repo, "update-ref", "refs/heads/main", c, base)

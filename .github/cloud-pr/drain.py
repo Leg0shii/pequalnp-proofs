@@ -385,18 +385,21 @@ def base_fetch(adopt_now=False):
             if _BASE["fetch_fail"] <= 3 or _BASE["fetch_fail"] % 30 == 0:
                 log("upstream base: fetch failed", f"({_BASE['fetch_fail']} so far):", (r.stderr or "").strip()[:120])
             return False
+        if sha != _BASE["newest"]:
+            _BASE["seen"] += 1
+        _BASE.update(newest=sha, t=t)          # published before the lock: a burst of copies holds BASE_LOCK for seconds
+        _base_note()                           # (canary 45979631397: base_age p50 7.7 s when this waited for it)
+        if sha == _BASE["sha"] or not (adopt_now or time.time() - _BASE["adopted_t"] >= BASE_ADOPT_S):
+            return True
         with BASE_LOCK:
-            if sha != _BASE["newest"]:
-                _BASE["seen"] += 1
-            if sha != _BASE["sha"] and (adopt_now or time.time() - _BASE["adopted_t"] >= BASE_ADOPT_S):
+            if sha != _BASE["sha"]:
                 if sh("git", "-C", b, "checkout", "-q", "--detach", sha, timeout=120).returncode:
                     _BASE["fetch_fail"] += 1
                     log("upstream base: checkout of", sha[:12], "failed (base kept at", (_BASE["sha"] or "?")[:12] + ")")
                     return False
                 _BASE["moves"] += 1
                 _BASE.update(sha=sha, adopted_t=time.time())
-            _BASE.update(newest=sha, t=t)
-            _base_note()
+                _base_note()
         return True
 
 
