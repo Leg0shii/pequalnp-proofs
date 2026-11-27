@@ -76,7 +76,10 @@ jobs:
           DRAIN_SAVE_EVERY_S: ${{ vars.DRAIN_SAVE_EVERY_S || '60' }}   # Lead 09:16: one state push a minute (6 pushes/min per repo)
           # RC-c always-warm drain (warm.py): in WARM_WINDOW (UTC HHMM-HHMM) the drain lingers and re-arms warm.yml
           WARM: ${{ vars.WARM || '1' }}
-          WARM_WINDOW: ${{ vars.WARM_WINDOW || '' }}
+          # Lead 11:30 (RC-c3): default all day UTC, so every ready/ drain lingers and re-arms warm.yml (a cold drain that
+          # replaced a pending warm run keeps the chain warm too); the window cannot wrap midnight: the chain ends at 23:59
+          # and the first ready/ push after 00:00 starts it again. Live stop: fork ref warm/off
+          WARM_WINDOW: ${{ vars.WARM_WINDOW || '0000-2359' }}
           WARM_LINGER: ${{ vars.WARM_LINGER || '1200' }}
         run: python3 -I "$GITHUB_WORKSPACE/src/.github/cloud-pr/drain.py"
       - name: Queue delay (B13, measurement only, never fails the job)

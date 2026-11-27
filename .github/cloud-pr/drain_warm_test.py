@@ -17,7 +17,10 @@ Cases:
   W8 HALT HOLD (Lead 10:13): filing/stop 100 s into a 5 h job, filing/go 60 s later: the job stays up (one run, no
      dispatch), files nothing during the halt, the unit queued during the halt and a unit pushed after the go START
      within 5 s of the go / of their push; a job started DURING a halt holds the same way; warm/off during a hold
-     ends it within 35 s. The real drain.halted() runs (its own read cadence) over a faked toolkit ls-remote"""
+     ends it within 35 s. The real drain.halted() runs (its own read cadence) over a faked toolkit ls-remote
+  W9 WARM_WINDOW default (Lead 11:30): cloud-pr.yml's default window, with cloud-pr.yml's own job settings (DRAIN_MAX_S
+     1200, WARM_LINGER 1200): one ready/ push at 06:00 starts a cold drain, and a unit pushed at any of 07:00, 12:00,
+     18:00 STARTs within 3 s (the chain stayed warm all day); with no window (before) the chain is cold"""
 import importlib, os, shutil, sys, tempfile, threading, types
 
 CODE = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.path.dirname(os.path.abspath(__file__))
@@ -353,8 +356,24 @@ def w8(mode):
     return line("W8", mode, ok, "; ".join(notes))
 
 
+def w9(mode):
+    import re
+    wf = os.path.join(os.path.dirname(os.path.dirname(CODE)), ".github", "workflows", "cloud-pr.yml")
+    m = re.search(r"WARM_WINDOW: \$\{\{ vars.WARM_WINDOW \|\| '([^']*)' \}\}", open(wf).read())
+    win = m.group(1) if m else "?"
+    e = {"WARM": "1", "WARM_WINDOW": win, "WARM_LINGER": "1200", "DRAIN_MAX_S": "1200", "DRAIN_LINGER": "30"}
+    s = Sim(DAY + 6 * 3600, e)
+    t = s.clock.t
+    s.pushes = [(t, "L-meta-9000")] + [(DAY + h * 3600, f"L-meta-90{h:02d}") for h in (7, 12, 18)]
+    s.actions(DAY + 18 * 3600 + 60)
+    st = dict((sid, ts) for ts, sid in s.started)
+    lags = [round(st.get(f"L-meta-90{h:02d}", 1e9) - (DAY + h * 3600), 1) for h in (7, 12, 18)]
+    ok = all(0 <= x <= 3 for x in lags)
+    return line("W9", mode, ok, f"cloud-pr.yml default window {win!r}: push->START at 07/12/18 UTC {lags} s, runs {len(s.runs)}")
+
+
 if __name__ == "__main__":
     mode = os.environ.get("WARM_TEST_MODE", "rules")
-    res = [f(mode) for f in (w1, w2, w3, w4, w5, w6, w7, w8)]
+    res = [f(mode) for f in (w1, w2, w3, w4, w5, w6, w7, w8, w9)]
     print("WARMDRAIN", mode, "PASS" if all(res) else "FAIL " + " ".join(f"W{i + 1}" for i, r in enumerate(res) if not r))
     sys.exit(0 if all(res) else 1)
