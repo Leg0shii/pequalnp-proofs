@@ -949,6 +949,26 @@ def main():
     print(("ok   " if " OK " in line else "FAIL ") + "rate/" + line)
     if " OK " not in line:
         fails.append("rate/bucket")
+    # RC-b (Lead 06:22/06:25): shared halt state, refresher, R3 stamp, rule 16.1 (opener and drain), 16.7 read budget
+    for tool, args, okw, tag in (("selftest_rcb.py", [], "RCB SELFTEST OK", "rcb"), ("haltrule.py", ["selftest"], "HALTRULE SELFTEST OK", "16.1"),
+                                 ("ghcond.py", ["selftest"], "GHCOND SELFTEST OK", "16.7")):
+        tp = os.path.join(src, ".github", "cloud-pr", tool)
+        if os.path.exists(tp):
+            rr = subprocess.run([sys.executable, "-I", tp] + (args or [os.path.dirname(tp)]), capture_output=True, text=True, timeout=600)
+            for l in rr.stdout.strip().splitlines()[:-1]:
+                if l.startswith("FAIL"):
+                    print("  " + l)
+            line = (rr.stdout.strip().splitlines() or [f"{tag} crashed " + rr.stderr.strip()[-120:]])[-1]
+        else:
+            line = f"{okw.split()[0]} FAIL: no {tool} in this checkout"
+        print(("ok   " if line.startswith(okw) else "FAIL ") + f"{tag}/" + line)
+        if not line.startswith(okw):
+            fails.append(f"{tag}/{tool}")
+    dr = open(os.path.join(src, ".github", "cloud-pr", "drain.py")).read()
+    okd = "haltrule.decide" in dr and re.search(r'DRAIN_PR_SLOTS", "6"', dr)
+    print(("ok   " if okd else "FAIL ") + "rcb/drain uses haltrule.decide (rule 16.1) and DRAIN_PR_SLOTS defaults to 6")
+    if not okd:
+        fails.append("rcb/drain")
     print("SKIP hostile/X11 mirror export order (team/mirror/mirror.py) and gate stop refs: gate v1.2.1 (T11), not fork code")
     f3 = [f for f in fails if f.startswith("recorded/F3-")]
     short = [f for f in fails if not f.startswith(("recorded/F3-", "budget/M400-"))] + \
