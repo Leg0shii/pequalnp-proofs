@@ -4,11 +4,12 @@ A local bare depth-1 clone of upstream (UPSTREAM arg: a repo or URL, BRANCH) mov
 N units (threads, as drain workers) take upstream_tree() copies over DURATION s. Pass if: 0 failed, 1 clone, the
 refresher fetched and moved, every copy is at a sha main had at most BASE_MAX_S before the copy, and a stuck refresher
 (base older than BASE_MAX_S) is refreshed inline, and with the upstream gone and the base too old: fail closed.
-  python3 movebase_test.py UPSTREAM [BRANCH] (default: HEAD of UPSTREAM) -> "MOVEBASE PASS" / "MOVEBASE FAIL: <why>" """
+  python3 movebase_test.py [UPSTREAM [BRANCH]] (default: the current directory's repo, its HEAD) -> "MOVEBASE PASS" / "MOVEBASE FAIL: <why>" """
 import os, subprocess, sys, tempfile, threading, time
 
 here = os.path.dirname(os.path.abspath(__file__))
-src, br = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else "")      # no BRANCH: the source's HEAD (CI checkout)
+src = sys.argv[1] if len(sys.argv) > 1 else "."                          # infra 10:27: no argument = this checkout
+br = sys.argv[2] if len(sys.argv) > 2 else ""                              # no BRANCH: the source's HEAD (CI checkout)
 d = tempfile.mkdtemp(prefix="movebase-")
 up = os.path.join(d, "up.git")
 url = src if "://" in src else "file://" + os.path.abspath(src)
