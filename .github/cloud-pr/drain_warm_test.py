@@ -10,7 +10,9 @@ Cases:
   W3 two arm dispatches at once: one drain runs (the other waits in the group), one START per unit; every job that
      runs drain.py is in group cloud-pr-drain, and a dispatchable arm path exists
   W4 an idle wave-window hour: warm at least 3300 of 3600 s, counted reads N at most 200 (304s on unchanged pages)
-  W5 the window end, or WARM=0, ends the chain: no run after it, the last run ends within 35 s"""
+  W5 the window end or the fork ref warm/off (live) ends the chain within 35 s; the variable WARM=0 reaches only the
+     next job (variables are fixed at job start), so it ends the chain within one job length
+  W6 a 10:00-14:00 window with WARM_MAX_S 5 h and WARM_HANDOVER 1200: two jobs, the one handover at 12:00"""
 import importlib, os, shutil, sys, tempfile, threading, types
 
 CODE = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.path.dirname(os.path.abspath(__file__))
@@ -45,10 +47,14 @@ class Sim:
         self.rf_live = 0.0; self.rf_on = None
         self.dispatches = 0; self.runs = []      # (start, end, trigger)
         self.env = env
-        self.env_at = []          # (t, key, value): variable changes
+        self.env_at = []          # (t, key, value): variable changes (take effect at the next job start only)
+        self.off_at = None        # fork ref warm/off pushed at this time (live stop)
         self.d = tempfile.mkdtemp(prefix="warmtest-")
 
     def apply_env(self):
+        pass                      # Actions variables are resolved at job start (run_drain), never inside a running job
+
+    def env_at_start(self):
         for t, k, v in self.env_at:
             if self.clock.t >= t:
                 os.environ[k] = v
@@ -57,7 +63,7 @@ class Sim:
         """one drain job: import the real drain.py fresh, fake its outside calls, run main()"""
         for m in ("drain", "warm", "haltrule"):
             sys.modules.pop(m, None)
-        os.environ.update(self.env); self.apply_env()
+        os.environ.update(self.env); self.env_at_start()
         os.environ.update(SRC=self.d, W=os.path.join(self.d, "w"), DRAIN_DRY="0", DRAIN_REFRESHER="1", PR_TOKEN="x")
         sys.path.insert(0, CODE)
         try:
@@ -70,6 +76,8 @@ class Sim:
         if W:
             W.clock = ck.time
             W.time = ck
+            W.T_START[0] = ck.t
+            W.off_ls = lambda url, ref: ("x\trefs/heads/warm/off\n" if self.off_at is not None and ck.t >= self.off_at else "")
             def disp():
                 sim.dispatches += 1
                 return True
@@ -220,22 +228,40 @@ def w4(mode):
 
 def w5(mode):
     out = []
-    for kind in ("window-end", "WARM=0"):
+    for kind in ("window-end", "warm/off ref", "WARM=0 variable"):
         s = Sim(DAY + 13 * 3600 + 30 * 60, env_for(mode, linger=1200 if mode == "before" else None))
         t = s.clock.t
         end = DAY + 14 * 3600
-        if kind == "WARM=0":
+        if kind == "warm/off ref":
+            end = t + 600; s.off_at = end
+        if kind == "WARM=0 variable":
             end = t + 600; s.env_at = [(end, "WARM", "0")]
         s.actions(t + 7200, first_trigger=t)
         after = [r for r in s.runs if r[0] > end + 1]
         last_end = max(r[1] for r in s.runs) - end
-        out.append((not after and last_end <= 35, f"{kind}: runs after={len(after)} last run ends {last_end:+.0f} s"))
+        lim = 1200 + COLD_S if kind == "WARM=0 variable" else 35     # a variable reaches only the next job
+        n_ok = len(after) <= (1 if kind == "WARM=0 variable" else 0)   # the job already armed starts, sees WARM=0, ends
+        out.append((n_ok and last_end <= lim, f"{kind}: runs after={len(after)} last run ends {last_end:+.0f} s"))
         os.environ["WARM"] = "1"
     return line("W5", mode, all(o for o, _ in out), "; ".join(n for _, n in out))
 
 
+def w6(mode):
+    """one job covers a 10:00-14:00 window: WARM_MAX_S 5 h, WARM_HANDOVER 1200 = exactly one handover, at 12:00"""
+    e = env_for(mode, linger=18000 if mode == "before" else None)
+    e.update(WARM_WINDOW="1000-1400", WARM_MAX_S="18000", DRAIN_MAX_S="18000", WARM_LINGER="18000", WARM_HANDOVER="1200")
+    s = Sim(DAY + 10 * 3600, e)
+    t = s.clock.t
+    s.actions(DAY + 14 * 3600 + 600, first_trigger=t)
+    ho = [round((r[1] - DAY) / 3600, 2) for r in s.runs[:-1]]
+    up = sum(min(r[1], DAY + 14 * 3600) - r[0] for r in s.runs)
+    os.environ.pop("WARM_HANDOVER", None); os.environ.pop("WARM_MAX_S", None)
+    ok = len(s.runs) == 2 and abs(s.runs[0][1] - (DAY + 12 * 3600)) <= 3 and max(r[1] for r in s.runs) <= DAY + 14 * 3600 + 35
+    return line("W6", mode, ok, f"runs {len(s.runs)}, handovers at {ho} h UTC, warm {up:.0f} of 14400 s")
+
+
 if __name__ == "__main__":
     mode = os.environ.get("WARM_TEST_MODE", "rules")
-    res = [f(mode) for f in (w1, w2, w3, w4, w5)]
+    res = [f(mode) for f in (w1, w2, w3, w4, w5, w6)]
     print("WARMDRAIN", mode, "PASS" if all(res) else "FAIL " + " ".join(f"W{i + 1}" for i, r in enumerate(res) if not r))
     sys.exit(0 if all(res) else 1)

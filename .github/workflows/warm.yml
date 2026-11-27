@@ -4,15 +4,17 @@
 # past the window end) polling ready/ every 2 s, and REARM_S before its DRAIN_MAX_S it dispatches the next warm run,
 # which waits in the group and starts when this one ends (schedules do not fire on this fork). Outside the window, with
 # WARM=0, or while filing is halted, a run drains what is pending and ends after 30 s idle, and starts no next run.
+# One job can cover the window: WARM_MAX_S up to 18000 (5 h), WARM_HANDOVER "HHMM" = the one chosen handover.
+# LIVE stop (variables are fixed at job start): push any commit to fork ref warm/off; delete it to allow warm again.
 # Arm at the window start:  gh workflow run warm.yml --repo Leg0shii/pequalnp-proofs-fork --ref main
-# (any ready/ push inside the window arms it too). Stop:  gh variable set WARM --body 0  (the chain ends at the next link).
+# (any ready/ push inside the window arms it too). Stop for later jobs:  variable WARM=0.
 name: warm-drain
 
 on:
   workflow_dispatch:
     inputs:
       linger:
-        description: Idle linger in seconds inside the wave window (at most 1200)
+        description: Idle linger in seconds inside the wave window (at most WARM_MAX_S)
         required: false
         type: string
         default: '1200'
@@ -25,7 +27,7 @@ permissions:
 jobs:
   drain:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 330            # WARM_MAX_S up to 5 h; GitHub-hosted job limit 6 h
     concurrency:
       group: cloud-pr-drain
       cancel-in-progress: false
@@ -52,6 +54,9 @@ jobs:
           WARM: ${{ vars.WARM || '1' }}
           WARM_WINDOW: ${{ vars.WARM_WINDOW || '' }}
           WARM_LINGER: ${{ inputs.linger || vars.WARM_LINGER || '1200' }}
+          WARM_MAX_S: ${{ vars.WARM_MAX_S || '1200' }}
+          WARM_HANDOVER: ${{ vars.WARM_HANDOVER || '' }}
+          DRAIN_MAX_S: ${{ vars.WARM_MAX_S || '1200' }}
         run: python3 -I "$GITHUB_WORKSPACE/src/.github/cloud-pr/drain.py"
       - name: Queue delay (B13, measurement only, never fails the job)
         if: always()

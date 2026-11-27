@@ -26,7 +26,7 @@ defaults:
 jobs:
   warm:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - name: Check out the candidate (drain.py, submit.py, guards, warm.py)
         uses: actions/checkout@v4
@@ -45,7 +45,7 @@ jobs:
           DRAIN_PR_SLOTS: '8'
           DRAIN_REFRESHER: '1'
           DRAIN_LINGER: '20'
-          DRAIN_MAX_S: '600'
+          DRAIN_MAX_S: '1200'
           WARM: '1'
           WARM_LINGER: '150'
           WARM_S: '90'
@@ -54,11 +54,18 @@ jobs:
           set -uo pipefail
           [ -n "${PR_TOKEN:-}" ] || { echo "::error::no PR_TOKEN secret: stop"; exit 1; }
           export WARM_WINDOW="$(date -u +%H%M)-2359"
+          # branch name options (rehearsal, w12): -l<N> = linger N s, -nopush = no own test push (the driver pushes
+          # loadtest/L-drill-* itself; every unit is DRY), e.g. warmcanary/<sha8>-l300-nopush
+          PUSH=1
+          case "$GITHUB_REF_NAME" in *-nopush*) PUSH=0;; esac
+          l=$(printf '%s' "$GITHUB_REF_NAME" | grep -oE -- '-l[0-9]+' | head -1 | tr -d -- '-l')
+          [ -n "$l" ] && export WARM_LINGER=$l
+          echo "warm linger $WARM_LINGER, own test push $PUSH; WARM-READY $(date -u +%H:%M:%S) (job started, refresher starting)"
           echo "window $WARM_WINDOW workers $DRAIN_WORKERS"
           H="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$PR_TOKEN" | base64 -w0)"
           U="https://github.com/$GITHUB_REPOSITORY.git"
           mkdir -p pusher && git -C pusher init -q
-          (
+          [ "$PUSH" = 1 ] && (
             sleep "$WARM_S"
             g() { git -C pusher -c "http.https://github.com/.extraheader=$H" "$@"; }
             g fetch -q --depth 1 "$U" "refs/heads/loadtest/$UNIT" || { echo "PUSHER fetch failed"; exit 0; }
@@ -73,7 +80,11 @@ jobs:
           wait
           echo "drain rc=$rc wall=$(( $(date +%s) - t0 )) s"
           python3 - <<'PY'
-          import re, time
+          import re, time, os
+          L0 = open("drain.log").read().splitlines()
+          dn = [l for l in L0 if " DONE " in l]
+          st = [l for l in L0 if " START " in l]
+          print(f"WARMCANARY units START={len(st)} DONE={len(dn)}; first START {st[0][:8] if st else '-'}; first DONE {dn[0][:8] if dn else '-'}")
           L = open("drain.log").read().splitlines()
           try:
               tp, sha = open("pushed.txt").read().split()

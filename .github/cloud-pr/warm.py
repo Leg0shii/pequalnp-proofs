@@ -14,22 +14,64 @@ checks before every START, every create still re-checks halt in submit.py, head 
                                  replaces it in the group is a drain too and re-arms the same way.
                              The refresher keeps running while the drain waits (rival snapshot and halt copy fresh).
   stop_refresher()           at drain end.
-Switches (Actions variables): WARM=0 turns all of it off at once; WARM_WINDOW "HHMM-HHMM" UTC (empty = off).
+Switches: Actions variables WARM (0 = off), WARM_WINDOW "HHMM-HHMM" UTC (empty = off), WARM_MAX_S (a job's length, up to
+18000 = 5 h; the job limit is 6 h), WARM_HANDOVER "HHMM" (the one chosen handover: the job ends at its first idle moment
+after it). Variables are fixed at job start, so the LIVE stop is the fork ref warm/off (git ls-remote every 30 s): it
+ends the linger within 30 s idle and stops the re-arm.
 The chain ends by itself at the window end, on WARM=0, on a halt (no re-arm), and when a dispatch fails (the next
 ready/ push restarts it). Reads while idle: the ready/ listing and halt refs are git (not REST); the refresher's newest
 page every 0.8 s is a 304 unless it changed (16.7a); one dispatch call per run. Only a ready/ drain re-arms.""" 
-import os, subprocess, time
+import os, re, subprocess, time
 
-MAX_LINGER = 1200.0
+MAX_LINGER = float(os.environ.get("WARM_MAX_S") or 1200)  # Lead 08:26: one job may cover up to 5 h (job limit 6 h)
+OFF_REF = "refs/heads/warm/off"                 # LIVE stop: Actions variables are fixed at job start, a ref is not
+OFF_EVERY_S = float(os.environ.get("WARM_OFF_EVERY_S", "30"))
 REARM_S = float(os.environ.get("WARM_REARM_S", "90"))
 POLL_S = float(os.environ.get("WARM_POLL_S", "2"))
 clock = time.time                              # the fixture swaps the clock
-ST = {"rearmed": False, "dispatches": 0, "rf": None, "stop": None, "log": print}
+ST = {"rearmed": False, "dispatches": 0, "rf": None, "stop": None, "log": print, "off_t": -1e18, "off": False}
+
+
+def off_ref():
+    """fork ref warm/off exists = warm is off NOW (read with git ls-remote, not a REST read, at most every 30 s).
+    Unreadable counts as off (fail closed toward the old 30 s drain)."""
+    now = clock()
+    if now - ST["off_t"] >= OFF_EVERY_S:
+        ST["off_t"] = now
+        repo = os.environ.get("GITHUB_REPOSITORY", "Leg0shii/pequalnp-proofs-fork")
+        try:
+            r = off_ls(f"https://github.com/{repo}.git", OFF_REF)
+            ST["off"] = r is None or bool(r.strip())
+        except Exception:
+            ST["off"] = True
+        if ST["off"]:
+            ST["log"]("WARM-OFF", OFF_REF, "is set (or unreadable): no linger past 30 s, no re-arm")
+    return ST["off"]
+
+
+def _ls(url, ref):
+    r = subprocess.run(["git", "ls-remote", url, ref], capture_output=True, text=True, timeout=30)
+    return r.stdout if r.returncode == 0 else None
+
+
+off_ls = _ls
+
+
+def handover(now):
+    """WARM_HANDOVER "HHMM" UTC: the job hands over at its first idle moment after that time (one chosen handover)."""
+    h = os.environ.get("WARM_HANDOVER", "").strip()
+    if not re.fullmatch(r"\d{4}", h):
+        return None
+    t = now - now % 86400 + int(h[:2]) * 3600 + int(h[2:]) * 60
+    return t if T_START[0] < t else None
+
+
+T_START = [time.time()]
 
 
 def window(now=None):
     """(start, end) epoch of today's window containing now, or None (off, malformed, or outside)."""
-    if os.environ.get("WARM", "1") == "0":
+    if os.environ.get("WARM", "1") == "0" or off_ref():
         return None
     w = os.environ.get("WARM_WINDOW", "").strip()
     try:
@@ -54,7 +96,12 @@ def linger(default, idle_since=None):
     if not w:
         return default
     want = min(MAX_LINGER, max(default, float(os.environ.get("WARM_LINGER", "1200") or 1200)))
-    return max(default, min(want, w[1] - (idle_since or clock())))
+    t = idle_since or clock()
+    end = w[1]
+    ho = handover(t)
+    if ho is not None:
+        end = min(end, ho)
+    return max(default, min(want, end - t))
 
 
 def poll(default):
@@ -63,6 +110,7 @@ def poll(default):
 
 def track(rf, start, stop, log=print):
     ST.update(rf=rf, stop=stop, log=log)
+    T_START[0] = clock()
     return rf
 
 
