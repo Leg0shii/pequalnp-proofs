@@ -155,10 +155,13 @@ jobs:
           # what the CPU is spent on: every 0.5 s, the running (R) processes by command name
           ( while :; do ps -eo stat=,comm= | awk '$1 ~ /^R/ {print $2}'; echo "--"; sleep 0.5; done ) > run.log &
           ps_loop=$!
+          # READS by stage (Lead 09:29): run-token core remaining every 5 s ("<epoch> <remaining> <used>"; rate_limit is free)
+          ( while :; do echo "$(date +%s) $(GH_TOKEN=$READ_TOKEN gh api rate_limit --jq '.resources.core|"\(.remaining) \(.used)"' 2>/dev/null)"; sleep 5; done ) > rl.log &
+          rl_loop=$!
           t0=$(date +%s)
           python3 -I "$SRC/.github/cloud-pr/drain.py" 2>&1 | tee drain.log
           rc=${PIPESTATUS[0]}
-          kill $vm $ps_loop 2>/dev/null
+          kill $vm $ps_loop $rl_loop 2>/dev/null
           echo "drain rc=$rc wall=$(( $(date +%s) - t0 )) s"
           python3 - <<'EOF'
           import re, statistics as st
@@ -228,4 +231,5 @@ jobs:
           path: |
             canary.txt
             drain.log
+            rl.log
           retention-days: 14
