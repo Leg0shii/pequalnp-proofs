@@ -2,10 +2,13 @@
 # test refs loadtest/<ID> (each one commit with ready/<MOD>.lean, like a ready/ push). Every submit.py runs DRY: guards,
 # race check, rival snapshot, no desk claim, no push, no PR. State goes to drain-state-loadtest, never drain-state.
 # Reports: per-unit prep and submit times (p50/p95), runner CPU (vmstat every 2 s), results.
-# Dispatch on the candidate branch: the drain code is the dispatched ref, not main. No push trigger.
+# Start: push the candidate sha as branch loadcanary/<anything> (a push runs the workflow file of the pushed commit, so
+# this works before the file is on main); or dispatch once it is on main. The drain code is that ref, not main.
 name: loadcanary
 
 on:
+  push:
+    branches: ['loadcanary/**']
   workflow_dispatch:
     inputs:
       workers:
@@ -48,8 +51,8 @@ jobs:
           READ_TOKEN: ${{ github.token }}
           PR_TOKEN: ${{ secrets.PR_TOKEN }}
           DRAIN_PREFIX: loadtest
-          DRAIN_WORKERS: ${{ inputs.workers }}
-          DRAIN_PR_SLOTS: ${{ inputs.slots }}
+          DRAIN_WORKERS: ${{ inputs.workers || vars.LOADCANARY_WORKERS || '28' }}
+          DRAIN_PR_SLOTS: ${{ inputs.slots || vars.LOADCANARY_SLOTS || '6' }}
           DRAIN_REFRESHER: '1'
           DRAIN_LINGER: '20'
           DRAIN_MAX_S: '900'
