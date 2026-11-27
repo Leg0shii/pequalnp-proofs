@@ -3,7 +3,8 @@
 # idle WARM_S, then pushes ONE new commit to loadtest/L-meta-24191 (test ref, DRY, never filed) and measures what a ready/
 # push during a warm drain gets: push -> START and push -> first "would push" (DONE dry-run). It then idles WARM_LINGER s
 # more and prints the refresher's counted reads (304s on unchanged pages do not count, 16.7a).
-# Start: push the candidate sha as branch warmcanary/<sha8>. Delete the branch after the run.
+# Start: push the candidate sha as branch warmcanary/<sha8>. Delete the branch after the run. It shares group loadcanary:
+# never push it while a rehearsal (loadcanary) run is running or queued.
 name: warmcanary
 
 on:
@@ -50,6 +51,7 @@ jobs:
           WARM_LINGER: '150'
           WARM_S: '90'
           UNIT: L-meta-24191
+          DRAIN_MATCH: 'L-meta-[0-9]+'   # never the rehearsal's L-drill-* units
         run: |
           set -uo pipefail
           [ -n "${PR_TOKEN:-}" ] || { echo "::error::no PR_TOKEN secret: stop"; exit 1; }

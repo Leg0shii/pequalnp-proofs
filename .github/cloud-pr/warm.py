@@ -148,6 +148,24 @@ def tick(busy, idle, t0, max_s, halted, default_linger=30.0):
         ok = dispatch_fn()
         ST["dispatches"] += 1
         ST["log"]("WARM-REARM", "next warm run dispatched" if ok else "no dispatch (failed, or a test prefix): the next ready/ push restarts the chain")
+    idle_flag(bool(w) and not busy and bool(idle) and now - idle > IDLE_FLAG_S)
+
+
+IDLE_FLAG_S = float(os.environ.get("WARM_IDLE_FLAG_S", "10"))
+
+
+def idle_flag(on):
+    """W/refresh.idle exists while the drain has waited idle over IDLE_FLAG_S: a hint for the refresher (submit.py,
+    lane alive) to read the rival pages every REFRESH_IDLE_S instead of 0.8 s and to answer a waiter's ask at once.
+    Removed at the first START. A refresher that ignores it is unchanged."""
+    f = os.path.join(os.environ.get("W", "/tmp"), "refresh.idle")
+    try:
+        if on and not os.path.exists(f):
+            open(f, "w").close(); ST["log"]("WARM-IDLE refresh.idle set (refresher may slow down)")
+        elif not on and os.path.exists(f):
+            os.remove(f); ST["log"]("WARM-IDLE refresh.idle cleared (work arrived)")
+    except OSError:
+        pass
 
 
 dispatch_fn = dispatch
