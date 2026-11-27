@@ -9,7 +9,9 @@ duplicates open pushes toolkit ref alert/dupopen-<epoch> with message `DUP-OPEN 
 bus alert channel). Taken list stale (over 180 s): per-PR file search for PRs under 10 min old, else skip.
 Env: PR_TOKEN (close, toolkit push), MINUTES (58), DRY=1 (no close, no push), FIXTURE (json list of our PRs, tests).
 """
-import base64, json, os, re, subprocess, sys, tempfile, time
+import base64, hashlib, json, os, re, subprocess, sys, tempfile, time
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import haltrule                                    # Lead 16.1: the one stop/go rule (shared with submit, drain, gate)
 
 UP = "open-goat/pequalnp-proofs"
 TK = "https://github.com/Leg0shii/pnp-toolkit.git"
@@ -85,8 +87,61 @@ def _row(x):
             "body": x.get("body") or ""}
 
 
+OPENLIST = {"alerted": -1e18, "why": "-"}
+OPENLIST_MAX_AGE, OPENLIST_FULL_MAX = 120, 900     # 16.7: open.json header / last full sweep older than this = stale
+
+
+def open_list():
+    """16.7 (b): takenpub's open.json on toolkit status/taken (W6): (rows like _row, "ok") or (None, why). Stale or
+    missing or a row without the Lease flag and head ref -> None (the caller falls back to its own sweep)."""
+    try:
+        if os.environ.get("FIXTURE_OPENLIST") is not None:
+            txt = os.environ["FIXTURE_OPENLIST"]
+        else:
+            g = os.path.join(W, "taken.git")
+            if not os.path.isdir(g):
+                sh("git", "init", "-q", "--bare", g)
+            if sh("git", *auth(), "-C", g, "fetch", "-q", "--depth=1", TK, "+refs/heads/status/taken:refs/heads/status/taken").returncode:
+                return None, "status/taken unreadable"
+            r = sh("git", "-C", g, "show", "refs/heads/status/taken:open.json")
+            if r.returncode:
+                return None, "no open.json"
+            txt = r.stdout
+        d = json.loads(txt)
+        age, fage = time.time() - int(d["t"]), time.time() - int(d.get("full_t") or 0)
+        if age > OPENLIST_MAX_AGE or fage > OPENLIST_FULL_MAX:
+            return None, f"stale t={int(age)}s full={int(fage)}s"
+        rows = {}
+        for x in d["prs"]:
+            if not isinstance(x, list) or len(x) < 7:
+                return None, "rows without lease/head ref"
+            n, who, sha, created, units, lease, ref = x[:7]
+            us = [u for u in units if isinstance(u, str)]
+            m = ID_RX.search((ref or "").replace("_", "-"))
+            gid = us[0] if len(us) == 1 else (m.group(1) if m else None)
+            rows[int(n)] = {"n": int(n), "gid": gid, "author": who, "lease": bool(lease),
+                            "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(created)) if created else "",
+                            "title": gid or "", "body": "Lease: (open.json)" if lease else ""}
+        return rows, "ok"
+    except Exception as e:
+        return None, "bad open.json " + type(e).__name__
+
+
 def open_prs():
-    """{number: row} of all open upstream PRs: full sweep every FULL_S (drops closed ones), else the newest pages."""
+    """{number: row} of all open upstream PRs. 16.7: takenpub's open.json + our newest page (1 read per pass) while it
+    is fresh; else (alert OPENLIST-STALE once per 5 min) our own sweep: full every FULL_S, else the newest pages."""
+    lst, why = open_list()
+    OPENLIST["why"] = why
+    if lst is not None:
+        for x in _page(1):                            # the newest 100 with title and body (our new PRs within 20 s)
+            lst[x["number"]] = _row(x)
+        OPEN["prs"], OPEN["pages"], OPEN["src"] = lst, 1, "list"
+        return OPEN["prs"]
+    if time.time() - OPENLIST["alerted"] >= 300 and not DRY:
+        OPENLIST["alerted"] = time.time()
+        alert_ref(f"OPENLIST-STALE {why}", "openliststale")
+        log("OPENLIST-STALE", why, "(own sweep)")
+    OPEN["src"] = "own"
     full = time.time() - OPEN["t"] >= OPEN.get("every", FULL_S)
     got, k = {}, 1
     while True:
@@ -199,19 +254,44 @@ def exposure(prs):
     return sp, close, exposed
 
 
+TKST = {"age": None, "alerted": -1e18}
+TAKEN_STALE_S = 60
+
+
+def taken_stale(age):
+    """Lead 06:22 TAKEN-STALE: the taken list's header is over 60 s old (or the list cannot be read) -> alert ref
+    TAKEN-STALE <age>s (or 'unreadable') once per 5 min. The age is the header epoch against this job's clock."""
+    TKST["age"] = age
+    if DRY or time.time() - TKST["alerted"] < 300:
+        return
+    TKST["alerted"] = time.time()
+    what = f"{int(age)}s" if age is not None else "unreadable"
+    alert_ref(f"TAKEN-STALE {what}", "takenstale")
+    log("TAKEN-STALE", what)
+
+
 def taken():
     """{step: (first PR number, author)} or None when missing or stale."""
     g = os.path.join(W, "taken.git")
     if not os.path.isdir(g):
         sh("git", "init", "-q", "--bare", g)
     if sh("git", *auth(), "-C", g, "fetch", "-q", "--depth=1", TK, "+refs/heads/status/taken:refs/heads/status/taken").returncode:
+        taken_stale(None)
         return None
     t = sh("git", "-C", g, "show", "refs/heads/status/taken:taken.txt").stdout.splitlines()
     try:
-        if not t or time.time() - int(t[0].split()[2]) > 180:
-            return None
+        TKST["age"] = time.time() - int(t[0].split()[2]) if t else None
     except (IndexError, ValueError):
+        TKST["age"] = None
+    if TKST["age"] is None or TKST["age"] > TAKEN_STALE_S:
+        taken_stale(TKST["age"])
+    if TKST["age"] is None or TKST["age"] > 180:
         return None
+    h = t[0].split()                                  # W6 43099ec6 (Lead ruling A3): trust the list alone only when
+    if len(h) <= 7 or h[6] != "complete":             # h[6] == "complete"; partial or an old header -> no list
+        TKST["partial"] = True
+        return None
+    TKST["partial"] = False
     out = {}
     for l in t[1:]:
         p = l.split()
@@ -256,21 +336,18 @@ def filing_go():
     return max([int(x) for x in re.findall(r"/filing/go/(\d+)$", txt, re.M)] or [0])
 
 
-def next_ref_epoch(now, stop_epochs, go_epochs):
-    """Ref number for a new filing/stop/<n> or filing/go/<n> (red team V5, Lead 06:02): max(now, every existing
-    filing/stop + 1, every existing filing/go + 1). A new ref is then greater than every ref that existed when it was
-    written, so ref order = write order whatever the writers' clocks say (a fast clock cannot outrank a later write,
-    two writes in one second cannot collide). Pure: now = int(time.time()), the epochs read right before the push.
-    Copy unchanged into every writer of these refs (PC, Lead, infra)."""
-    return max([int(now)] + [int(e) + 1 for e in stop_epochs] + [int(e) + 1 for e in go_epochs])
+next_ref_epoch = haltrule.next_ref_epoch          # one implementation (haltrule.py, Lead 16.1)
 
 
 def filing_stop(msg):
     """push toolkit ref filing/stop/<n> (the opener files nothing while it is newer than every filing/go); n by
     next_ref_epoch over the refs read right before the push; refs unreadable -> n = now (a stop is still pushed)."""
     sts, gos = all_refs("filing/stop"), all_refs("filing/go")
-    n = next_ref_epoch(time.time(), [e for e, _ in sts or []], [e for e, _ in gos or []]) if sts is not None and gos is not None \
-        else int(time.time())
+    if sts is not None and gos is not None:
+        n = next_ref_epoch(time.time(), [e for e, _ in sts], [e for e, _ in gos])
+    else:                                             # 16.8 S1: refs unreadable -> a NON-DIGIT name, never a clock number
+        m = re.match(r"filing stop: REJ-HALT \d+ (\d+)", msg)  # (halted until deleted under 16.1, whatever go exists)
+        n = f"rej-{m.group(1)}" if m else "rej-blind-" + hashlib.sha1(msg.encode()).hexdigest()[:8]
     g = os.path.join(W, "taken.git")
     if not os.path.isdir(g):
         sh("git", "init", "-q", "--bare", g)
@@ -293,12 +370,19 @@ def all_refs(pattern):
                   reverse=True)
 
 
+def filing_snapshot():
+    """(ls-remote text, rc) of every toolkit refs/heads/filing/* ref, one snapshot (Lead 16.1)."""
+    r = sh("git", *auth(), "ls-remote", TK, "refs/heads/filing/*", timeout=60)
+    return r.stdout, r.returncode
+
+
 def halted_now():
-    """True if the newest filing/stop is newer than every filing/go, False if not, None if unreadable."""
-    st, go = all_refs("filing/stop"), all_refs("filing/go")
-    if st is None or go is None:
+    """Lead 16.1 (haltrule.verdict): True if halted (newest stop >= newest go, a tie halted; a stop name that is not
+    plain digits halted), False if not, None if the refs are unreadable."""
+    txt, rc = filing_snapshot()
+    if rc:
         return None
-    return bool(st) and st[0][0] > (go[0][0] if go else 0)
+    return haltrule.verdict(txt, rc)[0]
 
 
 def ref_message(sha, ref):
@@ -318,13 +402,14 @@ MSGS = {}          # stop ref sha -> commit message (immutable, so cached; bound
 def stop_listed():
     """PR numbers named by our REJ-HALT stop refs (any age): a rejection already halted for, lifted or not. Clock-free
     replacement of 'closed after the newest filing/go' (V5). None if the stop refs cannot be read."""
-    sts = all_refs("filing/stop")
-    if sts is None:
+    txt, rc = filing_snapshot()                       # 16.8 S1: rej-<n> stops (non-digit names) count too
+    if rc:
         return None
+    fs = haltrule.family_state(txt, "filing")
     got = set()
-    for e, h in sts:
+    for ref, h in [(f"filing/stop/{e}", h) for e, h in fs["stops"]] + fs["odd_rows"]:
         if h not in MSGS:
-            m = ref_message(h, f"refs/heads/filing/stop/{e}")
+            m = ref_message(h, f"refs/heads/{ref}")
             if m is None:
                 continue                              # unreadable: its PRs count as not halted for (fail closed)
             MSGS[h] = m
@@ -334,13 +419,37 @@ def stop_listed():
     return got
 
 
+BADREF = {"t": 0.0, "alerted": 0.0}
+
+
+def badref_alert():
+    """16.8 S4: a halting stop ref whose name is not plain digits (halted until deleted, 16.1) -> alert ref
+    HALT-BADREF <ref> by name, once per 5 min while it stands. Refs read at most every 60 s."""
+    if DRY or time.time() - BADREF["t"] < 60:
+        return None
+    BADREF["t"] = time.time()
+    txt, rc = filing_snapshot()
+    if rc:
+        return None
+    odd = haltrule.family_state(txt, "filing")["odd"]
+    BADREF["n"] = len(odd)
+    if odd and time.time() - BADREF["alerted"] >= 300:
+        BADREF["alerted"] = time.time()
+        alert_ref("HALT-BADREF " + " ".join(odd[:5]) + (f" (+{len(odd) - 5})" if len(odd) > 5 else ""), "haltbadref")
+        log("HALT-BADREF", odd[:5])
+    return odd
+
+
 def blind_lift():
-    """push filing/go/<epoch> + alert BLIND-LIFT if the newest filing/stop is our blind stop and newer than every go."""
-    sts, gos = all_refs("filing/stop"), all_refs("filing/go")
-    if sts is None or gos is None:
+    """push filing/go/<n> + alert BLIND-LIFT if filing is halted (Lead 16.1) only by blind stops of ours."""
+    txt, rc = filing_snapshot()                       # Lead 16.1: one snapshot for the verdict and the new ref number
+    if rc:
         return False                                  # unreadable
-    g0 = gos[0][0] if gos else 0
-    live = [(e, h) for e, h in sts if e > g0]         # every stop the newest go has not lifted
+    fs = haltrule.family_state(txt, "filing")
+    if fs["odd"]:
+        log("BLIND-LIFT refused: stop ref name not plain digits", fs["odd"][0], "(halted until deleted, only the Lead)")
+        return False
+    live = fs["live"]                                 # every stop >= the newest go (a tie is halted, R6)
     if not live:
         return False                                  # no stop, or already lifted
     for e, h in live:                                 # Lead 05:58: lift only if EVERY live stop is a blind one of ours
@@ -354,7 +463,7 @@ def blind_lift():
                GIT_COMMITTER_NAME="dupclose", GIT_COMMITTER_EMAIL="dupclose@localhost")
     c = subprocess.run(["git", "-C", g, "commit-tree", tree, "-m", f"filing go: BLIND-LIFT of stop {st[0]} (two full scans, no rejection)"],
                        capture_output=True, text=True, env=env).stdout.strip()
-    n = next_ref_epoch(time.time(), [e for e, _ in sts], [e for e, _ in gos])
+    n = haltrule.next_ref_epoch(time.time(), [e for e, _ in fs["stops"]], [fs["lift"]])
     ok = sh("git", *auth(), "-C", g, "push", "-q", TK, f"{c}:refs/heads/filing/go/{n}").returncode == 0
     if ok:
         alert_ref(f"BLIND-LIFT stop {st[0]}", "blindlift")
@@ -395,10 +504,92 @@ def heartbeat(n, d, fresh):
     # 19:50: PR_TOKEN (Leg0shii, shared with PR creation and the PC) hit 0; rate_limit calls are free
     rlp = sh("gh", "api", "rate_limit", "--jq", r'"\(.resources.core.remaining)/\(.resources.core.reset)"', env=ghenv(), timeout=30).stdout.strip() or "?"
     msg = (f"dupclose {int(time.time())} open={n} dups={d} closed={len(CLOSED)} taken={'fresh' if fresh else 'stale'} "
-           f"{SPLIT['txt']} pages={OPEN.get('pages', '-')} rej10={REJ.get('n', '-')} rl={rl} rl_pr={rlp} tok={'read' if os.environ.get('READ_TOKEN') else 'pr'} "
+           f"{SPLIT['txt']} br={BR['deleted']}/{len(BR['cand'])}/{BR['kept']} badref={BADREF.get('n', '-')} taken_age={'-' if TKST['age'] is None else int(TKST['age'])}{'p' if TKST.get('partial') else ''} pages={OPEN.get('pages', '-')} openlist={OPEN.get('src', '-')} rej10={REJ.get('n', '-')} rl={rl} rl_pr={rlp} tok={'read' if os.environ.get('READ_TOKEN') else 'pr'} "
            f"run={os.environ.get('GITHUB_RUN_ID', '-')}")
     c = subprocess.run(["git", "-C", g, "commit-tree", tree, "-m", msg], capture_output=True, text=True, env=env).stdout.strip()
     sh("git", *auth(), "-C", g, "push", "-q", "-f", TK, f"{c}:refs/heads/status/dupclose", timeout=60)
+
+
+FORK = "https://github.com/Leg0shii/pequalnp-proofs-fork.git"
+FORK_REPO = "Leg0shii/pequalnp-proofs-fork"
+BR = {"cand": {}, "deleted": 0, "kept": 0, "seen": set()}      # n -> (head ref, head sha, why); counters for the heartbeat
+BR_MAX = 5                                       # deletes tried per pass (each: 1 ls-remote + 1-2 REST reads)
+
+
+def branch_cands(rows):
+    """16.5 rule 4 as amended by 16.8 (O3, O7): our PR MERGED, or closed BY US (a duplicate behind a rival) -> its head
+    branch Leg0shii:<ID> on the fork may be deleted. A PR closed by the makers (or by anyone we cannot name) keeps its
+    branch for good: the branch is the never-again mark for the unit."""
+    for x in rows:
+        if (x.get("user") or {}).get("login") != HANDLE or not x.get("closed_at") or x["number"] in BR["cand"]:
+            continue
+        h = x.get("head") or {}
+        ref, sha = h.get("ref") or "", h.get("sha") or ""
+        if (h.get("repo") or {}).get("full_name") != FORK_REPO or not UNIT_RX.fullmatch(ref) or not re.fullmatch(r"[0-9a-f]{40}", sha):
+            continue                                  # only <ID> branches of the fork, never main, ready/, stage/
+        n_ = x["number"]
+        if x.get("merged_at"):
+            why = "merged"
+        elif n_ in CLOSED or CLOSER.get(n_) == HANDLE:
+            why = "closed by us"
+        else:
+            continue                                  # makers' close or closer unknown: the branch stays
+        if n_ not in BR["seen"]:
+            BR["cand"][n_] = (ref, sha, why)
+
+
+def prune_branches():
+    """Delete the queued head branches, each only if, right before the delete: the fork branch still points at the
+    closed PR's head sha; no PR on head Leg0shii:<ID> is open; every closed unmerged PR on that head was closed by us.
+    The delete is a lease push (--force-with-lease=<ref>:<sha>): a create that moved the branch meanwhile wins."""
+    if DRY:
+        return 0
+    n_del = 0
+    g = os.path.join(W, "taken.git")
+    if not os.path.isdir(g):
+        sh("git", "init", "-q", "--bare", g)
+    for n_, (ref, sha, why) in list(BR["cand"].items())[:BR_MAX]:
+        r = sh("git", *auth(), "ls-remote", FORK, f"refs/heads/{ref}", timeout=60)
+        if r.returncode:
+            continue                                  # unreadable: try again next pass
+        cur = (r.stdout.split() or [None])[0]
+        keep = None
+        if cur is None:
+            keep = "already gone"
+        elif cur != sha:
+            keep = f"branch moved to {cur[:8]} (a new create)"
+        else:
+            q = sh("gh", "api", f"repos/{UP}/pulls?state=all&head=Leg0shii:{ref}&per_page=100", env=rdenv(), timeout=60)
+            if q.returncode:
+                continue
+            try:
+                ps = json.loads(q.stdout or "[]")
+            except ValueError:
+                continue
+            for p in ps:
+                m = p.get("number")
+                if not p.get("closed_at"):
+                    keep = f"PR {m} open on the head"; break
+                if p.get("merged_at") or m in CLOSED or CLOSER.get(m) == HANDLE:
+                    continue
+                c = sh("gh", "api", f"repos/{UP}/issues/{m}", "--jq", ".closed_by.login // empty", env=rdenv(), timeout=60)
+                if c.returncode == 0 and c.stdout.strip():
+                    CLOSER[m] = c.stdout.strip()
+                if CLOSER.get(m) != HANDLE:
+                    keep = f"PR {m} on the head closed by {CLOSER.get(m) or 'unknown'} (never-again mark)"; break
+        BR["cand"].pop(n_, None)
+        BR["seen"].add(n_)
+        if keep:
+            BR["kept"] += 1
+            log("branch kept", ref, "of", n_, keep)
+            continue
+        d = sh("git", *auth(), "-C", g, "push", "-q", f"--force-with-lease=refs/heads/{ref}:{sha}", FORK, f":refs/heads/{ref}", timeout=60)
+        if d.returncode == 0:
+            BR["deleted"] += 1; n_del += 1
+            log("branch deleted", ref, "of", n_, why)
+        else:
+            log("branch delete refused", ref, "of", n_, d.stderr.strip()[-100:])
+    return n_del
 
 
 def rej_burst():
@@ -476,6 +667,7 @@ def rej_burst():
                     CMT[n_] = (closed_s > CMT_FINAL_S, json.loads(c.stdout or "[]"))
             prs.append({"number": n_, "closedAt": ca, "mergedAt": None, "comments": (CMT.get(n_) or (False, []))[1],
                         "closedBy": CLOSER.get(n_)})
+        branch_cands(rows)                            # 16.5 rule 4 / 16.8 O3 O7: head branches we may delete
     now = time.time()
 
     def t(x):
@@ -650,6 +842,14 @@ def one_pass():
         alert_ref(f"DUP-OPEN {len(dups)}", "dupopen")
         log("DUP-OPEN", len(dups))
     rb = rej_burst()
+    try:
+        prune_branches()
+    except Exception as e:
+        log("branch prune failed:", repr(e)[:120])
+    try:
+        badref_alert()
+    except Exception as e:
+        log("badref check failed:", repr(e)[:120])
     if rb:
         log("rejections of ours in the last 10 min:", rb)
     return len(prs), len(dups), tk is not None
