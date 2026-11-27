@@ -304,7 +304,8 @@ def child_close(src, w):
             return subprocess.CompletedProcess(a, 0, "", "")
         if a[0] == "git" and "ls-remote" in a:                  # fixture refs ("ref" or {"ref", "msg"}) + what was pushed
             pats = [x.split("*")[0] for x in a if x.startswith("refs/")]
-            rows = [(FIXSHA.get(r, "0"), r) for r in FIXREFS] + [(v, k) for k, v in PUSHED.items()]
+            born = lambda r: int(re.search(r"/(\d+)$", r).group(1)) if re.search(r"/(\d{9,})$", r) else 0
+            rows = [(FIXSHA.get(r, "0"), r) for r in FIXREFS if born(r) <= clock[0]] + [(v, k) for k, v in PUSHED.items()]
             return subprocess.CompletedProcess(a, 0, "".join(f"{h}\t{r}\n" for h, r in rows if any(r.startswith(x) for x in pats)), "")
         if a[0] == "git" and "fetch" in a and any("filing/stop/" in x for x in a):      # Y4j: a stop ref's commit
             return subprocess.CompletedProcess(a, 1 if w.get("unreadable_stops") else 0, "", "fetch failed" if w.get("unreadable_stops") else "")
@@ -599,6 +600,11 @@ def cases():
     out.append(("hostile/Y4j", "close", {"closed_pulls": five, "closed_fail_passes": [0, 1, 2], "passes": [0, 60, 120, 180, 240, 300],
                                          "toolkit_refs": [{"ref": "refs/heads/filing/stop/%d" % (T0 + 130), "msg": "filing stop: Lead by hand"}]},
                 {"must_close": [], "must_push": "refs/heads/filing/stop/", "go_count": 0}))
+    # Y4k (Lead 05:58): REJ-HALT at T, blind condition at T+900 s, clean scans from T+1100 s -> no go, REJ-HALT stays newest
+    rj_k = ours_closed(50107, "L-meta-93008", -30, by="makers-bot", comments=[{"body": "REJECTED", "user": {"login": "makers-bot"}, "at": -29}])
+    out.append(("hostile/Y4k", "close", {"closed_pulls": five + [rj_k], "closed_fail_passes": [2, 3, 4],
+                                         "passes": [0, 60, 900, 960, 1020, 1100, 1160, 1220, 1280]},
+                {"must_close": [], "must_push": "refs/heads/filing/stop/", "go_count": 0, "last_stop": "filing stop: REJ-HALT"}))
     out.append(("hostile/Y4j2", "close", {"closed_pulls": five, "closed_fail_passes": [0, 1, 2], "passes": [0, 60, 120, 180, 240, 300],
                                           "unreadable_stops": True}, {"must_close": [], "must_push": "refs/heads/filing/stop/", "go_count": 0}))
     # Y5: a new dupclose job (empty CLOSED); our PR closed BY US 3 min ago, a CI-bot comment on it -> no halt

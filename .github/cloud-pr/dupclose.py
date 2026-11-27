@@ -271,16 +271,21 @@ def filing_stop(msg):
 BLIND_TAG = "filing stop: BLIND"
 
 
-def newest_ref(pattern):
-    """(epoch, sha) of the newest toolkit ref refs/heads/<pattern>/<epoch>; None if unreadable."""
+def all_refs(pattern):
+    """[(epoch, sha)] of the toolkit refs refs/heads/<pattern>/<epoch>, newest first; None if unreadable."""
     r = sh("git", *auth(), "ls-remote", TK, f"refs/heads/{pattern}/*", timeout=60)
     if r.returncode:
         return None
-    best = (0, None)
-    for h, e in re.findall(r"^(\S+)\s+refs/heads/" + re.escape(pattern) + r"/(\d+)$", r.stdout, re.M):
-        if int(e) > best[0]:
-            best = (int(e), h)
-    return best
+    return sorted(((int(e), h) for h, e in re.findall(r"^(\S+)\s+refs/heads/" + re.escape(pattern) + r"/(\d+)$", r.stdout, re.M)),
+                  reverse=True)
+
+
+def halted_now():
+    """True if the newest filing/stop is newer than every filing/go, False if not, None if unreadable."""
+    st, go = all_refs("filing/stop"), all_refs("filing/go")
+    if st is None or go is None:
+        return None
+    return bool(st) and st[0][0] > (go[0][0] if go else 0)
 
 
 def ref_message(sha, ref):
@@ -296,12 +301,18 @@ def ref_message(sha, ref):
 
 def blind_lift():
     """push filing/go/<epoch> + alert BLIND-LIFT if the newest filing/stop is our blind stop and newer than every go."""
-    st, go = newest_ref("filing/stop"), newest_ref("filing/go")
-    if not st or not go or not st[1] or st[0] <= go[0]:
-        return False                                  # unreadable, no stop, or already lifted
-    msg = ref_message(st[1], f"refs/heads/filing/stop/{st[0]}")
-    if not msg or not msg.startswith(BLIND_TAG):
-        return False                                  # not ours, a rejection halt, or unreadable: only the Lead lifts it
+    sts, gos = all_refs("filing/stop"), all_refs("filing/go")
+    if sts is None or gos is None:
+        return False                                  # unreadable
+    g0 = gos[0][0] if gos else 0
+    live = [(e, h) for e, h in sts if e > g0]         # every stop the newest go has not lifted
+    if not live:
+        return False                                  # no stop, or already lifted
+    for e, h in live:                                 # Lead 05:58: lift only if EVERY live stop is a blind one of ours
+        msg = ref_message(h, f"refs/heads/filing/stop/{e}")
+        if not msg or not msg.startswith(BLIND_TAG):
+            return False                              # a rejection halt, a foreign stop, or unreadable: only the Lead lifts
+    st = live[0]
     g = os.path.join(W, "taken.git")
     tree = subprocess.run(["git", "-C", g, "mktree"], input="", capture_output=True, text=True).stdout.strip()
     env = dict(os.environ, GIT_AUTHOR_NAME="dupclose", GIT_AUTHOR_EMAIL="dupclose@localhost",
@@ -450,8 +461,12 @@ def rej_burst():
     scan = REJ.get("scan", "ok")
     blind = False
     if scan != "ok" and not hit and f"scan@{go}" not in HALTED:
-        hit = [f"scan@{go}"]                          # cannot see every close in the window: fail closed (once per go)
-        blind = True
+        if not DRY and halted_now():                  # Lead 05:58: filing already halted -> no blind stop on top of it
+            HALTED.add(f"scan@{go}")                  # (unreadable refs -> None -> push the blind stop: fail closed)
+            log("blind scan while already halted, no stop pushed:", scan)
+        else:
+            hit = [f"scan@{go}"]                      # cannot see every close in the window: fail closed (once per go)
+            blind = True
     if hit:
         if not DRY:
             why = " ".join(map(str, hit[:20])) + ("" if scan == "ok" else f" ({scan})")
