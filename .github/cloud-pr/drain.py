@@ -782,6 +782,10 @@ def _loop(inflight, idle):
                 log("shared desk pause started: no new branch, in-flight ones finish"); todo = []
                 if not inflight:
                     break
+            elif wd.handover_now():             # lane warm: a hotfix on main reaches the wave without waiting hours
+                todo = []
+                if not inflight:
+                    break
             elif site_closed():                 # 16.11: hold, never end the drain on it (it reopens)
                 if not _SITE.get("logged"):
                     log("site-closed: no new branch,", _SITE["why"]); _SITE["logged"] = True

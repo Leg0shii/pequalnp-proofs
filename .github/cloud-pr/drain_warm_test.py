@@ -12,7 +12,8 @@ Cases:
   W4 an idle wave-window hour: warm at least 3300 of 3600 s, counted reads N at most 200 (304s on unchanged pages)
   W5 the window end or the fork ref warm/off (live) ends the chain within 35 s; the variable WARM=0 reaches only the
      next job (variables are fixed at job start), so it ends the chain within one job length
-  W6 a 10:00-14:00 window with WARM_MAX_S 5 h and WARM_HANDOVER 1200: two jobs, the one handover at 12:00"""
+  W6 a 10:00-14:00 window with WARM_MAX_S 5 h and WARM_HANDOVER 1200: two jobs, the one handover at 12:00
+  W7 HANDOVER NOW: a new ref warm/handover-<n> ends the job after its in-flight units, the next job runs the new main"""
 import importlib, os, shutil, sys, tempfile, threading, types
 
 CODE = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.path.dirname(os.path.abspath(__file__))
@@ -49,6 +50,9 @@ class Sim:
         self.env = env
         self.env_at = []          # (t, key, value): variable changes (take effect at the next job start only)
         self.off_at = None        # fork ref warm/off pushed at this time (live stop)
+        self.refs_at = []         # (t, name) other warm/* refs (warm/handover-<n>)
+        self.mains = []           # (job start, main version the job checked out)
+        self.main_v = [(0, "v1")] # (t, version) fork main moves (a hotfix)
         self.d = tempfile.mkdtemp(prefix="warmtest-")
 
     def apply_env(self):
@@ -77,7 +81,8 @@ class Sim:
             W.clock = ck.time
             W.time = ck
             W.T_START[0] = ck.t
-            W.off_ls = lambda url, ref: ("x\trefs/heads/warm/off\n" if self.off_at is not None and ck.t >= self.off_at else "")
+            W.off_ls = lambda url, ref: "".join(f"x\trefs/heads/{n}\n" for t, n in self.refs_at if ck.t >= t) + \
+                ("x\trefs/heads/warm/off\n" if self.off_at is not None and ck.t >= self.off_at else "")
             def disp():
                 sim.dispatches += 1
                 return True
@@ -121,6 +126,7 @@ class Sim:
                 self.rf_live += ck.t - self.rf_on; self.rf_on = None
         D.refresher_start = rf_start; D.refresher_stop = rf_stop
         t_start = ck.t
+        self.mains.append((t_start, [v for t, v in self.main_v if t <= t_start][-1]))
         D.main()
         rf_stop(None)
         self.runs.append((t_start, ck.t, trigger))
@@ -260,8 +266,33 @@ def w6(mode):
     return line("W6", mode, ok, f"runs {len(s.runs)}, handovers at {ho} h UTC, warm {up:.0f} of 14400 s")
 
 
+def w7(mode):
+    """HANDOVER NOW: a hotfix lands on main at +600 s of a 5 h job while units stream in (one every 7 s); a new ref
+    warm/handover-1 at +610 s: the job takes no new unit, the next job (new main, same window) starts at once and takes
+    the rest; no unit twice, none lost, the old warm/handover-0 (there at the job start) is ignored"""
+    e = env_for(mode, linger=18000 if mode == "before" else None)
+    e.update(WARM_WINDOW="1000-1500", WARM_MAX_S="18000", DRAIN_MAX_S="18000", WARM_LINGER="18000")
+    s = Sim(DAY + 10 * 3600, e)
+    t = s.clock.t
+    s.refs_at = [(0, "warm/handover-0"), (t + 610, "warm/handover-1")]
+    s.main_v = [(0, "v1"), (t + 600, "v2-hotfix")]
+    s.pushes = [(t + 20 + 7 * k, f"L-meta-{9000 + k}") for k in range(200)]
+    s.actions(t + 1800, first_trigger=t)
+    by = {}
+    for ts, sid in s.started:
+        by.setdefault(sid, []).append(ts)
+    twice = [k for k, v in by.items() if len(v) > 1]
+    lost = [sid for tp, sid in s.pushes if tp <= t + 1700 and sid not in by]
+    after = [sid for tp, sid in s.pushes if tp > t + 640 and sid in by]
+    j2 = [m for m in s.mains[1:2]]
+    ok = len(s.runs) >= 2 and s.runs[0][1] - t <= 640 and j2 and j2[0][1] == "v2-hotfix" and not twice and not lost
+    os.environ.pop("WARM_MAX_S", None)
+    return line("W7", mode, ok, f"job1 ends +{s.runs[0][1] - t:.0f} s, next job main={j2[0][1] if j2 else '-'}, runs {len(s.runs)}, "
+                f"units started {len(by)} (twice {len(twice)}, lost {len(lost)}), after the handover {len(after)}")
+
+
 if __name__ == "__main__":
     mode = os.environ.get("WARM_TEST_MODE", "rules")
-    res = [f(mode) for f in (w1, w2, w3, w4, w5, w6)]
+    res = [f(mode) for f in (w1, w2, w3, w4, w5, w6, w7)]
     print("WARMDRAIN", mode, "PASS" if all(res) else "FAIL " + " ".join(f"W{i + 1}" for i, r in enumerate(res) if not r))
     sys.exit(0 if all(res) else 1)

@@ -14,10 +14,15 @@ on:
   workflow_dispatch:
     inputs:
       linger:
-        description: Idle linger in seconds inside the wave window (at most WARM_MAX_S)
+        description: Idle linger in seconds inside the window (at most WARM_MAX_S)
         required: false
         type: string
-        default: '1200'
+        default: '18000'
+      window:
+        description: Window UTC HHMM-HHMM (empty = from the start for WARM_MAX_S; a handover passes the running window on)
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -52,12 +57,19 @@ jobs:
           PR_PER_MIN: ${{ vars.PR_PER_MIN || '70' }}
           PR_PER_HOUR: ${{ vars.PR_PER_HOUR || '480' }}
           WARM: ${{ vars.WARM || '1' }}
-          WARM_WINDOW: ${{ vars.WARM_WINDOW || '' }}
-          WARM_LINGER: ${{ inputs.linger || vars.WARM_LINGER || '1200' }}
-          WARM_MAX_S: ${{ vars.WARM_MAX_S || '1200' }}
+          WARM_WINDOW: ${{ inputs.window || vars.WARM_WINDOW || '' }}
+          WARM_LINGER: ${{ inputs.linger || vars.WARM_LINGER || '18000' }}
+          WARM_MAX_S: ${{ vars.WARM_MAX_S || '18000' }}
           WARM_HANDOVER: ${{ vars.WARM_HANDOVER || '' }}
-          DRAIN_MAX_S: ${{ vars.WARM_MAX_S || '1200' }}
-        run: python3 -I "$GITHUB_WORKSPACE/src/.github/cloud-pr/drain.py"
+          DRAIN_MAX_S: ${{ vars.WARM_MAX_S || '18000' }}
+        run: |
+          # no window given: this job's own window, from now for WARM_MAX_S (capped at 23:59 UTC)
+          if [ -z "$WARM_WINDOW" ]; then
+            e=$(( $(date +%s) + WARM_MAX_S )); [ "$(date -u -d @$e +%j)" = "$(date -u +%j)" ] || e=$(( $(date +%s) / 86400 * 86400 + 86340 ))
+            export WARM_WINDOW="$(date -u +%H%M)-$(date -u -d @$e +%H%M)"
+          fi
+          echo "warm window $WARM_WINDOW UTC, job length up to $DRAIN_MAX_S s, linger $WARM_LINGER s"
+          python3 -I "$GITHUB_WORKSPACE/src/.github/cloud-pr/drain.py"
       - name: Queue delay (B13, measurement only, never fails the job)
         if: always()
         env:

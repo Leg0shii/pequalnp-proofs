@@ -17,36 +17,66 @@ checks before every START, every create still re-checks halt in submit.py, head 
 Switches: Actions variables WARM (0 = off), WARM_WINDOW "HHMM-HHMM" UTC (empty = off), WARM_MAX_S (a job's length, up to
 18000 = 5 h; the job limit is 6 h), WARM_HANDOVER "HHMM" (the one chosen handover: the job ends at its first idle moment
 after it). Variables are fixed at job start, so the LIVE stop is the fork ref warm/off (git ls-remote every 30 s): it
-ends the linger within 30 s idle and stops the re-arm.
+ends the linger within 30 s idle and stops the re-arm. HANDOVER NOW: push a new fork ref warm/handover-<n>: the job
+takes no new unit, dispatches the next job (new main, same window) and ends when its in-flight units are done.
 The chain ends by itself at the window end, on WARM=0, on a halt (no re-arm), and when a dispatch fails (the next
 ready/ push restarts it). Reads while idle: the ready/ listing and halt refs are git (not REST); the refresher's newest
 page every 0.8 s is a 304 unless it changed (16.7a); one dispatch call per run. Only a ready/ drain re-arms.""" 
 import os, re, subprocess, time
 
 MAX_LINGER = float(os.environ.get("WARM_MAX_S") or 1200)  # Lead 08:26: one job may cover up to 5 h (job limit 6 h)
-OFF_REF = "refs/heads/warm/off"                 # LIVE stop: Actions variables are fixed at job start, a ref is not
 OFF_EVERY_S = float(os.environ.get("WARM_OFF_EVERY_S", "30"))
 REARM_S = float(os.environ.get("WARM_REARM_S", "90"))
 POLL_S = float(os.environ.get("WARM_POLL_S", "2"))
 clock = time.time                              # the fixture swaps the clock
-ST = {"rearmed": False, "dispatches": 0, "rf": None, "stop": None, "log": print, "off_t": -1e18, "off": False}
+ST = {"rearmed": False, "dispatches": 0, "rf": None, "stop": None, "log": print, "off_t": -1e18, "off": False,
+      "names": None, "ho_seen": None, "handover": False}
 
 
-def off_ref():
-    """fork ref warm/off exists = warm is off NOW (read with git ls-remote, not a REST read, at most every 30 s).
-    Unreadable counts as off (fail closed toward the old 30 s drain)."""
+def _refs():
+    """the fork's refs/heads/warm/* names (one git ls-remote, not a REST read, at most every OFF_EVERY_S).
+    None = unreadable."""
     now = clock()
     if now - ST["off_t"] >= OFF_EVERY_S:
         ST["off_t"] = now
         repo = os.environ.get("GITHUB_REPOSITORY", "Leg0shii/pequalnp-proofs-fork")
         try:
-            r = off_ls(f"https://github.com/{repo}.git", OFF_REF)
-            ST["off"] = r is None or bool(r.strip())
+            r = off_ls(f"https://github.com/{repo}.git", "refs/heads/warm/*")
         except Exception:
-            ST["off"] = True
-        if ST["off"]:
-            ST["log"]("WARM-OFF", OFF_REF, "is set (or unreadable): no linger past 30 s, no re-arm")
-    return ST["off"]
+            r = None
+        ST["names"] = None if r is None else {l.split()[1][len("refs/heads/"):] for l in r.splitlines() if len(l.split()) == 2}
+        if ST["ho_seen"] is None and ST["names"] is not None:
+            ST["ho_seen"] = {n for n in ST["names"] if n.startswith("warm/handover-")}   # old ones: never a handover
+    return ST["names"]
+
+
+def off_ref():
+    """fork ref warm/off exists = warm is off NOW. Unreadable counts as off (fail closed toward the old 30 s drain)."""
+    n = _refs()
+    off = n is None or "warm/off" in n
+    if off and not ST["off"]:
+        ST["log"]("WARM-OFF", "ref warm/off is set (or warm/* unreadable): no linger past 30 s, no re-arm")
+    ST["off"] = off
+    return off
+
+
+def handover_now():
+    """HANDOVER NOW (Lead 08:31): a NEW fork ref warm/handover-<anything> (one this job did not see at its start; a seen
+    set, no clock compare) makes the job take no new unit, dispatch the next warm job at once (it checks out the
+    new main and keeps this job's window) and end when its in-flight units are done."""
+    if ST["handover"]:
+        return True
+    n = _refs()
+    if n is None or ST["ho_seen"] is None:
+        return False
+    new = sorted(x for x in n if x.startswith("warm/handover-") and x not in ST["ho_seen"])
+    if new:
+        ST["handover"] = True
+        ok = dispatch_fn() if not ST["rearmed"] else True
+        ST["rearmed"] = True; ST["dispatches"] += 1
+        ST["log"]("WARM-HANDOVER", new[0], "no new unit; next warm job", "dispatched" if ok else "dispatch FAILED",
+                  "; this job ends when its in-flight units are done")
+    return ST["handover"]
 
 
 def _ls(url, ref):
@@ -111,6 +141,7 @@ def poll(default):
 def track(rf, start, stop, log=print):
     ST.update(rf=rf, stop=stop, log=log)
     T_START[0] = clock()
+    _refs()                                     # the warm/handover-* refs that exist now are old ones
     return rf
 
 
@@ -128,7 +159,8 @@ def dispatch():
     repo = os.environ.get("GITHUB_REPOSITORY", "Leg0shii/pequalnp-proofs-fork")
     for k in range(3):
         r = subprocess.run(["gh", "workflow", "run", "warm.yml", "--repo", repo, "--ref", "main",
-                            "-f", f"linger={int(float(os.environ.get('WARM_LINGER', '1200') or 1200))}"],
+                            "-f", f"linger={int(float(os.environ.get('WARM_LINGER', '1200') or 1200))}",
+                            "-f", f"window={os.environ.get('WARM_WINDOW', '')}"],      # the next job keeps this window
                            env=dict(os.environ, GH_TOKEN=tok), capture_output=True, text=True, timeout=60)
         if r.returncode == 0:
             return True
