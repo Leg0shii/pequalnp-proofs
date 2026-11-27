@@ -313,6 +313,9 @@ def primary_rl(r):
                 and re.search(r"^x-ratelimit-remaining:\s*0\s*$", r.stdout or "", re.I | re.M))
 
 
+RUNTOKEN_FLOOR = int(os.environ.get("RUNTOKEN_FLOOR", "200"))
+
+
 def _rt_empty_file():
     return os.path.join(os.environ.get("RIVAL_SNAP_DIR") or os.environ.get("PR_GATE_DIR") or W, "runtoken-empty")
 
@@ -368,6 +371,10 @@ def gh(args, write=False, timeout=120):
         t = toks[i]; i += 1
         for att in range(3):
             r = run(["gh"] + args, timeout=timeout, env=dict(os.environ, GH_TOKEN=t))
+            if fb and t == READ_TOKEN and (r.stdout or "").startswith("HTTP/"):   # Lead 09:34: under the floor = switch
+                m = re.search(r"^x-ratelimit-remaining:\s*(\d+)\s*$", r.stdout, re.I | re.M)   # before it is empty
+                if m and int(m.group(1)) < RUNTOKEN_FLOOR and not runtoken_empty():
+                    _mark_runtoken_empty(r, args)
             if r.returncode == 0:
                 return r
             if fb and t == READ_TOKEN and primary_rl(r):
@@ -1209,6 +1216,9 @@ def auth_cfg():
     return ["-c", f"http.https://github.com/.extraheader=AUTHORIZATION: basic {b}"]
 
 
+UPBASE_RETRY_S = float(os.environ.get("UPBASE_RETRY_S", "60"))
+
+
 def upbase_ref(base):
     """W6 push canary + infra (08:50 UTC 27 Nov): the push sends only the new objects when the fork ADVERTISES a ref at
     the commit's parent (the upstream base): git push then leaves out everything reachable from it (about 500 bytes).
@@ -1218,29 +1228,39 @@ def upbase_ref(base):
     Returns the ref name, or None (then the old fork-tip base is used)."""
     name = f"upbase/{base[:8]}"
     mark = os.path.join(SNAP_DIR, f"upbase-{base[:12]}.ok")
+    nomark = os.path.join(SNAP_DIR, f"upbase-{base[:12]}.no")     # red team R2: a refused create is not retried per unit
     if os.path.exists(mark):
         return name
     url = f"https://github.com/{FORK}.git"
+    try:
+        if time.time() - os.path.getmtime(nomark) < UPBASE_RETRY_S:
+            return None
+    except OSError:
+        pass
     try:
         os.makedirs(SNAP_DIR, exist_ok=True)
         with open(os.path.join(SNAP_DIR, "upbase.lock"), "w") as lk:
             fcntl.flock(lk, fcntl.LOCK_EX)
             if os.path.exists(mark):
                 return name
-            r = run(["git"] + auth_cfg() + ["ls-remote", url, f"refs/heads/{name}"], timeout=60)
+            try:
+                if time.time() - os.path.getmtime(nomark) < UPBASE_RETRY_S:
+                    return None
+            except OSError:
+                pass
+            r = run(["git"] + auth_cfg() + ["ls-remote", url, f"refs/heads/{name}"], timeout=15)
             have = r.returncode == 0 and r.stdout.split()[:1] == [base]
             if not have:
                 r = run(["gh", "api", "-X", "POST", f"repos/{FORK}/git/refs", "-f", f"ref=refs/heads/{name}", "-f", f"sha={base}"],
-                        timeout=60, env=dict(os.environ, GH_TOKEN=PR_TOKEN))
+                        timeout=15, env=dict(os.environ, GH_TOKEN=PR_TOKEN))
                 have = r.returncode == 0 or "Reference already exists" in (r.stdout + r.stderr)
-                if not have:
-                    log("upbase: REST ref create refused:", (r.stderr or r.stdout).strip()[:150], "- pushing the base once")
-                    r = run(["git"] + auth_cfg() + ["-C", TREE, "push", "-q", url, f"{base}:refs/heads/{name}"], timeout=600)
-                    have = r.returncode == 0
+                # red team R2 (Lead 09:22): NEVER push the whole base instead (182-228 MB under this lock, every worker
+                # waiting): a refused create means the old fork-tip base for UPBASE_RETRY_S
             if have:
                 open(mark, "w").write(f"{time.time():.0f}\n")
                 return name
-            log("upbase: no ref at the base:", (r.stderr or "").strip()[:150])
+            open(nomark, "w").write(f"{time.time():.0f}\n")
+            log("upbase: no ref at the base (fork-tip base for this unit):", (r.stderr or r.stdout or "").strip()[:150])
     except Exception as e:
         log("upbase failed:", repr(e)[:150])
     return None
@@ -2085,7 +2105,9 @@ def refresher():
             log("refresher: snapshot failed (workers read inline)", str(e)[:120])
         n += 1
         prog[0] = time.time()
-        time.sleep(max(0.05, REFRESH_S - (time.time() - t)))
+        # Lead 09:37: on PR_TOKEN (run token empty) the refresher reads at most once a second (304s are free, but the
+        # account limit is shared by the PC and every create)
+        time.sleep(max(0.05, (max(REFRESH_S, 1.0) if runtoken_empty() else REFRESH_S) - (time.time() - t)))
     done[0] = True
 
 
