@@ -285,9 +285,10 @@ def w7(mode):
     lost = [sid for tp, sid in s.pushes if tp <= t + 1700 and sid not in by]
     after = [sid for tp, sid in s.pushes if tp > t + 640 and sid in by]
     j2 = [m for m in s.mains[1:2]]
-    ok = len(s.runs) >= 2 and s.runs[0][1] - t <= 640 and j2 and j2[0][1] == "v2-hotfix" and not twice and not lost
+    last1 = max([ts for ts, _ in s.started if ts <= s.runs[0][1]] or [t]) - t   # job 1's last START (in-flight end varies with threads)
+    ok = len(s.runs) >= 2 and last1 <= 610 + 30 + 2 and j2 and j2[0][1] == "v2-hotfix" and not twice and not lost
     os.environ.pop("WARM_MAX_S", None)
-    return line("W7", mode, ok, f"job1 ends +{s.runs[0][1] - t:.0f} s, next job main={j2[0][1] if j2 else '-'}, runs {len(s.runs)}, "
+    return line("W7", mode, ok, f"job1 last START +{last1:.0f} s, ends +{s.runs[0][1] - t:.0f} s, next job main={j2[0][1] if j2 else '-'}, runs {len(s.runs)}, "
                 f"units started {len(by)} (twice {len(twice)}, lost {len(lost)}), after the handover {len(after)}")
 
 
