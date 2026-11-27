@@ -1665,7 +1665,8 @@ def push_first_done(gid):
 # PUSH_BATCH_S=0 (default) = the per-unit push above, unchanged.
 PUSH_BATCH_S = float(os.environ.get("PUSH_BATCH_S", "0") or 0)
 PUSH_WAIT_MAX_S = float(os.environ.get("PUSH_WAIT_MAX_S", "300"))
-PUSH_BATCH_MAX = int(os.environ.get("PUSH_BATCH_MAX", "200"))
+PUSH_BATCH_MAX = int(os.environ.get("PUSH_BATCH_MAX", "25"))   # heads per push
+PUSH_REFS_MAX = int(os.environ.get("PUSH_REFS_MAX", "50"))     # refs per push, heads + deletes (w12: a 93-ref push got a bare 403)
 
 
 def _pushq():
@@ -1784,7 +1785,7 @@ def push_leader(q, flusher=False, final=False):
             return
         reqs.sort(key=lambda v: v.get("t", 0))
         reqs = reqs[:PUSH_BATCH_MAX]
-        dels = dels[:PUSH_BATCH_MAX]
+        dels = dels[:max(0, PUSH_REFS_MAX - len(reqs))]       # the rest go in the next push
         with open(lastf + ".tmp", "w") as o:
             o.write(f"{now:.3f}")
         os.replace(lastf + ".tmp", lastf)
