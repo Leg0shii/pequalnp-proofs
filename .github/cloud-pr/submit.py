@@ -988,16 +988,22 @@ def submit(gid, lease):
     log("pushed", c[:12], "to", f"{FORK}:{gid}")
     r = None
     t_pr = time.time()
-    if not lease:
-        rv = rival_now(gid, SNAP_CREATE_AGE_S)   # Lead 18:53 / 06:12: right before the create, snapshot at most 2 s old
-        if rv:
-            log("SKIP", gid, "unleased PR not opened, rival", rv)
-            return None, "rival PR open: " + rv
     for att in range(5):
         if stopped():                    # STOP may appear while this PR waited for a retry
             return None, "STOP file on upstream main"
         body = pr_body(lease)
         with pr_gate():
+            # Lead 06:12 a0 (w12 stall drill): before EVERY attempt, after any slot, bucket or backoff wait: the halt
+            # switch, and for an unleased PR a rival snapshot at most SNAP_CREATE_AGE_S old (Lead 18:53)
+            h, hwhy = filing_halted()
+            if h:
+                log("halted:", gid, hwhy, f"(before create attempt {att + 1})")
+                return None, "halted: " + hwhy
+            if not lease:
+                rv = rival_now(gid, SNAP_CREATE_AGE_S)
+                if rv:
+                    log("SKIP", gid, f"unleased PR not opened (attempt {att + 1}), rival", rv)
+                    return None, "rival PR open: " + rv
             r = run(["gh", "pr", "create", "--repo", UP, "--head", f"{HANDLE}:{gid}", "--base", "main",
                      "--title", gid, "--body", body], timeout=120, env=dict(os.environ, GH_TOKEN=PR_TOKEN))
         if re.search(r"https://\S+", r.stdout) or "already exists" in r.stderr:
@@ -1186,6 +1192,8 @@ def main():
         finish("race", why2)
     if not url and why2.startswith("STOP"):
         finish("stopped", why2 + " (branch kept)")
+    if not url and why2.startswith("halted: "):
+        finish("halted", why2[8:] + (f"; lease {LEASE[0]} kept on claim/{ID}" if LEASE[0] else ""))
     finish("submitted" if url else "submitfail", f"{why2}; {time.time() - t0:.0f}s after start", url)
 
 

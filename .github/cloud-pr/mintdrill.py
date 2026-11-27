@@ -87,9 +87,10 @@ def child_submit(src, w):
     S.curl_json = curl_json
 
     now_c = T0 + w.get("t", 0)
-    vis = lambda p: time.mktime(time.strptime(p["created_at"][:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone <= now_c
-    pulls_open = sorted([p for p in w.get("open_pulls", []) if vis(p)], key=lambda p: -p["number"])
-    pulls_closed = sorted([p for p in w.get("closed_pulls", []) if vis(p)], key=lambda p: -p["number"])
+    CLK = [now_c]                           # the case clock; S.time.sleep advances it (retries, backoffs)
+    vis = lambda p: time.mktime(time.strptime(p["created_at"][:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone <= CLK[0]
+    pulls_open = sorted(w.get("open_pulls", []), key=lambda p: -p["number"])      # filtered by vis() at each read
+    pulls_closed = sorted(w.get("closed_pulls", []), key=lambda p: -p["number"])
     out["reads"] = 0
 
     def cp(stdout="", rc=0, err=""):
@@ -104,7 +105,7 @@ def child_submit(src, w):
                 h = q["head"].split(":", 1)[-1]
                 return cp("".join("https://github.com/open-goat/pequalnp-proofs/pull/%d\n" % p["number"] for p in pulls_open
                                   if p["user"]["login"] == HANDLE and (p.get("head") or {}).get("ref") == h))
-            src_l = pulls_open if q.get("state") == "open" else pulls_closed
+            src_l = [p for p in (pulls_open if q.get("state") == "open" else pulls_closed) if vis(p)]
             pp, pg = int(q.get("per_page", 30)), int(q.get("page", 1))
             return cp(json.dumps(src_l[(pg - 1) * pp:pg * pp]))
         m = re.search(r"/pulls/(\d+)/files", a[1]) if a[0] == "api" else None
@@ -116,7 +117,7 @@ def child_submit(src, w):
         if a[:2] == ["pr", "list"]:
             n = a[a.index("--search") + 1]
             res = []
-            for p in pulls_open + pulls_closed:
+            for p in [x for x in pulls_open + pulls_closed if vis(x)]:
                 if n in (p.get("title") or "") or any(n in f for f in p.get("files") or []):
                     st = "OPEN" if not p.get("closed_at") else ("MERGED" if p.get("merged_at") else "CLOSED")
                     res.append({"number": p["number"], "state": st, "title": p.get("title"), "author": p["user"],
@@ -157,6 +158,9 @@ def child_submit(src, w):
 
     def run(cmd, timeout=300, env=None, cwd=None):
         if cmd[:3] == ["gh", "pr", "create"]:
+            out["creates"] = out.get("creates", 0) + 1
+            if out["creates"] <= w.get("create_fail", 0):  # a0: GitHub refuses the first attempts (secondary limit)
+                return cp("", 1, "HTTP 403: You have exceeded a secondary rate limit")
             body = cmd[cmd.index("--body") + 1]
             out["prs"].append({"gid": gid, "lease": "Lease:" in body, "body": body})
             return cp("https://github.com/open-goat/pequalnp-proofs/pull/99999\n")
@@ -225,9 +229,8 @@ def child_submit(src, w):
         return w.get("li_file") or ""
     S.li_from_toolkit = fake_li
     S.release = lambda lid, why: out["desk"].append("release " + str(lid)) if lid else None
-    S.time.sleep = lambda s: None
-    NOW = T0 + w.get("t", 0)
-    S.time.time = lambda: NOW               # the fixtures' clock (created_at of the pulls is relative to T0)
+    S.time.sleep = lambda s: CLK.__setitem__(0, CLK[0] + s)
+    S.time.time = lambda: CLK[0]            # the fixtures' clock (created_at of the pulls is relative to T0)
 
     def gate_open_now():
         gj = S.LAST_GJ[0] or {}
@@ -242,8 +245,9 @@ def child_submit(src, w):
         ans = (w.get("gate_answers") or {}).get(g) or (w.get("gate_answers") or {}).get("*", "ok")
         return (ans, "lease-x1") if ans == "ok" else (ans, None)
     S.gate_claim = gate_claim
-    if hasattr(S, "filing_halted"):
-        S.filing_halted = lambda: ((True, "filing halted (drill)") if w.get("halted") else (False, ""))
+    if hasattr(S, "filing_halted"):          # halt_at: a stop ref appears at that case time (seconds after T0 + t)
+        S.filing_halted = lambda: ((True, "filing halted (drill)") if w.get("halted") or
+                                   (w.get("halt_at") is not None and CLK[0] >= now_c + w["halt_at"]) else (False, ""))
     elif w.get("halted"):
         out["unexpected"].append("no filing_halted in this checkout")
     try:
@@ -799,6 +803,15 @@ def cases():
     out.append(("hostile/X13", "submit", {"gid": "L-meta-90103", "gaps": [unit("L-meta-90103")], "taken": {"L-meta-1": "someone"},
                 "open_pulls": [rival_pr(50103, "Batch of proofs", created=-10, files=["lean/PEqualNP/Outside/L_meta_90103.lean"])],
                 "files_fail": [50103]}, "no PR"))
+    # a0 (w12 stall drill): the first create gets a 403 and backs off 30 s; meanwhile a rival opens (at +5 s) or a stop
+    # ref appears (at +5 s): the retry must re-check both (rival snapshot at most 2 s old, halt) and open nothing
+    out.append(("hostile/a0-rival", "submit", {"gid": "L-meta-92201", "gaps": [unit("L-meta-92201")], "taken": {"L-meta-1": "someone"},
+                "create_fail": 1, "open_pulls": [rival_pr(50201, "Batch of proofs", created=5,
+                                                          files=["lean/PEqualNP/Outside/L_meta_92201.lean"])]}, "no PR"))
+    out.append(("hostile/a0-halt", "submit", {"gid": "L-meta-92202", "gaps": [unit("L-meta-92202")], "taken": {"L-meta-1": "someone"},
+                "create_fail": 1, "halt_at": 5}, "no PR"))
+    out.append(("hostile/a0-clear", "submit", {"gid": "L-meta-92203", "gaps": [unit("L-meta-92203")], "taken": {"L-meta-1": "someone"},
+                "create_fail": 1}, "PR"))
     # Y2: the opener's gate check with the real gate_open_now. Refs unreadable = closed (no claim; the closed-gate rule
     # then files bare as GATEWAY 4 says); open newer than stop = claim; stop newer = no claim
     for k, refs, claim in (("Y2-unreadable", "fail", False),
@@ -885,12 +898,23 @@ def main():
         if not ok:
             fails.append(name)
     print(f"recorded/F3 {ok_f3}/{n_f3} provable units of the 21:52-21:53 mint filed")
-    for grp, lim_avg, lim_tot in (("F3", 2.0, None), ("M400", 2.0, 800)):
+    # Lead 06:12 fact fix: the run token's hourly limit is read from rate_limit (about 5,000), not assumed 1,000
+    lim_h, lim_src = 5000, "default, rate_limit not readable here"
+    if os.environ.get("GH_TOKEN"):
+        try:
+            rl = subprocess.run(["gh", "api", "rate_limit", "--jq", ".resources.core.limit"], capture_output=True, text=True, timeout=20)
+            if rl.returncode == 0 and rl.stdout.strip().isdigit():
+                lim_h, lim_src = int(rl.stdout.strip()), "rate_limit of this run's token"
+        except Exception:
+            pass
+    print(f"info budget/token hourly limit {lim_h} ({lim_src})")
+    for grp, lim_avg, lim_tot in (("F3", 2.0, None), ("M400", 2.0, min(800, lim_h // 5))):
         v = BUD.get(grp) or [0]
         tot, avg = sum(v), sum(v) / len(v)
         okb = avg <= lim_avg and (lim_tot is None or tot < lim_tot)
         print(("ok  " if okb else "FAIL"), f"budget/{grp} GitHub reads total {tot} over {len(v)} units, avg {avg:.2f}/unit, "
-              f"max {max(v)} (limit avg {lim_avg}" + (f", total < {lim_tot})" if lim_tot else ")"))
+              f"max {max(v)}, {100 * tot / lim_h:.1f}% of the hourly limit (limit avg {lim_avg}" +
+              (f", total < {lim_tot})" if lim_tot else ")"))
         if not okb:
             fails.append(f"budget/{grp}")
         g = BUDG.get(grp) or [0]
