@@ -1178,6 +1178,21 @@ def pr_list(g):
     return pn
 
 
+def twin_only_block(gj, g):
+    """OPENER-TWIN (Lead 17:45 UTC 27 Nov): in the twin cohorts the desk sets offerable_now false on a row as soon as
+    its TWIN is held. Such a row is still free when it has no holder, pr_open 0, no pr_numbers, and every twin
+    (twin_of, either direction) has pr_open 0 and no pr_numbers. Then offerable_now false alone is not a refusal; the
+    taken list, rival PRs and the fresh export are checked after this as for any row."""
+    if g.get("held_now") or (g.get("holders_now") or 0) > 0 or (g.get("pr_open") or 0) or pr_list(g):
+        return False
+    gid = g.get("id")
+    twins = [x for x in gj.get("gaps") or [] if isinstance(x, dict) and x.get("id") != gid and
+             (x.get("id") == g.get("twin_of") or (gid and x.get("twin_of") == gid))]
+    if not twins:
+        return False
+    return all(not (t.get("pr_open") or 0) and not pr_list(t) for t in twins)
+
+
 def race_ok(gid):
     """(ok, why, lease). have=proof always: we hold a finished file."""
     try:
@@ -1207,7 +1222,9 @@ def race_ok(gid):
         prio = rate_prio(bool(pr_list(g)), g.get("points") or g.get("weight") or 0)
         is_h = bool(g.get("held_now")) or (g.get("holders_now") or 0) > 0
         if not is_h and g.get("offerable_now") is False:
-            return False, "not offerable on the desk now (gaps.json)", None
+            if not twin_only_block(gj, g):
+                return False, "not offerable on the desk now (gaps.json)", None
+            log("race check:", gid, "offerable_now false only because its twin is held (OPENER-TWIN): bare path")
         b = race_check(gid)
         if b:
             return False, f"blocking PRs {b}", None
