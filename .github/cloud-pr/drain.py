@@ -11,7 +11,7 @@ Env: SRC (fork main checkout), W, PR_TOKEN, READ_TOKEN, GITHUB_REPOSITORY."""
 import base64, json, os, re, subprocess, sys, tempfile, threading, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import haltrule                                        # rule 16.1 (w9's haltrule.py): the same rule as submit.py and the closer
-import warm                                            # RC-c always-warm drain in the wave window (warm.py)
+import warm as wd                                      # RC-c always-warm drain in the wave window (warm.py)
 from concurrent.futures import ThreadPoolExecutor
 
 SRC = os.environ["SRC"]; W = os.environ.get("W") or tempfile.mkdtemp()
@@ -223,12 +223,17 @@ def retry_due(v):
     return r in RETRYABLE and n < RETRY_MAX and time.time() - v[1] >= RETRY_WAIT[min(n, len(RETRY_WAIT)) - 1] - 1
 
 
+MATCH = os.environ.get("DRAIN_MATCH", "")
+
+
 def pending():
     r = sh("git", "ls-remote", URL, f"refs/heads/{PREFIX}/*", timeout=60)
     out = []
     for l in r.stdout.splitlines():
         sha, ref = l.split()
         sid = ref[len(f"refs/heads/{PREFIX}/"):]
+        if MATCH and not re.fullmatch(MATCH, sid):        # rehearsal: only the drill units (DRAIN_MATCH)
+            continue
         if re.fullmatch(r"L-[a-z0-9]+(-[a-z0-9]+)*", sid) and retry_due(SEEN.get((sid, sha))):
             out.append((sid, sha))
     def num(s):
@@ -420,7 +425,7 @@ def one(sid, sha, prefix=None, extra=None):
     # Lead 19:14: the per-stage seconds of every unit in the drain log (prep = fetch of the ready commit + upstream
     # checkout before submit.py starts)
     for l in (r.stdout or "").splitlines():
-        if " TIMES " in l or " gate: " in l or " SKIP " in l or " halted: " in l:
+        if " TIMES " in l or " gate: " in l or " SKIP " in l or " halted: " in l or "WOULD-CREATE " in l or "SIGHT-TO-CREATE " in l:
             log(sid, l.strip()[:200], f"prep={t_sub - T_ONE.get(sid, t_sub):.1f}" if " TIMES " in l else "")
     res = dict(l.split("=", 1) for l in open(outp).read().splitlines() if "=" in l) if os.path.exists(outp) else {}
     tail = (r.stdout + r.stderr).strip().splitlines()[-1:] or [""]
@@ -516,11 +521,22 @@ def main():
     except Exception as e:
         log("RUN-TOKEN rate_limit unreadable:", repr(e)[:80])
     inflight = {}; idle = None
-    rf = warm.track(refresher_start(), refresher_start, refresher_stop, log)
+    rf = wd.track(refresher_start(), refresher_start, refresher_stop, log)
+    warm = float(os.environ.get("DRAIN_WARM_S", "0") or 0)
+    if rf and warm > 0:                    # Lead 08:12 (b): units are released only after the refresher's first copies
+        t_w = time.time()                  # exist (or WARM_S passed), so the cold first build is not on any unit's path
+        while time.time() - t_w < warm and not all(os.path.exists(os.path.join(W, x)) for x in ("rival_snap.json", "halt.json")):
+            time.sleep(0.5)
+        log(f"WARM {time.time() - t_w:.1f} s: refresher copies", "ready" if all(os.path.exists(os.path.join(W, x))
+            for x in ("rival_snap.json", "halt.json")) else "NOT ready (released anyway)", "- units released now")
+        if PREFIX == "loadtest":           # rehearsal marker for the builder: toolkit ref drill/warm-<epoch>
+            ok = alert_ref(f"WARM drain run {os.environ.get('GITHUB_RUN_ID', '?')} released units at {time.time():.0f}",
+                           "warm", prefix="drill")
+            log("WARM marker ref drill/warm-*", "pushed" if ok else "push FAILED")
     try:
         _loop(inflight, idle)
     finally:
-        warm.stop_refresher()
+        wd.stop_refresher()
     try:                                   # 16.12: live newest-page read duration of this drain
         ds = sorted(float(l.split()[1]) for l in open(os.path.join(W, "snapd.log")) if len(l.split()) == 2)
         if ds:
@@ -587,7 +603,7 @@ def stall_alerts(now, n_inflight, last_done, t_start, stall_until):
     return [(k, m) for k, m in out if now - ALERTED.get(k, 0) >= 300]
 
 
-def alert_ref(msg, kind):
+def alert_ref(msg, kind, prefix="alert"):
     """toolkit ref alert/<kind>-<epoch> (an empty commit whose message is the alert), the same channel as the closer's
     TAKEN-STALE; the Lead's audit and the infra box read alert/*"""
     g = os.path.join(W, "alert.git")
@@ -597,7 +613,7 @@ def alert_ref(msg, kind):
     env = dict(os.environ, GIT_AUTHOR_NAME="drain", GIT_AUTHOR_EMAIL="drain@localhost",
                GIT_COMMITTER_NAME="drain", GIT_COMMITTER_EMAIL="drain@localhost")
     c = subprocess.run(["git", "-C", g, "commit-tree", tree, "-m", msg], capture_output=True, text=True, env=env).stdout.strip()
-    return bool(c) and sh("git", *auth(), "-C", g, "push", "-q", TK, f"{c}:refs/heads/alert/{kind}-{int(time.time())}",
+    return bool(c) and sh("git", *auth(), "-C", g, "push", "-q", TK, f"{c}:refs/heads/{prefix}/{kind}-{int(time.time())}",
                           timeout=60).returncode == 0
 
 
@@ -615,6 +631,15 @@ def stall_tick(n_inflight):
         su = float(open(os.path.join(W, "stall")).read())
     except (OSError, ValueError):
         su = 0.0
+    try:                                   # 16.14: the refresher's heartbeat went stale, workers read inline
+        rd = open(os.path.join(W, "refdead")).read().split()
+        if time.time() - ALERTED.get("refdead", 0) >= 300 and time.time() - float(rd[0]) < 300:
+            ALERTED["refdead"] = time.time()
+            m = "REFRESHER-DEAD " + " ".join(rd[1:])[:120] + ": workers read inline (one reader per check)"
+            ok = DRY or alert_ref(m, "refdead")
+            log(m, "(alert ref pushed)" if ok else "(alert ref push FAILED)")
+    except (OSError, ValueError, IndexError):
+        pass
     try:                                   # 16.13: four create refusals ended this drain's creates
         gv = open(os.path.join(W, "giveup")).read().strip()
         if not ALERTED.get("prstall-giveup"):
@@ -769,12 +794,12 @@ def _loop(inflight, idle):
                 log("START", x[0], x[1][:8], f"({len(todo)} pending)")
             if not inflight and not todo:
                 idle = idle or time.time()
-                if time.time() - idle > warm.linger(LINGER, idle):
+                if time.time() - idle > wd.linger(LINGER, idle):
                     break
             else:
                 idle = None
-            warm.tick(bool(inflight or todo), idle, T0, MAX_S, _FH[1], LINGER)
-            time.sleep(1 if inflight else warm.poll(3))
+            wd.tick(bool(inflight or todo), idle, T0, MAX_S, _FH[1], LINGER)
+            time.sleep(1 if inflight else wd.poll(float(os.environ.get("DRAIN_IDLE_POLL_S", "3"))))
 
 
 if __name__ == "__main__":

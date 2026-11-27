@@ -111,6 +111,14 @@ def add_pr(n, t, title, files=(), login="rival1", upd=60):
                      "_u": (lambda now, t=t, upd=upd: t + upd if now >= t + upd else t)})
 
 
+def RN(gid, age):
+    """the create-time check (16.14: final=True; older code has no final)"""
+    try:
+        return S.rival_now(gid, age, final=True)
+    except TypeError:
+        return S.rival_now(gid, age)
+
+
 # ---- R3: a page read that takes 3 s
 reset_snap()
 add_pr(70001, CLK[0] - 5, "Prove L-meta-70001")
@@ -148,7 +156,7 @@ def lat_taken():
     return fake_taken()
 S.gh = lat_gh; S._taken_list = lat_taken
 try:
-    r = S.rival_now("L-meta-71999", 2)
+    r = RN("L-meta-71999", 2)
     sa = S.STG.get("snap_age")
     honest = CLK[0] - max([t for t in REQ if t <= CLK[0] - (sa or 0) + 1e-6] or [0])
     case("FRESH-AT-CREATE-2s", r is None and sa is not None and sa <= 2.0 and abs(honest - sa) < 0.01,
@@ -355,17 +363,17 @@ def page_lat(sec):
 reset_snap(); PULLS.clear(); add_pr(73001, CLK[0] - 5, "Prove L-meta-73001")
 REQ = []; S.gh = page_lat(3.0)
 try:
-    r = S.rival_now("L-meta-73999", 2)
+    r = RN("L-meta-73999", 2)
     case("16.12-3s-read-files-once", r is None and len(REQ) == 1, f"(rival={r}, page reads {len(REQ)})")
 except Exception as e:
     case("16.12-3s-read-files-once", False, repr(e)[:100])
 reset_snap(); REQ.clear(); S.gh = page_lat(0.5)
 json.dump({"t": CLK[0] - 4.5, "d": 3.0, "hdr": CLK[0] - 20, "taken": {}, "recent": [], "files": {}},
           open(os.path.join(SNAPD, "rival_snap.json"), "w"))
-S.rival_now("L-meta-73999", 2)
+RN("L-meta-73999", 2)
 case("16.12-never-on-read-older-than-d+1", len(REQ) >= 1, f"(a 3 s read started 4.5 s ago was read again: {len(REQ)} reads)")
 reset_snap(); REQ.clear(); S.gh = page_lat(7.0)
-r = S.rival_now("L-meta-73999", 2)
+r = RN("L-meta-73999", 2)
 slow = os.path.exists(os.path.join(SNAPD, "snapslow"))
 case("16.12-7s-read-files-nothing", bool(r) and r.startswith("rival check failed") and slow, f"(rival={str(r)[:60]}, snapslow file {slow})")
 S.gh = orig
@@ -437,6 +445,97 @@ if hasattr(S, "bucket_refusal") and hasattr(S, "parse_create"):
             case("07:27-creates-per-10s-logged", False, "(no creates_tick)")
 else:
     case("16.13-refusal-protocol", False, "(no bucket_refusal in this submit.py)")
+
+# ---- 16.14 (Lead 07:43): ONE READER, NO CONVOY. Real time, threads: a refresher reading back to back (newest page 3 s,
+# then 1.5 s of files reads for a new PR every read), 20 workers asking at once with a 2 s bound: no worker reads
+if True:                                   # runs on older code too (the convoy shows as worker reads)
+    S.time.time, S.time.sleep = REAL_TIME, REAL_SLEEP
+    if hasattr(S, "IS_REFRESHER"):
+        S.IS_REFRESHER[0] = False              # the REFRESH case above ran the refresher in this process
+    reset_snap(); PULLS.clear(); CLK[0] = REAL_TIME()
+    tl = threading.local(); RD = {"ref": 0, "worker": 0}; nxt = [75000]; stop = threading.Event()
+    def rt_gh(args, write=False, timeout=120):
+        CLK[0] = REAL_TIME()
+        if "/pulls?" in args[1]:
+            RD["ref" if getattr(tl, "ref", False) else "worker"] += 1
+            REAL_SLEEP(3.0); CLK[0] = REAL_TIME()
+            nxt[0] += 1; add_pr(nxt[0], CLK[0] - 0.5, "Batch of proofs", files=["lean/PEqualNP/Outside/L_meta_%d.lean" % nxt[0]])
+        elif "/files" in args[1]:
+            REAL_SLEEP(1.5)
+        return orig(args, write, timeout)
+    S.gh = rt_gh
+    json.dump({"t": REAL_TIME() - 30, "d": 0.5, "hdr": REAL_TIME() - 40, "taken": {}, "recent": [], "files": {}},
+              open(os.path.join(SNAPD, "rival_snap.json"), "w"))
+    def put_hb(t):
+        open(os.path.join(SNAPD, "refresh.hb.t"), "w").write(f"{t:.1f} 0 0 0 0\n")
+        os.replace(os.path.join(SNAPD, "refresh.hb.t"), os.path.join(SNAPD, "refresh.hb"))
+    def fake_refresher():
+        tl.ref = True
+        while not stop.is_set():
+            put_hb(REAL_TIME())
+            try:
+                S.rival_snapshot(0)
+            except Exception as e:
+                print("  refresher build failed:", repr(e)[:160])
+    def hb():
+        while not stop.is_set():
+            put_hb(REAL_TIME()); REAL_SLEEP(0.5)
+    ths = [threading.Thread(target=fake_refresher, daemon=True), threading.Thread(target=hb, daemon=True)]
+    [x.start() for x in ths]
+    REAL_SLEEP(0.2)
+    out = []; r0 = dict(RD); t0 = REAL_TIME()
+    def w():
+        out.append((S.rival_now("L-meta-74999", 2), REAL_TIME() - t0))
+    ws = [threading.Thread(target=w) for _ in range(20)]
+    [x.start() for x in ws]; [x.join(60) for x in ws]
+    reads_window = RD["ref"] - r0["ref"]
+    stop.set(); REAL_SLEEP(0.1)
+    took = max([x[1] for x in out] or [99])
+    case("16.14-20-waiters-no-worker-read", len(out) == 20 and RD["worker"] == 0 and all(x[0] is None for x in out),
+         f"(worker reads {RD['worker']}, answers {len(out)}, rivals {[x[0] for x in out if x[0]][:2]})")
+    case("16.14-20-waiters-at-most-2-reads", reads_window <= 2 and took < 12, f"(refresher reads while they waited {reads_window}, all answered in {took:.1f} s)")
+    # refresher dead (heartbeat 10 s old): one inline read and REFRESHER-DEAD
+    for x in ths:
+        x.join(15)
+    put_hb(REAL_TIME() - 10)
+    sn = json.load(open(os.path.join(SNAPD, "rival_snap.json"))); sn["t"] = REAL_TIME() - 30
+    json.dump(sn, open(os.path.join(SNAPD, "rival_snap.json"), "w"))
+    S.gh = orig; RD["worker"] = 0
+    try:
+        os.remove(os.path.join(SNAPD, "refdead"))
+    except OSError:
+        pass
+    if hasattr(S, "WREADS"):
+        S.WREADS["snap"] = 0
+        S.rival_now("L-meta-74999", 2)
+        case("16.14-dead-refresher-inline-and-alert", S.WREADS["snap"] == 1 and os.path.exists(os.path.join(SNAPD, "refdead")),
+             f"(inline reads {S.WREADS['snap']})")
+    else:
+        case("16.14-dead-refresher-inline-and-alert", False, "(no REFRESHER-DEAD in this submit.py)")
+    os.remove(os.path.join(SNAPD, "refresh.hb"))
+    S.time.time = lambda: CLK[0]
+    S.time.sleep = lambda s: CLK.__setitem__(0, CLK[0] + s)
+    if D is not None and hasattr(D, "stall_tick"):
+        dr = open(os.path.join(os.path.dirname(D.__file__), "drain.py")).read()
+        case("16.14-REFRESHER-DEAD-alert-in-drain", "REFRESHER-DEAD" in dr, "")
+
+# ---- 16.14 gaps.json (canary a43dfbe0: the same convoy on the shared 7 MB gaps copy): 20 waiters, a pull of 2 s
+S.time.time, S.time.sleep = REAL_TIME, REAL_SLEEP
+GD = tempfile.mkdtemp(); os.environ["RIVAL_SNAP_DIR"] = GD
+PULLS_G = [0]; sv_curl = S.curl_json
+def slow_curl(url, timeout=60):
+    PULLS_G[0] += 1; REAL_SLEEP(2.0)
+    return {"gaps": [{"id": "L-meta-1"}], "n": PULLS_G[0]}
+S.curl_json = slow_curl
+open(os.path.join(GD, "gaps.t"), "w").write(str(REAL_TIME() - 60)); json.dump({"gaps": []}, open(os.path.join(GD, "gaps.json"), "w"))
+outg = []
+ws = [threading.Thread(target=lambda: outg.append(S.gaps_json())) for _ in range(20)]
+t0 = REAL_TIME(); [x.start() for x in ws]; [x.join(120) for x in ws]
+case("16.14-gaps-20-waiters-at-most-2-pulls", len(outg) == 20 and PULLS_G[0] <= 2 and REAL_TIME() - t0 < 8,
+     f"(pulls {PULLS_G[0]}, answered {len(outg)} in {REAL_TIME() - t0:.1f} s)")
+S.curl_json = sv_curl; os.environ["RIVAL_SNAP_DIR"] = SNAPD
+S.time.time = lambda: CLK[0]
+S.time.sleep = lambda s: CLK.__setitem__(0, CLK[0] + s)
 
 # ---- Lead 07:31: sight-to-create per created PR
 if hasattr(S, "sight_line"):

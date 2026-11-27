@@ -20,7 +20,9 @@ Environment: ID, MOD (L_meta_N or V_meta_N__kK), PROOF (file), TREE (shallow clo
 READ_TOKEN (the run's GITHUB_TOKEN, for reads), PR_TOKEN (secret, for the push and the PR), DRY=1 (no claim, no
 push, no PR, no branch delete). Prints RESULT=<...> and writes result=<...> to $GITHUB_OUTPUT.
 """
-import base64, fcntl, json, os, re, subprocess, sys, tempfile, time
+import base64, fcntl, json, os, re, subprocess, sys, tempfile, threading, time
+from concurrent.futures import ThreadPoolExecutor
+REAL_SLEEP = time.sleep      # 16.14 refresher heartbeat thread (tests patch time.sleep)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # drain runs submit.py with -I (no script dir on the path)
 import ghcond, haltrule                                              # RC-b: 16.7 conditional reads, 16.1 halt rule
 
@@ -154,20 +156,34 @@ def gaps_json():
     d = os.environ.get("RIVAL_SNAP_DIR") or os.environ.get("PR_GATE_DIR") or W
     os.makedirs(d, exist_ok=True)
     f, tf = os.path.join(d, "gaps.json"), os.path.join(d, "gaps.t")
-    with open(os.path.join(d, "gaps.lock"), "w") as lk:
-        fcntl.flock(lk, fcntl.LOCK_EX)
+    ask = time.time()
+
+    def stamp():
         try:
-            if 0 <= time.time() - float(open(tf).read()) < GAPS_MAX_AGE_S:
-                return json.load(open(f))
+            return float(open(tf).read())
+        except (OSError, ValueError):
+            return None
+    s0 = stamp()                         # 16.14 (no convoy): a fresh copy is parsed without the lock
+    if s0 is not None and 0 <= time.time() - s0 < GAPS_MAX_AGE_S:
+        try:
+            return json.load(open(f))
         except Exception:
             pass
-        gj = curl_json(GAPS, 60)
-        with open(f + ".tmp", "w") as o:
-            json.dump(gj, o)
-        os.replace(f + ".tmp", f)
-        with open(tf, "w") as o:
-            o.write(str(time.time()))
-        return gj
+    with open(os.path.join(d, "gaps.lock"), "w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        s1 = stamp()                     # a pull that STARTED after we asked answers us: no age re-check after the wait
+        fresh = s1 is not None and (s1 > ask or 0 <= time.time() - s1 < GAPS_MAX_AGE_S)
+        if not fresh:
+            t = time.time()
+            gj = curl_json(GAPS, 60)
+            with open(f + ".tmp", "w") as o:
+                json.dump(gj, o)
+            os.replace(f + ".tmp", f)
+            with open(tf + ".tmp", "w") as o:
+                o.write(str(t))          # stamped at pull START
+            os.replace(tf + ".tmp", tf)
+            return gj
+    return json.load(open(f))            # parsed outside the lock
 
 
 GATE_WAIT_S = float(os.environ.get("GATE_WAIT_S", "60"))   # GATEWAY 4: lease ok within 60 s
@@ -690,6 +706,7 @@ def _build_snapshot(files):
     size, maxp = (100, 60) if full else (SNAP_PAGE, SNAP_MAX_PAGES)
     recent, seen_n = [], set()
     dur = {}
+    t_b0 = time.time(); nfr = [0]
 
     def page(k):
         # 16.7: read with If-None-Match: an unchanged page is a 304 and costs nothing of the run token's hourly
@@ -716,21 +733,36 @@ def _build_snapshot(files):
             us = set(UNIT_TOKEN.findall(p.get("title") or "")) | \
                 set(UNIT_TOKEN.findall(((p.get("head") or {}).get("ref") or "").replace("_", "-")))
             key = f"{p['number']}:{(p.get('head') or {}).get('sha') or ''}"
-            if key not in files:
-                files[key] = sorted({u for u in map(file_unit, pr_files(p["number"])) if u})
-            recent.append({"n": p["number"], "who": who, "units": sorted(us | set(files[key])),
-                           "by_file": sorted(set(files[key]) - us)})
+            todo.append((p["number"], who, us, key))
         return old or len(pulls) < size
 
+    def fill():
+        """canary 51e630d7: a cold file cache cost 82 serial files reads = 36.7 s on the first build of a drain;
+        the missing file lists are read 8 at a time, any failure raises (fail closed)"""
+        need = sorted({(n, key) for n, _, _, key in todo if key not in files})
+        if need:
+            nfr[0] += len(need)
+            with ThreadPoolExecutor(min(8, len(need))) as ex:
+                got = list(ex.map(lambda nk: (nk[1], sorted({u for u in map(file_unit, pr_files(nk[0])) if u})), need))
+            files.update(dict(got))
+        for n, who, us, key in todo:
+            recent.append({"n": n, "who": who, "units": sorted(us | set(files[key])), "by_file": sorted(set(files[key]) - us)})
+        todo.clear()
+
+    todo = []
     for k in range(1, maxp + 1):
         if k == 1:
             t_build = time.time()
-        if page(k):
+        last = page(k)
+        fill()
+        if last:
             if k > 1:           # w12 07:16: several pages took time; page 1 (the newest PRs) is read again last and
                 t_build = time.time()     # the snapshot is stamped at THAT request (usually a 304)
                 page(1)
+                fill()
             return {"t": t_build, "d": round(dur.get(1, 0.0), 3), "hdr": TL_HDR[0], "taken": tl, "recent": recent,
-                    "files": files, "rl": ghcond.STATS["remaining"], "full": full}
+                    "files": files, "rl": ghcond.STATS["remaining"], "full": full,
+                    "b": round(time.time() - t_b0, 2), "pages": len(dur), "fr": nfr[0]}
     raise RuntimeError(f"more than {maxp} pages of open PRs since the taken list (fail closed)")
 
 
@@ -758,54 +790,135 @@ def _snap_note(snap):
         pass
 
 
-def rival_snapshot(max_age=None):
-    """the shared snapshot, fresh by snap_fresh() for max_age (default SNAP_MAX_AGE_S) (flock in SNAP_DIR; one builder
-    at a time)"""
+# HARDENING 16.14 (Lead 07:43, ONE READER, NO CONVOY): while the drain's refresher is alive (heartbeat at most
+# REFRESHER_HB_S old) it is the ONLY reader of the halt refs and the rival pages; a worker waits for the refresher's
+# next copy and never reads itself. A check is satisfied by a copy whose read STARTED after the worker asked (no age
+# re-check after a wait). The 16.12 bound is checked only right before the create (final=True): on a miss the worker
+# waits for the next refresher copy, at most 3 times, then SNAP-SLOW and no PR (unit unseen, retried). Refresher dead
+# (its heartbeat went stale): one inline read under the lock, alert REFRESHER-DEAD. No refresher at all (one run per
+# branch, drills): inline reads as before, still without the age re-check after a lock wait.
+REFRESHER_HB_S = float(os.environ.get("REFRESHER_HB_S", "5"))
+COPY_WAIT_S = float(os.environ.get("COPY_WAIT_S", "90"))   # Lead 08:12: a cold first build (36 s seen) is waited for
+REFRESHER_STUCK_S = float(os.environ.get("REFRESHER_STUCK_S", "90"))  # a refresher loop with no finished pass this long = dead
+IS_REFRESHER = [False]
+WREADS = {"snap": 0, "halt": 0}          # GitHub reads made by THIS process outside the refresher (16.14 case)
+
+
+def _hb_age(now=None):
+    try:
+        return (time.time() if now is None else now) - float(open(os.path.join(SNAP_DIR, "refresh.hb")).read().split()[0])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def refresher_alive():
+    a = _hb_age()
+    return not IS_REFRESHER[0] and a is not None and -1 <= a <= REFRESHER_HB_S
+
+
+def _refdead(what):
+    """the refresher ran in this drain (heartbeat file) but went stale: the drain alerts REFRESHER-DEAD"""
+    if IS_REFRESHER[0] or _hb_age() is None:
+        return
+    try:
+        with open(os.path.join(SNAP_DIR, "refdead"), "w") as o:
+            o.write(f"{time.time():.0f} {what} heartbeat {_hb_age():.0f} s old\n")
+    except OSError:
+        pass
+
+
+def _load(f):
+    try:
+        return json.load(open(f))
+    except Exception:
+        return None
+
+
+def wait_copy(f, ok, timeout=None):
+    """16.14: wait (file reads only, no lock, no GitHub read) for a copy of the shared file f with ok(copy); None when
+    the refresher dies or nothing comes within timeout"""
+    t_end = time.time() + (COPY_WAIT_S if timeout is None else timeout)
+    while time.time() < t_end:
+        c = _load(f)
+        if c is not None and ok(c):
+            return c
+        if not refresher_alive():
+            return None
+        time.sleep(0.1)
+    return None
+
+
+def rival_snapshot(max_age=None, final=False):
+    """the shared snapshot (16.14 above): max_age 0 = the refresher's own forced read (written whatever its age);
+    final = the last check before a create, judged by snap_fresh(max_age) (16.12)"""
+    ask = time.time()
     max_age = SNAP_MAX_AGE_S if max_age is None else max_age
     os.makedirs(SNAP_DIR, exist_ok=True)
     f = os.path.join(SNAP_DIR, "rival_snap.json")
-    try:                    # RC-b 1: a fresh copy (kept fresh by the drain's refresher) is read WITHOUT the lock, so a
-        old = json.load(open(f))       # worker holding a PR slot never waits on a build in progress
-        if max_age > 0 and snap_fresh(old, max_age):
-            return old
-    except Exception:
-        pass
+    old = _load(f)
+    if max_age > 0 and old and snap_fresh(old, max_age):
+        return old                     # lock-free: a fresh copy answers every check, the final one too
+    if max_age > 0 and refresher_alive():
+        if final:
+            last = old["t"] if old else 0.0
+            for k in range(3):
+                c = wait_copy(f, lambda c: c["t"] > last)
+                if c is None:
+                    break                              # refresher died while we waited: inline below
+                if snap_fresh(c, max_age):
+                    return c
+                last = c["t"]
+            else:
+                try:
+                    with open(os.path.join(SNAP_DIR, "snapslow"), "w") as o:
+                        o.write(f"{time.time():.0f} {float(c.get('d') or 0):.1f}\n")
+                except OSError:
+                    pass
+                raise RuntimeError(f"SNAP-SLOW: 3 refresher copies in a row missed the 16.12 bound max({max_age}, d + 1) "
+                                   f"(last read {float(c.get('d') or 0):.1f} s)")
+        else:
+            c = wait_copy(f, lambda c: c["t"] > ask)
+            if c is not None:
+                return c
+        _refdead("rival snapshot")
+    elif max_age > 0:
+        _refdead("rival snapshot")
     with open(os.path.join(SNAP_DIR, "rival_snap.lock"), "w") as lk:
         fcntl.flock(lk, fcntl.LOCK_EX)
-        old = {}
-        try:
-            old = json.load(open(f))
-            if max_age > 0 and snap_fresh(old, max_age):
-                return old
-        except Exception:
-            pass
+        old = _load(f) or {}
+        if max_age > 0 and old.get("t") and (snap_fresh(old, max_age) or (not final and old["t"] > ask)):
+            return old                 # 16.14 (2): a read that started after we asked, no age re-check
+        if not IS_REFRESHER[0]:
+            WREADS["snap"] += 1
         snap = _build_snapshot(dict(old.get("files") or {}))
         _snap_note(snap)
-        bound = max_age if max_age > 0 else SNAP_CREATE_AGE_S     # 0 = forced rebuild (refresher): the create bound
-        for _ in range(3):     # 16.12: not fresh (slow newest-page read, or slow files reads after it): read again
-            if snap_fresh(snap, bound):
-                break
-            snap = _build_snapshot(dict(snap.get("files") or {}))
-            _snap_note(snap)
-        else:
-            if not snap_fresh(snap, bound):
-                raise RuntimeError(f"snapshot {time.time() - snap['t']:.1f} s old, newest-page read {snap.get('d', 0):.1f} s, "
-                                   f"after 4 builds (16.12 bound max({bound}, d + 1), d <= {SNAP_READ_MAX_S:.0f})")
+        if final:                      # inline (no live refresher): the 16.12 bound before the create
+            for _ in range(3):
+                if snap_fresh(snap, max_age):
+                    break
+                WREADS["snap"] += 1
+                snap = _build_snapshot(dict(snap.get("files") or {}))
+                _snap_note(snap)
+            else:
+                if not snap_fresh(snap, max_age):
+                    raise RuntimeError(f"snapshot {time.time() - snap['t']:.1f} s old, newest-page read {snap.get('d', 0):.1f} s, "
+                                       f"after 4 builds (16.12 bound max({max_age}, d + 1), d <= {SNAP_READ_MAX_S:.0f})")
         with open(f + ".tmp", "w") as o:
             json.dump(snap, o)
         os.replace(f + ".tmp", f)
         log(f"rival snapshot: taken {len(snap['taken'])} rows (header {time.time() - snap['hdr']:.0f} s old), "
-            f"{len(snap['recent'])} open PRs since, file cache {len(snap['files'])}")
+            f"{len(snap['recent'])} open PRs since, file cache {len(snap['files'])}, build {snap.get('b')} s, "
+            f"{snap.get('pages')} page reads, {snap.get('fr')} files reads, full sweep {snap.get('full')}")
         return snap
 
 
-def rival_now(gid, max_age=None):
+def rival_now(gid, max_age=None, final=False):
     """Another author's PR on the unit, right before we decide and again right before gh pr create (A19 design, Lead
     05:40): the taken list is the authority for every PR created before its header (REST publisher, units by title,
     branch AND changed files of every open PR); open PRs created after the header minus 30 s are read here, with their
     file paths, once per snapshot shared by all drain workers. Any failed read = rival (no PR)."""
     try:
-        snap = rival_snapshot(max_age)
+        snap = rival_snapshot(max_age, final)
     except Exception as e:
         return "rival check failed: " + str(e)[:120]
     STG["snap_age"] = round(time.time() - snap["t"], 1)
@@ -891,14 +1004,18 @@ def race_ok(gid):
         if DRY:
             # Lead 05:32 canary A: the dry run makes the same live reads as the bare path (taken list, open pulls,
             # files, fresh export) so a read that fails only inside the Action shows here, with no claim and no PR
+            t_d = time.time()
             rv = rival_now(gid)
+            STG["dry_rival"] = round(time.time() - t_d, 1)
             log("dry run: rival_now:", rv or "clear")
             if rv:
                 return False, "dry run: rival: " + rv, None
+            t_d = time.time()
             try:
                 g2 = next((x for x in gaps_json()["gaps"] if x["id"] == gid), None)
             except Exception as e:
                 return False, "dry run: fresh gaps read failed " + repr(e)[:80], None
+            STG["dry_gaps"] = round(time.time() - t_d, 1)
             if g2 is None or g2.get("held_now") or (g2.get("holders_now") or 0) > 0:
                 return False, "dry run: " + ("unit missing from the fresh gaps export" if g2 is None else "held in the mirror"), None
             log("dry run: fresh export lists", gid, "unheld")
@@ -1173,6 +1290,7 @@ def submit(gid, lease):
             return create_pr(gid, lease)
     except RuntimeError as e:
         return None, "head check failed (fail closed): " + str(e)[:120]
+    t_cm = time.time()
     base = git("rev-parse", "HEAD").stdout.strip()
     if not base:
         return None, "no upstream main"
@@ -1195,7 +1313,10 @@ def submit(gid, lease):
     c = git("commit-tree", tree, "-p", base, "-m", msg, env=cenv).stdout.strip()
     if not c:
         return None, "commit-tree failed"
+    STG["commit"] = round(time.time() - t_cm, 1)
     if DRY:
+        tw = time.time()                 # rehearsal (Lead 08:12): the would-create time per unit, epoch to 0.001 s
+        log(f"WOULD-CREATE {gid} {tw:.3f}"); log(sight_line(gid, tw))
         return "dry-run", f"would push {c[:12]} as {FORK}:{gid} and open the PR"
     t = time.time()
     err = push_branch(c, gid)
@@ -1283,7 +1404,7 @@ def create_pr(gid, lease):
                 log("halted:", gid, hwhy, f"(before create attempt {att + 1})")
                 return None, "halted: " + hwhy
             if not lease:
-                rv = rival_now(gid, SNAP_CREATE_AGE_S)
+                rv = rival_now(gid, SNAP_CREATE_AGE_S, final=True)     # 16.14 (3): the 16.12 bound, last line
                 if rv and rv.startswith("rival check failed"):     # a failed or late read: no PR now, the drain
                     log("SKIP", gid, f"no PR (attempt {att + 1}):", rv)  # retries (submitfail), the branch is kept
                     return None, rv
@@ -1377,22 +1498,32 @@ def filing_halted(max_age=None):
     if not os.environ.get("RIVAL_SNAP_DIR") or os.environ.get("FILING_FIXTURE") is not None:
         return _filing_halted_read()                 # one run per branch (no drain) or a fixture: inline
     f = os.path.join(SNAP_DIR, "halt.json")
+    ask = time.time()
+    h = _load(f)
     try:
-        h = json.load(open(f))
-        if 0 <= time.time() - h["t"] <= max_age:
+        if h and 0 <= time.time() - h["t"] <= max_age:
             return bool(h["halted"]), h["why"]
     except Exception:
         pass
+    if max_age > 0 and refresher_alive():          # 16.14 (4): the refresher's next copy, no own read
+        c = wait_copy(f, lambda c: c["t"] > ask)
+        if c is not None:
+            return bool(c["halted"]), c["why"]
+        _refdead("halt")
+    elif max_age > 0:
+        _refdead("halt")
     try:
         os.makedirs(SNAP_DIR, exist_ok=True)
         with open(os.path.join(SNAP_DIR, "halt.lock"), "w") as lk:
             fcntl.flock(lk, fcntl.LOCK_EX)
             try:
                 h = json.load(open(f))
-                if 0 <= time.time() - h["t"] <= max_age:      # another worker read it while we waited
+                if 0 <= time.time() - h["t"] <= max_age or (max_age > 0 and h["t"] > ask):   # 16.14 (2)
                     return bool(h["halted"]), h["why"]
             except Exception:
                 pass
+            if not IS_REFRESHER[0]:
+                WREADS["halt"] += 1
             t = time.time()
             hv, why = _filing_halted_read()
             with open(f + ".tmp", "w") as o:
@@ -1495,6 +1626,7 @@ def main():
         finish("formatfail", "guards: " + ((r.stdout + r.stderr).strip().splitlines() or ["?"])[-1][:200])
     log(f"guards passed ({time.time() - t0:.0f}s)")
     STG["guards"] = round(time.time() - t0, 1)
+    STG["start"] = round(t0 - T_START, 1)      # opener start -> guards start (halt check, gaps read, setup)
     if unlisted:
         finish("waiting", "not posted: prestage guards passed, branch kept for ready-wait")
     # GATEWAY v1 section 4: a pause never stops filing (the gate answers closed and the unleased branch decides)
@@ -1573,20 +1705,45 @@ def refresher():
     SNAP_DIR/refresh.hb; a dead refresher is harmless: the workers then read inline (never a stale check)."""
     ppid = os.getppid()
     n = 0
+    IS_REFRESHER[0] = True
+    prog = [time.time()]
+    hprog = [time.time()]
+    done = [False]
+
+    def beat():                         # 16.14 + Lead 08:12: alive = this process runs and both loops finished a pass in the
+        # last REFRESHER_STUCK_S (90 s): a refresher in its (cold) first build is alive, workers wait for its first copy
+        while not done[0]:
+            if time.time() - prog[0] < REFRESHER_STUCK_S and time.time() - hprog[0] < REFRESHER_STUCK_S:
+                try:
+                    with open(os.path.join(SNAP_DIR, "refresh.hb.tmp"), "w") as o:
+                        o.write(f"{time.time():.1f} {n} {ghcond.STATS['counted']} {ghcond.STATS['not_modified']} "
+                                f"{ghcond.STATS['remaining']}\n")
+                    os.replace(os.path.join(SNAP_DIR, "refresh.hb.tmp"), os.path.join(SNAP_DIR, "refresh.hb"))
+                except OSError:
+                    pass
+            REAL_SLEEP(1.0)
+    threading.Thread(target=beat, daemon=True).start()
+
+    def halts():                        # 16.14 (4): the halt copy has its own reader, never behind a slow page build
+        while os.getppid() == ppid and not os.path.exists(os.path.join(SNAP_DIR, "refresh.stop")):
+            t = time.time()
+            try:
+                filing_halted(0)
+            except Exception as e:
+                log("refresher: halt read failed", repr(e)[:100])
+            hprog[0] = time.time()
+            REAL_SLEEP(max(0.05, REFRESH_S - (time.time() - t)))
+    threading.Thread(target=halts, daemon=True).start()
     while os.getppid() == ppid and not os.path.exists(os.path.join(SNAP_DIR, "refresh.stop")):
         t = time.time()
-        try:
-            filing_halted(0)
-        except Exception as e:
-            log("refresher: halt read failed", repr(e)[:100])
         try:
             rival_snapshot(0)
         except Exception as e:
             log("refresher: snapshot failed (workers read inline)", str(e)[:120])
         n += 1
-        with open(os.path.join(SNAP_DIR, "refresh.hb"), "w") as o:
-            o.write(f"{time.time():.1f} {n} {ghcond.STATS['counted']} {ghcond.STATS['not_modified']} {ghcond.STATS['remaining']}\n")
+        prog[0] = time.time()
         time.sleep(max(0.05, REFRESH_S - (time.time() - t)))
+    done[0] = True
 
 
 if __name__ == "__main__":
