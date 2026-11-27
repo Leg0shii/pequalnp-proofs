@@ -51,11 +51,12 @@ jobs:
           READ_TOKEN: ${{ github.token }}
           PR_TOKEN: ${{ secrets.PR_TOKEN }}
           PNP_LINKEDIN: ${{ secrets.PNP_LINKEDIN || vars.PNP_LINKEDIN }}
-          DRAIN_WORKERS: ${{ vars.DRAIN_WORKERS || '14' }}
+          DRAIN_WORKERS: ${{ vars.DRAIN_WORKERS || '28' }}     # Lead 09:18: defaults = the wave setting
           DRAIN_PR_SLOTS: ${{ vars.DRAIN_PR_SLOTS || '8' }}
           DRAIN_REFRESHER: ${{ vars.DRAIN_REFRESHER || '1' }}
-          PR_PER_MIN: ${{ vars.PR_PER_MIN || '70' }}
-          PR_PER_HOUR: ${{ vars.PR_PER_HOUR || '480' }}
+          PR_PER_MIN: ${{ vars.PR_PER_MIN || '60' }}
+          PR_PER_HOUR: ${{ vars.PR_PER_HOUR || '400' }}
+          DRAIN_SAVE_EVERY_S: ${{ vars.DRAIN_SAVE_EVERY_S || '60' }}
           WARM: ${{ vars.WARM || '1' }}
           WARM_WINDOW: ${{ inputs.window || vars.WARM_WINDOW || '' }}
           WARM_LINGER: ${{ inputs.linger || vars.WARM_LINGER || '18000' }}

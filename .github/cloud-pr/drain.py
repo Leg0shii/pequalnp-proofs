@@ -504,6 +504,10 @@ def _paused_old():
 
 def main():
     os.makedirs(W, exist_ok=True)
+    log("SETTINGS", f"workers={WORKERS} pr_slots={PR_SLOTS} pr_per_min={os.environ.get('PR_PER_MIN', '70')} "
+        f"pr_per_hour={os.environ.get('PR_PER_HOUR', '480')} save_every_s={SAVE_EVERY_S:.0f} linger={LINGER:.0f} "
+        f"max_s={MAX_S:.0f} refresher={os.environ.get('DRAIN_REFRESHER', '0')} warm={os.environ.get('WARM', '')} "
+        f"warm_window={os.environ.get('WARM_WINDOW', '')!r} prefix={PREFIX} dry={DRY}")   # Lead 09:18: effective settings first
     if paused():                 # Lead 15:58: while the desk pause runs, the drain touches nothing (branches stay queued)
         log("shared desk pause until", time.strftime("%H:%M:%S", time.gmtime(_PZ[1])), "UTC: drain does nothing")
         return
