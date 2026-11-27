@@ -1134,7 +1134,8 @@ def main():
     # RC-b (Lead 06:22/06:25): shared halt state, refresher, R3 stamp, rule 16.1 (opener and drain), 16.7 read budget
     for tool, args, okw, tag in (("selftest_rcb.py", [], "RCB SELFTEST OK", "rcb"), ("haltrule.py", ["selftest"], "HALTRULE OK", "16.1"),
                                  ("ghcond.py", ["selftest"], "GHCOND SELFTEST OK", "16.7"),
-                                 ("holdtest.py", [], "HOLD SELFTEST OK", "hold")):          # Lead 08:27 closer HOLD
+                                 ("holdtest.py", [], "HOLD SELFTEST OK", "hold"),           # Lead 08:27 closer HOLD
+                                 ("headstest.py", [], "HEADS SELFTEST OK", "heads")):       # Lead 08:17 fork_head shared
         tp = os.path.join(src, ".github", "cloud-pr", tool)
         if os.path.exists(tp):
             rr = subprocess.run([sys.executable, "-I", tp] + (args or [os.path.dirname(tp)]), capture_output=True, text=True, timeout=600)

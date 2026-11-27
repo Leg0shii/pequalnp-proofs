@@ -1102,16 +1102,69 @@ def stopped():
     return r.stdout.strip() == "200"
 
 
+HEADS_S = float(os.environ.get("HEADS_S", "1"))           # Lead 08:17: the refresher reads every fork head once a second
+HEADS_WAIT_S = float(os.environ.get("HEADS_WAIT_S", "10"))  # no newer heads copy this long = read inline (HEADS-SLOW)
+
+
+def _heads_read():
+    """one ls-remote of every fork branch L-* (about 530 refs, 35 KB, 0.4 s on 27 Nov) -> (ok, {branch: sha})"""
+    r = run(["git"] + (auth_cfg() if PR_TOKEN else []) + ["ls-remote", f"https://github.com/{FORK}.git", "refs/heads/L-*"],
+            timeout=30)
+    if r.returncode:
+        return False, {}
+    h = {}
+    for l in r.stdout.splitlines():
+        p = l.split()
+        if len(p) == 2 and p[1].startswith("refs/heads/"):
+            h[p[1][len("refs/heads/"):]] = p[0]
+    return True, h
+
+
+def heads_reader(stop=lambda: False):
+    """the refresher's fork-head reader (Lead 08:17, 16.14): SNAP_DIR/heads.json = {t (read START), ok, heads} once
+    per HEADS_S, so a worker's fork_head() is a file read, not one ls-remote per call."""
+    f = os.path.join(SNAP_DIR, "heads.json")
+    while not stop():
+        t = time.time()
+        try:
+            ok, h = _heads_read()
+        except Exception:
+            ok, h = False, {}
+        try:
+            with open(f + ".tmp", "w") as o:
+                json.dump({"t": t, "ok": ok, "heads": h}, o)
+            os.replace(f + ".tmp", f)
+        except OSError:
+            pass
+        REAL_SLEEP(max(0.05, HEADS_S - (time.time() - t)))
+
+
 def fork_head(gid):
     """sha of this fork's branch <gid> (the PR head), None when it does not exist. A git read, no API call. Raises when
-    unreadable (callers fail closed: no push, no PR)."""
-    for k in range(3):
+    unreadable (callers fail closed: no push, no PR). In a drain: the refresher's heads copy whose read started after
+    this ask (16.14, at most about HEADS_S + one read away, no sleep); no such copy within HEADS_WAIT_S, or a dead
+    refresher: one inline read (REFRESHER-DEAD when it died)."""
+    if os.environ.get("RIVAL_SNAP_DIR") and not IS_REFRESHER[0]:
+        if refresher_alive():
+            ask = time.time()
+            c = wait_copy(os.path.join(SNAP_DIR, "heads.json"), lambda c: c.get("t", 0) > ask, timeout=HEADS_WAIT_S)
+            if c is not None:
+                if not c.get("ok"):
+                    raise RuntimeError("fork branch unreadable (shared heads read)")
+                return c.get("heads", {}).get(gid)
+            if refresher_alive():
+                log("HEADS-SLOW:", gid, f"no heads copy newer than the ask in {HEADS_WAIT_S:.0f} s: inline read")
+            else:
+                _refdead("heads")
+        else:
+            _refdead("heads")
+        WREADS["heads"] = WREADS.get("heads", 0) + 1
+    for k in range(2):
         r = run(["git"] + (auth_cfg() if PR_TOKEN else []) + ["ls-remote", f"https://github.com/{FORK}.git", f"refs/heads/{gid}"],
                 timeout=60)
         if r.returncode == 0:
             o = r.stdout.split()
             return o[0] if o else None
-        time.sleep(2)
     raise RuntimeError("fork branch unreadable")
 
 
@@ -1886,6 +1939,7 @@ def refresher():
     except OSError:
         pass
     threading.Thread(target=closer_reader, args=(lambda: done[0] or os.getppid() != ppid,), daemon=True).start()
+    threading.Thread(target=heads_reader, args=(lambda: done[0] or os.getppid() != ppid,), daemon=True).start()
     while os.getppid() == ppid and not os.path.exists(os.path.join(SNAP_DIR, "refresh.stop")):
         t = time.time()
         try:
