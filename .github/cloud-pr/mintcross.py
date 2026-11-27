@@ -14,6 +14,7 @@ Cases (each must hold for ALL THREE components):
   H1 halt     newest toolkit filing/stop newer than filing/go: 0 PRs, 0 desk requests, 0 claim locks (I4, I7, V7, V14)
   H2 paused   our handle on the mirror pause list: 0 desk requests (I7, V8)
   H3 halt-mid filing/stop pushed while the feeder runs: no claim after the stop (V7, Y9)
+  H4 16.1     rule 16.1 shapes (tie = halted, non-digit stop name = halted; filing/* and deskgate/*): 0 desk requests
   O1 one-pr   cloud opener and PC watcher both file unit U: exactly one PR of ours on U (B5, V6)
   O2 grace    the drain holds U (drain-state inflight, fresh drain-beat, claim/U taken, no PR yet) and the PC's ready/
               intake is past READY_GRACE: the PC files nothing on U (Y8, V6; W11's rule)
@@ -233,6 +234,8 @@ class World:
         if cfg.get("halt"):
             self.ref("filing/go/%d" % (now - 3600), "go")
             self.ref("filing/stop/%d" % (now - 60), "stop: maker rejection (mintcross)")
+        for name, msg in cfg.get("refs", []):
+            self.ref(name.replace("{OPEN}", str(now - 600)).replace("{NOW}", str(now)), msg)
         self.blob_ref("status/taken", "taken.txt", "# updated %d %s steps 0 mintcross\n" % (now - 5, time.strftime("%H:%M:%S", time.gmtime())))
         self.ref("status/dupclose", "dupclose %d pass ok rej10=0" % now)
         if cfg.get("grant_lost"):
@@ -628,6 +631,20 @@ def case_halt_mid(a):
     return verdict("H3-halt-mid", "feed", ok, f"claims={len(c)} after_stop={len(after)} desk={len(d)} stop={'set' if t_stop else 'never (no first claim)'} {o[:80]}", w, "feed"), w
 
 
+def case_rule161(a):
+    """HARDENING 16.1 shapes, feeder: a tie is halted, a non-digit stop name is halted, for filing/* and deskgate/*"""
+    res, w = [], None
+    for tag, refs in (("filing-tie", [("filing/go/{NOW}", "go"), ("filing/stop/{NOW}", "stop")]),
+                      ("filing-nondigit", [("filing/stop/now", "stop now"), ("filing/go/{NOW}", "go")]),
+                      ("deskgate-tie", [("deskgate/stop/{OPEN}", "stop")]),
+                      ("deskgate-nondigit", [("deskgate/stop/now", "stop now")])):
+        w = World("H4-" + tag, {"refs": refs})
+        o, _ = run_feed(w, a.feed, sim_s=60)
+        d, c = w.desk("feed"), w.claims("feed")
+        res.append(verdict("H4-rule16.1", "feed " + tag, not d and not c, f"desk={len(d)} claims={len(c)} {o[:70]}", w, "feed"))
+    return all(res), w
+
+
 def case_one_pr(a):
     w = World("O1", {})
     r, why, _ = run_cloud(w, a.cloud)
@@ -682,7 +699,7 @@ def case_ready_grace(a):
     return verdict("O2-ready-grace", "pc", not p, f"pc PRs while the drain holds U={len(p)} lease_in_body={[('Lease:' in x['body']) for x in p]} {o[:110]}", w, "pc"), w
 
 
-CASES = [("H1", case_halt), ("H2", case_paused), ("H3", case_halt_mid), ("O1", case_one_pr), ("O2", case_ready_grace), ("B1", case_lost_answer)]
+CASES = [("H1", case_halt), ("H2", case_paused), ("H3", case_halt_mid), ("H4", case_rule161), ("O1", case_one_pr), ("O2", case_ready_grace), ("B1", case_lost_answer)]
 
 
 def main():
