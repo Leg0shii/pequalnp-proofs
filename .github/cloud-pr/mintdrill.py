@@ -1192,6 +1192,7 @@ def main():
                                  ("ghcond.py", ["selftest"], "GHCOND SELFTEST OK", "16.7"),
                                  ("pushtest.py", [], "PUSH SELFTEST OK", "push"),           # Lead 09:08 push refusal
                                  ("rttest.py", [], "RT SELFTEST OK", "runtoken"),           # Lead 09:38 closer RUN-TOKEN-EMPTY
+                                 ("movebase_test.py", [src], "MOVEBASE PASS", "movingmain"),
                                  ("claimtest.py", [], "CLAIMLIST SELFTEST OK", "leases")):  # Lead 10:17 L1 claimallow ref
         tp = os.path.join(src, ".github", "cloud-pr", tool)
         if os.path.exists(tp):

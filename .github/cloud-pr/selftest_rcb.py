@@ -653,6 +653,67 @@ if hasattr(S, "runtoken_empty"):
 else:
     case("09:29-runtoken-empty-reads-go-to-PR_TOKEN", False, "(no fallback: an empty run token = every read fails closed)")
 
+# ---- Lead 09:40 (lane movingmain, part 2): a rival PR that left the open list (merged or closed) holds its unit 60 s
+if hasattr(S, "RIVAL_GONE_S"):
+    S.time.time = lambda: CLK[0]
+    S.time.sleep = lambda s: CLK.__setitem__(0, CLK[0] + s)
+    S.gh = orig
+    reset_snap(); PULLS.clear(); TL_ROWS.pop("L-meta-76999", None)
+    add_pr(76001, CLK[0] - 5, "Prove L-meta-76999")
+    r0 = RN("L-meta-76999", 2)
+    PULLS.clear(); CLK[0] += 3; t_g = CLK[0]           # the rival PR merged: gone from the open list
+    rg = RN("L-meta-76999", 2)                          # the first build that misses it (t)
+    out = {}
+    for dt in (1, 59, 61):
+        CLK[0] = t_g + dt
+        out[dt] = RN("L-meta-76999", 2)
+    case("09:40-gone-rival-held-60s", bool(r0) and bool(rg) and "left the open list" in (rg or "") and bool(out[1]) and bool(out[59])
+         and out[61] is None, f"(open {r0}, t {rg}, t+1 {out[1]}, t+59 {out[59]}, t+61 {out[61]})")
+    TL_ROWS["L-meta-76999"] = "rival9"; S._TL.clear(); S.TL_T[0] = 0.0
+    CLK[0] = t_g + 62
+    rt = RN("L-meta-76999", 2)
+    TL_ROWS.pop("L-meta-76999", None)
+    case("09:40-gone-after-60s-taken-list-still-rules", bool(rt) and rt.startswith("taken list"), f"({rt})")
+    reset_snap(); PULLS.clear(); add_pr(76002, CLK[0] - 5, "Prove L-meta-76998")
+    RN("L-meta-76998", 2); CLK[0] += 3
+    add_pr(76003, CLK[0] - 1, "Prove L-meta-76997")
+    rr = RN("L-meta-76998", 2)                          # still open: the open PR rules, nothing gone
+    case("09:40-open-rival-not-gone", (rr or "").startswith("#76002"), f"({rr})")
+    PULLS.clear(); reset_snap()
+else:
+    case("09:40-gone-rival-held-60s", False, "(no RIVAL_GONE_S in this submit.py)")
+
+# ---- Lead 09:59 (lane movingmain): the upbase/<base8> REST ref create takes a token from the create bucket
+if hasattr(S, "upbase_ref"):
+    S.time.time = lambda: CLK[0]
+    S.time.sleep = lambda s: CLK.__setitem__(0, CLK[0] + s)
+    UG = tempfile.mkdtemp(); svg = os.environ.get("PR_GATE_DIR"); os.environ["PR_GATE_DIR"] = UG
+    sv = (S.run, S.log); posts = []
+    def urun(cmd, timeout=300, env=None, cwd=None):
+        if cmd[0] == "gh" and "POST" in cmd:
+            posts.append(CLK[0]); return cp("{}", 0)
+        return cp("", 0)                              # ls-remote: no ref at the base yet
+    S.run = urun; S.log = lambda *a: None
+    try:
+        rate = S.gate_rate(UG)
+        t0u = CLK[0]
+        open(os.path.join(UG, "creates.log"), "w").write("\n".join(f"{t0u - 30 + i * 0.01:.3f}" for i in range(rate)))
+        n = S.upbase_ref("ab" * 20)
+        nlog = len(open(os.path.join(UG, "creates.log")).read().split())
+        case("09:59-upbase-create-takes-a-bucket-token", n == "upbase/abababab" and len(posts) == 1 and posts[0] - t0u >= 29.9
+             and nlog == rate + 1, f"(ref {n}, POST {posts[0] - t0u if posts else None} s after a full minute bucket, creates.log {nlog} of {rate}+1)")
+        posts.clear(); open(os.path.join(UG, "giveup"), "w").write("x")
+        n2 = S.upbase_ref("cd" * 20)
+        case("09:59-upbase-no-create-after-giveup", n2 is None and not posts, f"(ref {n2}, posts {len(posts)})")
+    finally:
+        S.run, S.log = sv
+        if svg is None:
+            os.environ.pop("PR_GATE_DIR", None)
+        else:
+            os.environ["PR_GATE_DIR"] = svg
+else:
+    case("09:59-upbase-create-takes-a-bucket-token", False, "(no upbase_ref)")
+
 bad = [n for n, ok in res if not ok]
 print(f"RCB SELFTEST OK {len(res)}" if not bad else "RCB SELFTEST FAIL " + " ".join(bad))
 sys.exit(1 if bad else 0)

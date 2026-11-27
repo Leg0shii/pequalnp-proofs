@@ -836,6 +836,35 @@ def file_unit(f):
     return ("L_" + u[2:].split("__k")[0] if u.startswith("V_") else u).replace("_", "-")
 
 
+RIVAL_GONE_S = float(os.environ.get("RIVAL_GONE_S", "60"))
+
+
+def _gone_update(recent, now):
+    """Lead 09:40 (lane movingmain, part 2): a unit that a rival's open PR held stays taken for RIVAL_GONE_S after that
+    PR left the open list (merged or closed), whatever the taken list says: a just-merged rival PR is no longer open
+    and the taken list shows it only at its next publish (header 14-31 s old), so without this it is invisible for up
+    to about 30 s. Kept in SNAP_DIR/rival_gone.json across builds (every build runs under rival_snap.lock).
+    Returns {unit: [pr number, author, epoch it was first seen gone]} for the units still held."""
+    f = os.path.join(SNAP_DIR, "rival_gone.json")
+    try:
+        st = json.load(open(f))
+    except Exception:
+        st = {}
+    prev, gone = st.get("open") or {}, st.get("gone") or {}
+    cur = {u: [p["n"], p["who"]] for p in recent for u in p["units"]}
+    for u, nw in prev.items():
+        if u not in cur and u not in gone:
+            gone[u] = [nw[0], nw[1], now]
+    gone = {u: v for u, v in gone.items() if u not in cur and now - v[2] <= RIVAL_GONE_S}
+    try:
+        with open(f + ".tmp", "w") as o:
+            json.dump({"open": cur, "gone": gone}, o)
+        os.replace(f + ".tmp", f)
+    except OSError:
+        pass
+    return gone
+
+
 def _build_snapshot(files):
     """taken list (fresh fetch) + every open PR created after its header minus 30 s, with its units by title, branch
     and changed files. Older PRs are in the taken list (takenpub.py maps every open PR by file path). Raises on any
@@ -906,7 +935,8 @@ def _build_snapshot(files):
                 t_build = time.time()     # the snapshot is stamped at THAT request (usually a 304)
                 page(1)
                 fill()
-            return {"t": t_build, "d": round(dur.get(1, 0.0), 3), "hdr": TL_HDR[0], "taken": tl, "recent": recent,
+            gone = _gone_update(recent, t_build)
+            return {"t": t_build, "d": round(dur.get(1, 0.0), 3), "hdr": TL_HDR[0], "taken": tl, "recent": recent, "gone": gone,
                     "files": files, "rl": ghcond.STATS["remaining"], "full": full,
                     "b": round(time.time() - t_b0, 2), "pages": len(dur), "fr": nfr[0]}
     raise RuntimeError(f"more than {maxp} pages of open PRs since the taken list (fail closed)")
@@ -1074,6 +1104,9 @@ def rival_now(gid, max_age=None, final=False):
     for p in snap["recent"]:
         if gid in p["units"]:
             return f"#{p['n']} by {p['who']}" + (" (file path)" if gid in p.get("by_file", []) else "")
+    g = (snap.get("gone") or {}).get(gid)
+    if g and time.time() - g[2] <= RIVAL_GONE_S:     # Lead 09:40: a rival PR that just left the open list holds 60 s
+        return f"#{g[0]} by {g[1]} left the open list {time.time() - g[2]:.0f} s ago (held {RIVAL_GONE_S:.0f} s)"
     return None
 
 
@@ -1305,6 +1338,19 @@ def upbase_ref(base):
             r = run(["git"] + auth_cfg() + ["ls-remote", url, f"refs/heads/{name}"], timeout=15)
             have = r.returncode == 0 and r.stdout.split()[:1] == [base]
             if not have:
+                # Lead 09:59: the ref create is a content-creating call like a PR create: it takes a token from the
+                # drain's create bucket (bucket_wait: 60 a minute shared with the creates, stalls and giveup included)
+                d, t_bw = os.environ.get("PR_GATE_DIR"), time.time()
+                while d:
+                    w = bucket_wait(d, time.time())
+                    if w == float("inf"):
+                        log("upbase: creates given up in this drain: no ref create (fork-tip base for this unit)")
+                        return None
+                    if w <= 0:
+                        break
+                    time.sleep(min(w, 5))
+                if d and time.time() - t_bw > 0.5:
+                    STG["upbase_wait"] = round(time.time() - t_bw, 1)
                 r = run(["gh", "api", "-X", "POST", f"repos/{FORK}/git/refs", "-f", f"ref=refs/heads/{name}", "-f", f"sha={base}"],
                         timeout=15, env=dict(os.environ, GH_TOKEN=PR_TOKEN))
                 have = r.returncode == 0 or "Reference already exists" in (r.stdout + r.stderr)
@@ -1720,8 +1766,21 @@ def submit(gid, lease):
         return None, "commit-tree failed"
     STG["commit"] = round(time.time() - t_cm, 3)     # whole stage, rev-parse to commit-tree (same span as before)
     # drain.py cuts each unit line at 200 chars, so the long TIMES line loses these: one short line of its own
-    log("COMMIT-STAGES", gid, " ".join(f"{k}={STG[k]}" for k in ("commit", "tree", "tree_src", "head", "halt2", "g_revparse",
+    log("COMMIT-STAGES", gid, " ".join(f"{k}={STG[k]}" for k in ("commit", "tree", "tree_src", "head", "halt2", "newbase", "base_age", "g_revparse",
                                                                "g_catfile", "g_hashobj", "g_difftree", "g_committree") if k in STG))
+    # lane movingmain (W7, Lead 09:20): the base may be up to DRAIN_BASE_MAX_S older than live main (no equality
+    # any more). What equality protected, the unit's own file not yet in upstream main, is checked again here on the
+    # newest base the drain's base refresher has (trees only: no blob read in the blobless shared repo)
+    t = time.time()
+    nb = newest_base()
+    if nb and nb["sha"] != base:
+        r = run(["git", "-C", nb["dir"], "ls-tree", "--name-only", nb["sha"], "--", REL], timeout=30)
+        STG["newbase"] = round(time.time() - t, 3)
+        if r.returncode == 0 and r.stdout.strip():
+            log("file already in upstream main on the newest base", nb["sha"][:12], f"(this unit's base {base[:12]})")
+            return None, "file already in upstream main"
+    if nb:
+        STG["base_age"] = round(time.time() - nb["t"], 1)
     if DRY:
         tw = time.time()                 # rehearsal (Lead 08:12): the would-create time per unit, epoch to 0.001 s
         log(f"WOULD-CREATE {gid} {tw:.3f}"); log(sight_line(gid, tw))
@@ -1733,6 +1792,16 @@ def submit(gid, lease):
         return None, err if err.startswith(("halted: ", "stall-giveup: ")) else "push: " + err   # R3: finish halted/giveup
     log("pushed", c[:12], "to", f"{FORK}:{gid}")
     return create_pr(gid, lease)
+
+
+def newest_base():
+    """lane movingmain: the drain's newest upstream base (drain.py writes W/upbase.json = RIVAL_SNAP_DIR/upbase.json:
+    sha, t = start of the fetch that saw it, dir = the shared checkout). None without a drain or on any read error."""
+    try:
+        d = json.load(open(os.path.join(SNAP_DIR, "upbase.json")))
+        return d if d.get("sha") and d.get("dir") and os.path.isdir(d["dir"]) else None
+    except Exception:
+        return None
 
 
 def pr_create_cmd(gid, body):
