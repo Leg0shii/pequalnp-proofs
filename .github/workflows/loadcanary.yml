@@ -62,6 +62,17 @@ jobs:
     outputs:
       line: ${{ steps.lcsum.outputs.line }}
     steps:
+      - name: Refuse while the wave is on (fork ref wave/on, Lead 08:49 read budget)
+        run: |
+          o=$(git ls-remote "https://github.com/${{ github.repository }}.git" 'refs/heads/wave/*') || { echo "::error::ls-remote failed: not starting"; exit 1; }
+          # create-only switch (infra 08:59, no ref deletes): wave/on-<epoch> and wave/off-<epoch>; ON while the newest on is newer
+          # than the newest off (same rule as 16.1 stop/go); a bare wave/on also counts as ON
+          on=$(printf '%s\n' "$o" | sed -n 's#.*refs/heads/wave/on-\([0-9]*\)$#\1#p' | sort -n | tail -1)
+          off=$(printf '%s\n' "$o" | sed -n 's#.*refs/heads/wave/off-\([0-9]*\)$#\1#p' | sort -n | tail -1)
+          if printf '%s\n' "$o" | grep -q 'refs/heads/wave/on$' || { [ -n "$on" ] && [ "$on" -gt "${off:-0}" ]; }; then
+            echo "::error::wave is ON (wave/on-$on newer than wave/off-${off:-none}): no canary until the Lead says WAVE OFF"; exit 1
+          fi
+          echo "wave off (on-${on:-none} off-${off:-none}): go"
       - name: Check out the candidate (drain.py, submit.py, guards)
         uses: actions/checkout@v4
         with:
