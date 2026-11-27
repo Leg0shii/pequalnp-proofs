@@ -519,6 +519,24 @@ if True:                                   # runs on older code too (the convoy 
         dr = open(os.path.join(os.path.dirname(D.__file__), "drain.py")).read()
         case("16.14-REFRESHER-DEAD-alert-in-drain", "REFRESHER-DEAD" in dr, "")
 
+# ---- 16.14 gaps.json (canary a43dfbe0: the same convoy on the shared 7 MB gaps copy): 20 waiters, a pull of 2 s
+S.time.time, S.time.sleep = REAL_TIME, REAL_SLEEP
+GD = tempfile.mkdtemp(); os.environ["RIVAL_SNAP_DIR"] = GD
+PULLS_G = [0]; sv_curl = S.curl_json
+def slow_curl(url, timeout=60):
+    PULLS_G[0] += 1; REAL_SLEEP(2.0)
+    return {"gaps": [{"id": "L-meta-1"}], "n": PULLS_G[0]}
+S.curl_json = slow_curl
+open(os.path.join(GD, "gaps.t"), "w").write(str(REAL_TIME() - 60)); json.dump({"gaps": []}, open(os.path.join(GD, "gaps.json"), "w"))
+outg = []
+ws = [threading.Thread(target=lambda: outg.append(S.gaps_json())) for _ in range(20)]
+t0 = REAL_TIME(); [x.start() for x in ws]; [x.join(120) for x in ws]
+case("16.14-gaps-20-waiters-at-most-2-pulls", len(outg) == 20 and PULLS_G[0] <= 2 and REAL_TIME() - t0 < 8,
+     f"(pulls {PULLS_G[0]}, answered {len(outg)} in {REAL_TIME() - t0:.1f} s)")
+S.curl_json = sv_curl; os.environ["RIVAL_SNAP_DIR"] = SNAPD
+S.time.time = lambda: CLK[0]
+S.time.sleep = lambda s: CLK.__setitem__(0, CLK[0] + s)
+
 # ---- Lead 07:31: sight-to-create per created PR
 if hasattr(S, "sight_line"):
     os.environ["READY_MSG"] = "ready L-meta-1\n\nSight: 1800000000\n"; os.environ["READY_T"] = "1800000020"

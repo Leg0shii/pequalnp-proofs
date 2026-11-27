@@ -155,20 +155,34 @@ def gaps_json():
     d = os.environ.get("RIVAL_SNAP_DIR") or os.environ.get("PR_GATE_DIR") or W
     os.makedirs(d, exist_ok=True)
     f, tf = os.path.join(d, "gaps.json"), os.path.join(d, "gaps.t")
-    with open(os.path.join(d, "gaps.lock"), "w") as lk:
-        fcntl.flock(lk, fcntl.LOCK_EX)
+    ask = time.time()
+
+    def stamp():
         try:
-            if 0 <= time.time() - float(open(tf).read()) < GAPS_MAX_AGE_S:
-                return json.load(open(f))
+            return float(open(tf).read())
+        except (OSError, ValueError):
+            return None
+    s0 = stamp()                         # 16.14 (no convoy): a fresh copy is parsed without the lock
+    if s0 is not None and 0 <= time.time() - s0 < GAPS_MAX_AGE_S:
+        try:
+            return json.load(open(f))
         except Exception:
             pass
-        gj = curl_json(GAPS, 60)
-        with open(f + ".tmp", "w") as o:
-            json.dump(gj, o)
-        os.replace(f + ".tmp", f)
-        with open(tf, "w") as o:
-            o.write(str(time.time()))
-        return gj
+    with open(os.path.join(d, "gaps.lock"), "w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        s1 = stamp()                     # a pull that STARTED after we asked answers us: no age re-check after the wait
+        fresh = s1 is not None and (s1 >= ask or 0 <= time.time() - s1 < GAPS_MAX_AGE_S)
+        if not fresh:
+            t = time.time()
+            gj = curl_json(GAPS, 60)
+            with open(f + ".tmp", "w") as o:
+                json.dump(gj, o)
+            os.replace(f + ".tmp", f)
+            with open(tf + ".tmp", "w") as o:
+                o.write(str(t))          # stamped at pull START
+            os.replace(tf + ".tmp", tf)
+            return gj
+    return json.load(open(f))            # parsed outside the lock
 
 
 GATE_WAIT_S = float(os.environ.get("GATE_WAIT_S", "60"))   # GATEWAY 4: lease ok within 60 s
@@ -971,14 +985,18 @@ def race_ok(gid):
         if DRY:
             # Lead 05:32 canary A: the dry run makes the same live reads as the bare path (taken list, open pulls,
             # files, fresh export) so a read that fails only inside the Action shows here, with no claim and no PR
+            t_d = time.time()
             rv = rival_now(gid)
+            STG["dry_rival"] = round(time.time() - t_d, 1)
             log("dry run: rival_now:", rv or "clear")
             if rv:
                 return False, "dry run: rival: " + rv, None
+            t_d = time.time()
             try:
                 g2 = next((x for x in gaps_json()["gaps"] if x["id"] == gid), None)
             except Exception as e:
                 return False, "dry run: fresh gaps read failed " + repr(e)[:80], None
+            STG["dry_gaps"] = round(time.time() - t_d, 1)
             if g2 is None or g2.get("held_now") or (g2.get("holders_now") or 0) > 0:
                 return False, "dry run: " + ("unit missing from the fresh gaps export" if g2 is None else "held in the mirror"), None
             log("dry run: fresh export lists", gid, "unheld")
@@ -1665,10 +1683,12 @@ def refresher():
     n = 0
     IS_REFRESHER[0] = True
     prog = [time.time()]
+    hprog = [time.time()]
+    done = [False]
 
     def beat():                         # 16.14: alive = this process runs and its loop made progress in the last 30 s
-        while True:
-            if time.time() - prog[0] < 30:
+        while not done[0]:
+            if time.time() - prog[0] < 30 and time.time() - hprog[0] < 30:
                 try:
                     with open(os.path.join(SNAP_DIR, "refresh.hb.tmp"), "w") as o:
                         o.write(f"{time.time():.1f} {n} {ghcond.STATS['counted']} {ghcond.STATS['not_modified']} "
@@ -1678,12 +1698,19 @@ def refresher():
                     pass
             REAL_SLEEP(1.0)
     threading.Thread(target=beat, daemon=True).start()
+
+    def halts():                        # 16.14 (4): the halt copy has its own reader, never behind a slow page build
+        while os.getppid() == ppid and not os.path.exists(os.path.join(SNAP_DIR, "refresh.stop")):
+            t = time.time()
+            try:
+                filing_halted(0)
+            except Exception as e:
+                log("refresher: halt read failed", repr(e)[:100])
+            hprog[0] = time.time()
+            REAL_SLEEP(max(0.05, REFRESH_S - (time.time() - t)))
+    threading.Thread(target=halts, daemon=True).start()
     while os.getppid() == ppid and not os.path.exists(os.path.join(SNAP_DIR, "refresh.stop")):
         t = time.time()
-        try:
-            filing_halted(0)
-        except Exception as e:
-            log("refresher: halt read failed", repr(e)[:100])
         try:
             rival_snapshot(0)
         except Exception as e:
@@ -1691,6 +1718,7 @@ def refresher():
         n += 1
         prog[0] = time.time()
         time.sleep(max(0.05, REFRESH_S - (time.time() - t)))
+    done[0] = True
 
 
 if __name__ == "__main__":
