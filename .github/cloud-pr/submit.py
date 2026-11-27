@@ -1743,16 +1743,9 @@ def submit(gid, lease):
     # lane movingmain (W7, Lead 09:20): the base may be up to DRAIN_BASE_MAX_S older than live main (no equality
     # any more). What equality protected, the unit's own file not yet in upstream main, is checked again here on the
     # newest base the drain's base refresher has (trees only: no blob read in the blobless shared repo)
-    t = time.time()
-    nb = newest_base()
-    if nb and nb["sha"] != base:
-        r = run(["git", "-C", nb["dir"], "ls-tree", "--name-only", nb["sha"], "--", REL], timeout=30)
-        STG["newbase"] = round(time.time() - t, 3)
-        if r.returncode == 0 and r.stdout.strip():
-            log("file already in upstream main on the newest base", nb["sha"][:12], f"(this unit's base {base[:12]})")
-            return None, "file already in upstream main"
-    if nb:
-        STG["base_age"] = round(time.time() - nb["t"], 1)
+    why = newest_base_check(base)
+    if why:
+        return None, why
     if DRY:
         tw = time.time()                 # rehearsal (Lead 08:12): the would-create time per unit, epoch to 0.001 s
         log(f"WOULD-CREATE {gid} {tw:.3f}"); log(sight_line(gid, tw))
@@ -1764,6 +1757,33 @@ def submit(gid, lease):
         return None, err if err.startswith(("halted: ", "stall-giveup: ")) else "push: " + err   # R3: finish halted/giveup
     log("pushed", c[:12], "to", f"{FORK}:{gid}")
     return create_pr(gid, lease)
+
+
+def newest_base_check(base, rel=None):
+    """lane movingmain + Lead F1 (10:29, fail closed): None when the unit's path is not on the drain's newest upstream
+    base, else why not: "file already in upstream main" (finish race), or "newest-base check failed: ..." (submitfail,
+    the drain retries the unit) when the ls-tree fails or times out, or when inside a drain (PR_GATE_DIR) the drain's
+    W/upbase.json is missing or unreadable. Outside a drain (one run per branch: a fresh clone) there is no newer base."""
+    rel = rel or REL
+    t = time.time()
+    nb = newest_base()
+    if nb is None:
+        if os.environ.get("PR_GATE_DIR"):
+            log("newest-base check: the drain's upbase.json is missing or unreadable (fail closed, the unit is retried)")
+            return "newest-base check failed: upbase.json missing or unreadable"
+        return None
+    if nb["sha"] != base:
+        r = run(["git", "-C", nb["dir"], "ls-tree", "--name-only", nb["sha"], "--", rel], timeout=30)
+        STG["newbase"] = round(time.time() - t, 3)
+        if r.returncode != 0:
+            err = ((r.stderr or "") + (r.stdout or "")).strip()[:100]
+            log("newest-base check: ls-tree on", nb["sha"][:12], f"failed (rc {r.returncode}): {err} (fail closed, retried)")
+            return f"newest-base check failed: ls-tree rc {r.returncode}"
+        if r.stdout.strip():
+            log("file already in upstream main on the newest base", nb["sha"][:12], f"(this unit's base {base[:12]})")
+            return "file already in upstream main"
+    STG["base_age"] = round(time.time() - nb["t"], 1)
+    return None
 
 
 def newest_base():

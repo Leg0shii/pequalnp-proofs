@@ -8,7 +8,7 @@ refresher fetched and moved, every copy is at a sha main had at most BASE_MAX_S 
 import os, subprocess, sys, tempfile, threading, time
 
 here = os.path.dirname(os.path.abspath(__file__))
-src = sys.argv[1] if len(sys.argv) > 1 else "."                          # infra 10:27: no argument = this checkout
+src = sys.argv[1] if len(sys.argv) > 1 else os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))  # infra 10:27: no argument = this checkout (from any cwd)
 br = sys.argv[2] if len(sys.argv) > 2 else ""                              # no BRANCH: the source's HEAD (CI checkout)
 d = tempfile.mkdtemp(prefix="movebase-")
 up = os.path.join(d, "up.git")
@@ -105,6 +105,29 @@ if not (hit and hit.returncode == 0 and hit.stdout.strip() == mvf[-1] and miss.r
     bad.append(f"newest-base path check: hit {hit and hit.stdout.strip()!r} miss {miss.stdout.strip()!r} {miss.stderr[:80]!r}")
 else:
     print(f"newest-base path check: {mvf[-1]} found on {nb['sha'][:12]}, an absent path not found (remote cut)")
+# Lead F1 (10:29): submit.py's newest-base check FAILS CLOSED (the real function, in process)
+os.environ.update(ID="L-meta-1", MOD="L_meta_1", PROOF="/dev/null", TREE="/tmp", RIVAL_SNAP_DIR=os.environ["W"],
+                  PR_GATE_DIR=os.environ["W"], GHCOND_DIR=tempfile.mkdtemp())
+import submit as S
+S.log = lambda *a: None
+upj = os.path.join(os.environ["W"], "upbase.json")
+f1 = {}
+if hasattr(S, "newest_base_check") and mvf:
+    f1["present"] = S.newest_base_check("0" * 40, rel=mvf[-1])
+    f1["absent"] = S.newest_base_check("0" * 40, rel="lean/PEqualNP/Outside/L_meta_999999.lean")
+    json.dump(dict(nb, sha="f" * 40), open(upj, "w"))                       # a sha the shared repo does not have
+    f1["lstree_fails"] = S.newest_base_check("0" * 40, rel=mvf[-1])
+    os.remove(upj)
+    f1["no_upbase_in_drain"] = S.newest_base_check("0" * 40, rel=mvf[-1])
+    os.environ.pop("PR_GATE_DIR")
+    f1["no_upbase_no_drain"] = S.newest_base_check("0" * 40, rel=mvf[-1])
+want = {"present": "file already in upstream main", "absent": None, "lstree_fails": "newest-base check failed: ls-tree",
+        "no_upbase_in_drain": "newest-base check failed: upbase.json", "no_upbase_no_drain": None}
+for k, w in want.items():
+    got = f1.get(k, "missing")
+    if not (got is None if w is None else isinstance(got, str) and got.startswith(w)):
+        bad.append(f"F1 {k}: {got!r}, want {w!r}")
+print("F1 fail closed:", ", ".join(f"{k}={v!r}" for k, v in f1.items()) or "no newest_base_check in submit.py")
 subprocess.run(["rm", "-rf", d])
 print("MOVEBASE PASS" if not bad else "MOVEBASE FAIL: " + "; ".join(bad), flush=True)
 os._exit(1 if bad else 0)          # no drain.py atexit lines after the verdict (mintdrill reads the last line)

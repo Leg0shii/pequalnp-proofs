@@ -330,7 +330,8 @@ def fetch_ready(sid, prefix, lref):
 # What the old equality protected: the unit's file must not already be in upstream main (proved first and merged).
 # That is kept as a check of the unit's own path on the newest base: submit.py checks HEAD:<file> on its copy and,
 # right before the create, again on the newest base sha (W/upbase.json, read from the shared repo, trees only).
-# Guards (checkcore.sh) read the copy, i.e. main as of at most BASE_FETCH_S + one fetch before the copy.
+# Guards (checkcore.sh) read the copy, i.e. the adopted base: main as of at most BASE_ADOPT_S + BASE_FETCH_S + one fetch
+# before the copy (the unit's own path is checked again on the NEWEST sha before the create, fail closed).
 BASE_MAX_S = float(os.environ.get("DRAIN_BASE_MAX_S", "60"))
 BASE_FETCH_S = float(os.environ.get("DRAIN_BASE_FETCH_S", "2"))
 BASE_IDLE_S = float(os.environ.get("DRAIN_BASE_IDLE_S", "15"))
