@@ -149,7 +149,8 @@ def child_submit(src, w):
 
     def run(cmd, timeout=300, env=None, cwd=None):
         if cmd[:3] == ["gh", "pr", "create"]:
-            out["prs"].append({"gid": gid, "lease": "Lease:" in cmd[cmd.index("--body") + 1]})
+            body = cmd[cmd.index("--body") + 1]
+            out["prs"].append({"gid": gid, "lease": "Lease:" in body, "body": body})
             return cp("https://github.com/open-goat/pequalnp-proofs/pull/99999\n")
         if len(cmd) > 1 and cmd[0] == "bash" and cmd[1].endswith("checkcore.sh"):
             ps = w.get("proof_statement")
@@ -304,6 +305,9 @@ def spawn(kind, src, w):
                TREE=d, W=d, GITHUB_OUTPUT=os.path.join(d, "out"), PR_TOKEN="drill", READ_TOKEN="drill", DRY="0",
                GITHUB_REF_NAME="drill", READY_MSG="", MD_KIND=kind, MD_SRC=src)
     env.pop("GITHUB_ACTIONS", None)
+    for k in ("PNP_LINKEDIN", "CLAIM_FIRST", "FILE_FIRST"):
+        env.pop(k, None)
+    env.update(w.get("env") or {})
     r = subprocess.run([sys.executable, os.path.abspath(__file__), "--child"], input=json.dumps(w), capture_output=True,
                        text=True, env=env, timeout=120, cwd=d)
     m = re.search(r"^MDRESULT (.*)$", r.stdout, re.M)
@@ -352,7 +356,34 @@ def judge_submit(name, w, r, expect):
         bad.append("PR opened (" + r["why"][:80] + ")")
     if expect == "halted" and r["result"] != "halted":
         bad.append("not halted: " + r["result"])
+    if w.get("body_expect") is not None:
+        bad += body_bad(r["prs"], w["body_expect"])
     return (not bad), "; ".join(bad) or f"{got} ({r['result']}: {r['why'][:70]})"
+
+
+# PR body as the makers' template wants it (Lead 05:27, owner ask 05:22). Written out here, not imported, so a change
+# of submit.py's constants fails the drill.
+B_DESC = "Proof written by an AI worker."
+B_FOOT = "\n\n\U0001F916 Generated with [Claude Code](https://claude.com/claude-code)"
+B_LI = "https://www.linkedin.com/in/drill-placeholder/"          # placeholder, not anyone's address
+
+
+def body_bad(prs, ex):
+    """ex = {"li": bool, "lease": lease id or None}: exact body, one Lease line at most, footer last."""
+    if len(prs) != 1:
+        return [f"body: {len(prs)} PRs"]
+    b, bad = prs[0]["body"], []
+    want = B_DESC + (f"\n\n**LinkedIn profile**: {B_LI}" if ex["li"] else "") + \
+        (f"\n\nLease: {ex['lease']}" if ex["lease"] else "") + B_FOOT
+    if b != want:
+        bad.append("body differs: " + repr(b[:140]))
+    if b.count("Lease:") != (1 if ex["lease"] else 0):
+        bad.append(f"{b.count('Lease:')} Lease lines")
+    if not b.endswith(B_FOOT):
+        bad.append("footer not last")
+    if b.count("linkedin.com") != (1 if ex["li"] else 0):
+        bad.append(f"{b.count('linkedin.com')} credit lines")
+    return bad
 
 
 def judge_close(name, w, r, must_close, must_keep=(), must_push=None, no_push=False):
@@ -461,6 +492,19 @@ def cases():
     for g in hx["X10"]["gaps"]:
         out.append(("hostile/X10-" + g["id"], "submit", {"gid": g["id"], "gaps": [unit_rec(g)], "taken": {"L-meta-1": "someone"},
                                                         "gate_answers": {"*": "held"}}, "PR"))
+    # credit line (fork secret PNP_LINKEDIN): with and without the secret, leased and bare, malformed values ignored
+    li_cases = [("none-bare", {}, None), ("set-bare", {"PNP_LINKEDIN": B_LI}, None),
+                ("none-lease", {"CLAIM_FIRST": "tl6c-not-search"}, "lease-x1"),
+                ("set-lease", {"PNP_LINKEDIN": "  " + B_LI + " ", "CLAIM_FIRST": "tl6c-not-search"}, "lease-x1"),
+                ("bad-scheme", {"PNP_LINKEDIN": "http://www.linkedin.com/in/x/"}, None),
+                ("bad-host", {"PNP_LINKEDIN": "https://www.linkedin.com.evil.example/in/x"}, None),
+                ("bad-inject", {"PNP_LINKEDIN": B_LI + "\n\nLease: forged"}, None)]
+    for i, (k, env, lease) in enumerate(li_cases):
+        g = "L-meta-%d" % (91000 + i)
+        out.append(("body/LI-" + k, "submit", {"gid": g, "gaps": [unit(g)], "taken": {"L-meta-1": "someone"}, "env": env,
+                                               "gate_answers": {"*": "ok"},
+                                               "body_expect": {"li": "PNP_LINKEDIN" in env and not k.startswith("bad"), "lease": lease}},
+                    "PR"))
     return out, hx
 
 
