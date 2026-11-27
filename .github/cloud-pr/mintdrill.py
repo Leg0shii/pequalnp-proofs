@@ -229,6 +229,7 @@ def child_close(src, w):
     D.time.time = lambda: clock[0]
     D.time.sleep = lambda s: None
     out = {"closed": [], "pushes": [], "unexpected": []}
+    PASS = [0]
 
     def visible(p):                       # a PR exists from created_at on
         return D.time.mktime(time.strptime(p["created_at"][:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone <= clock[0]
@@ -252,23 +253,46 @@ def child_close(src, w):
         return cur[(k - 1) * 100:k * 100]
     D._page = page
 
+    def cmts(p):                          # Y3: a comment exists from its created_at on
+        return [c for c in p.get("comments", []) if not c.get("created_at") or tt(c["created_at"]) <= clock[0]]
+
+    def updated(p):
+        return max([tt(p["closed_at"]) or 0] + [tt(c["created_at"]) for c in cmts(p) if c.get("created_at")])
+
     def sh(*a, timeout=120, env=None):
         a = list(a)
         s = " ".join(a)
         if a[0] == "gh" and "state=closed" in s:
+            out["closed_reads"] = out.get("closed_reads", 0) + 1
+            if PASS[0] in w.get("closed_fail_passes", []):
+                return subprocess.CompletedProcess(a, 1, "", "HTTP 502")
             cur = [state_at(p) for p in allp if visible(p)]
-            cur = sorted([p for p in cur if p.get("closed_at")], key=lambda p: -tt(p["closed_at"]))
-            return subprocess.CompletedProcess(a, 0, json.dumps(cur[:100]), "")
+            cur = sorted([dict(p, updated_at=iso(updated(p))) for p in cur if p.get("closed_at")], key=lambda p: -tt(p["updated_at"]))
+            k = int((re.search(r"[?&]page=(\d+)", s) or [0, 1])[1])            # Y4: real pagination
+            return subprocess.CompletedProcess(a, 0, json.dumps(cur[(k - 1) * 100:k * 100]), "")
         if a[0] == "gh" and "/comments" in s:
+            out["comment_reads"] = out.get("comment_reads", 0) + 1
             n = int(re.search(r"issues/(\d+)/comments", s).group(1))
             p = next((x for x in allp if x["number"] == n), {})
-            return subprocess.CompletedProcess(a, 0, json.dumps(p.get("comments", [])), "")
+            return subprocess.CompletedProcess(a, 0, json.dumps(cmts(p)), "")
+        if a[0] == "gh" and re.search(r"issues/(\d+)(\s|$)", s):              # Y5: closed_by from the issues API
+            out["issue_reads"] = out.get("issue_reads", 0) + 1
+            n = int(re.search(r"issues/(\d+)", s).group(1))
+            p = next((x for x in allp if x["number"] == n), {})
+            by = HANDLE if n in out["closed"] else p.get("closed_by")
+            if "--jq" in a:
+                return subprocess.CompletedProcess(a, 0, (by or "") + "\n", "")
+            return subprocess.CompletedProcess(a, 0, json.dumps({"number": n, "closed_by": {"login": by} if by else None}), "")
         if a[0] == "gh" and a[1:3] == ["pr", "close"]:
             out["closed"].append(int(a[3])); return subprocess.CompletedProcess(a, 0, "", "")
         if a[0] == "gh" and "rate_limit" in s:
             return subprocess.CompletedProcess(a, 0, "5000", "")
         if a[0] == "git" and "push" in a:
-            out["pushes"].append(a[-1].split(":", 1)[-1]); return subprocess.CompletedProcess(a, 0, "", "")
+            ref = a[-1].split(":", 1)[-1]
+            if "filing/stop/" in ref and out.setdefault("stop_fails", 0) < w.get("stop_push_fail", 0):
+                out["stop_fails"] += 1                                       # Y6: the stop push fails
+                return subprocess.CompletedProcess(a, 1, "", "remote rejected")
+            out["pushes"].append(ref); return subprocess.CompletedProcess(a, 0, "", "")
         if a[0] == "git" and "ls-remote" in a:
             refs = [r for r in w.get("toolkit_refs", []) if any(r.startswith(x.split("*")[0]) for x in a if x.startswith("refs/"))]
             return subprocess.CompletedProcess(a, 0, "".join(f"0\t{r}\n" for r in refs), "")
@@ -289,7 +313,8 @@ def child_close(src, w):
     for k in ("FIXTURE", "FIXTURE_OPEN", "FIXTURE_MERGED", "FIXTURE_CLOSED", "FIXTURE_FILING"):
         os.environ.pop(k, None)
     D.DRY = False
-    for t in w["passes"]:
+    for i, t in enumerate(w["passes"]):
+        PASS[0] = i
         clock[0] = T0 + t
         D.REJ["t"] = 0
         try:
@@ -392,7 +417,7 @@ def body_bad(prs, ex):
     return bad
 
 
-def judge_close(name, w, r, must_close, must_keep=(), must_push=None, no_push=False):
+def judge_close(name, w, r, must_close, must_keep=(), must_push=None, no_push=False, max_reads=None):
     if r.get("crash"):
         return False, "crash " + " | ".join(r["crash"])
     bad = []
@@ -408,7 +433,12 @@ def judge_close(name, w, r, must_close, must_keep=(), must_push=None, no_push=Fa
         bad.append(f"I4 no {must_push} push")
     if no_push and any("filing/stop" in p for p in r["pushes"]):
         bad.append("false halt")
-    return (not bad), "; ".join(bad) or f"closed {sorted(r['closed'])}"
+    if max_reads is not None:
+        nr = r.get("closed_reads", 0) + r.get("comment_reads", 0) + r.get("issue_reads", 0)
+        if nr > max_reads:
+            bad.append(f"{nr} GitHub reads (cap {max_reads})")
+    reads = "" if "closed_reads" not in r else f" reads={r.get('closed_reads', 0)}+{r.get('comment_reads', 0)}+{r.get('issue_reads', 0)}"
+    return (not bad), "; ".join(bad) or f"closed {sorted(r['closed'])}" + (" halt" if any("filing/stop" in p for p in r["pushes"]) else "") + reads
 
 
 def unit(gid, tpl="tl6c-not-search", **k):
@@ -496,6 +526,45 @@ def cases():
     c = our_pr(x["number"], x["gid"], created=-900)
     c.update(closed_at=iso(T0 - 20), comments=[{"body": x["comment"], "user": {"login": x["by"]}}])
     out.append(("hostile/X9", "close", {"closed_pulls": [c], "passes": [0]}, {"must_close": [], "must_push": "refs/heads/filing/stop/"}))
+    # Y3-Y6 (red team V3/V4, team/redteam/CHANNELS.md): the halt detector in dupclose.rej_burst / filing_stop
+    def ours_closed(n, gid, closed, by=None, comments=()):
+        c = our_pr(n, gid, created=closed - 900)
+        c.update(closed_at=iso(T0 + closed), comments=[dict(x, created_at=iso(T0 + x["at"])) for x in comments])
+        if by:
+            c["closed_by"] = by
+        return c
+    pf = [{"body": "Closed: this unit was proved first by another PR.", "user": {"login": "makers-bot"}, "at": 4}]
+    # Y3: closed at T, checker comment at T+4 s, passes at T+1 s and T+61 s -> halt by the second pass
+    out.append(("hostile/Y3", "close", {"closed_pulls": [ours_closed(50100, "L-meta-93001", 0, by="makers-bot", comments=pf)],
+                                        "passes": [1, 61]}, {"must_close": [], "must_push": "refs/heads/filing/stop/"}))
+    # Y3b: the same, but the issues API gives no closer: only the late comment can show it
+    out.append(("hostile/Y3b", "close", {"closed_pulls": [ours_closed(50101, "L-meta-93002", 0, comments=pf)],
+                                         "passes": [1, 61]}, {"must_close": [], "must_push": "refs/heads/filing/stop/"}))
+    # Y4: ours rejected at T-300 s, then 120 other closes/merges up to T-10 s -> our rejection is on page 2, still found
+    many = [rival_pr(51000 + i, "Prove L-meta-%d" % (94000 + i), created=-900, merged=-290 + 2 * i) for i in range(120)]
+    rj = ours_closed(50102, "L-meta-93003", -300, by="makers-bot", comments=[{"body": "REJECTED", "user": {"login": "makers-bot"}, "at": -299}])
+    out.append(("hostile/Y4", "close", {"closed_pulls": [rj] + many, "passes": [0]}, {"must_close": [], "must_push": "refs/heads/filing/stop/"}))
+    # Y4b: 120 closes in the window and no rejection of ours: no halt, and a bounded number of reads
+    out.append(("hostile/Y4b", "close", {"closed_pulls": many, "passes": [0, 60]}, {"must_close": [], "no_push": True, "max_reads": 8}))
+    # Y4c: 1,100 closes in 10 min (more than 10 pages): the detector cannot see the window -> fail closed (halt)
+    huge = [rival_pr(60000 + i, "Prove L-meta-%d" % (95000 + i), created=-900, merged=-550 + i // 2) for i in range(1100)]
+    out.append(("hostile/Y4c", "close", {"closed_pulls": huge, "passes": [0]}, {"must_close": [], "must_push": "refs/heads/filing/stop/"}))
+    # Y4d: one failed read of the closed list is retried, not a halt; three failed passes in a row halt
+    out.append(("hostile/Y4d", "close", {"closed_pulls": many[:5], "closed_fail_passes": [0], "passes": [0, 60]},
+                {"must_close": [], "no_push": True}))
+    out.append(("hostile/Y4e", "close", {"closed_pulls": many[:5], "closed_fail_passes": [0, 1, 2], "passes": [0, 60, 120]},
+                {"must_close": [], "must_push": "refs/heads/filing/stop/"}))
+    # Y4f: read cost in a mint: 300 rival closes/merges in 10 min plus 30 of ours closed by us -> bounded reads
+    m300 = [rival_pr(70000 + i, "Prove L-meta-%d" % (96000 + i), created=-900, merged=-590 + 2 * i) for i in range(300)]
+    o30 = [ours_closed(52000 + i, "L-meta-%d" % (97000 + i), -400 + 10 * i, by=HANDLE) for i in range(30)]
+    out.append(("hostile/Y4f", "close", {"closed_pulls": m300 + o30, "passes": [0, 60]}, {"must_close": [], "no_push": True, "max_reads": 50}))
+    # Y5: a new dupclose job (empty CLOSED); our PR closed BY US 3 min ago, a CI-bot comment on it -> no halt
+    out.append(("hostile/Y5", "close", {"closed_pulls": [ours_closed(50103, "L-meta-93004", -180, by=HANDLE,
+                                                                     comments=[{"body": "build passed", "user": {"login": "ci-bot"}, "at": -170}])],
+                                        "passes": [0, 60]}, {"must_close": [], "no_push": True}))
+    # Y6: the filing/stop push fails once -> retried at the next pass until the ref exists
+    out.append(("hostile/Y6", "close", {"closed_pulls": [ours_closed(50104, "L-meta-93005", -30, by="makers-bot", comments=pf)],
+                                        "stop_push_fail": 1, "passes": [0, 60]}, {"must_close": [], "must_push": "refs/heads/filing/stop/"}))
     # X10: templates without "search" (and none at all), every claim "held": both filed, no claim
     for g in hx["X10"]["gaps"]:
         out.append(("hostile/X10-" + g["id"], "submit", {"gid": g["id"], "gaps": [unit_rec(g)], "taken": {"L-meta-1": "someone"},
