@@ -1,0 +1,47 @@
+# PUSH CANARY (W6, Lead 08:50 UTC 27 Nov): the real branch push of submit() on the real runner, 3 L-drill units,
+# head branches pushcanary/<tag>/<id> on THIS fork, no PR and no create call. Start: push branch
+# pushcanary-run/<tag> (lowercase letters and digits) at a commit that has this file. Branches deleted at the end.
+name: pushcanary
+
+on:
+  push:
+    branches: ['pushcanary-run/**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pushcanary-${{ github.ref_name }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: src
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Three real pushes and a fresh-clone check
+        env:
+          W: ${{ github.workspace }}/work
+          PR_TOKEN: ${{ secrets.PR_TOKEN }}
+          READ_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          [ -n "${PR_TOKEN:-}" ] || { echo "::error::no PR_TOKEN"; exit 1; }
+          export PC_TAG=$(echo "${GITHUB_REF_NAME#pushcanary-run/}" | tr -cd 'a-z0-9' | cut -c1-12)
+          git --version; nproc
+          python3 -I src/.github/cloud-pr/pushcanary.py; rc=$?
+          b=$(echo -n "x-access-token:$PR_TOKEN" | base64 -w0)
+          u="https://github.com/$GITHUB_REPOSITORY.git"; h="http.https://github.com/.extraheader=AUTHORIZATION: basic $b"
+          for r in $(git -C src -c "$h" ls-remote "$u" | awk '$2 ~ /^refs\/heads\/(pushcanary(-run)?|upbase)\//{print $2}'); do
+            git -C src -c "$h" push -q "$u" --delete "$r" && echo "deleted $r"
+          done
+          exit $rc
