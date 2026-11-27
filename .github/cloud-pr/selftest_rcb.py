@@ -466,9 +466,10 @@ if True:                                   # runs on older code too (the convoy 
     S.gh = rt_gh
     json.dump({"t": REAL_TIME() - 30, "d": 0.5, "hdr": REAL_TIME() - 40, "taken": {}, "recent": [], "files": {}},
               open(os.path.join(SNAPD, "rival_snap.json"), "w"))
-    def put_hb(t):
-        open(os.path.join(SNAPD, "refresh.hb.t"), "w").write(f"{t:.1f} 0 0 0 0\n")
-        os.replace(os.path.join(SNAPD, "refresh.hb.t"), os.path.join(SNAPD, "refresh.hb"))
+    def put_hb(t):                  # two threads write it: one tmp name per thread (a shared one raced: the loser's
+        tmp = os.path.join(SNAPD, f"refresh.hb.t{threading.get_ident()}")   # os.replace raised and killed fake_refresher)
+        open(tmp, "w").write(f"{t:.1f} 0 0 0 0\n")
+        os.replace(tmp, os.path.join(SNAPD, "refresh.hb"))
     def fake_refresher():
         tl.ref = True
         while not stop.is_set():
