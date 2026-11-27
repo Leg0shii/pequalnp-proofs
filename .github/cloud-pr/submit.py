@@ -798,7 +798,8 @@ def _snap_note(snap):
 # (its heartbeat went stale): one inline read under the lock, alert REFRESHER-DEAD. No refresher at all (one run per
 # branch, drills): inline reads as before, still without the age re-check after a lock wait.
 REFRESHER_HB_S = float(os.environ.get("REFRESHER_HB_S", "5"))
-COPY_WAIT_S = float(os.environ.get("COPY_WAIT_S", "20"))
+COPY_WAIT_S = float(os.environ.get("COPY_WAIT_S", "90"))   # Lead 08:12: a cold first build (36 s seen) is waited for
+REFRESHER_STUCK_S = float(os.environ.get("REFRESHER_STUCK_S", "90"))  # a refresher loop with no finished pass this long = dead
 IS_REFRESHER = [False]
 WREADS = {"snap": 0, "halt": 0}          # GitHub reads made by THIS process outside the refresher (16.14 case)
 
@@ -1289,6 +1290,7 @@ def submit(gid, lease):
             return create_pr(gid, lease)
     except RuntimeError as e:
         return None, "head check failed (fail closed): " + str(e)[:120]
+    t_cm = time.time()
     base = git("rev-parse", "HEAD").stdout.strip()
     if not base:
         return None, "no upstream main"
@@ -1311,7 +1313,10 @@ def submit(gid, lease):
     c = git("commit-tree", tree, "-p", base, "-m", msg, env=cenv).stdout.strip()
     if not c:
         return None, "commit-tree failed"
+    STG["commit"] = round(time.time() - t_cm, 1)
     if DRY:
+        tw = time.time()                 # rehearsal (Lead 08:12): the would-create time per unit, epoch to 0.001 s
+        log(f"WOULD-CREATE {gid} {tw:.3f}"); log(sight_line(gid, tw))
         return "dry-run", f"would push {c[:12]} as {FORK}:{gid} and open the PR"
     t = time.time()
     err = push_branch(c, gid)
@@ -1705,9 +1710,10 @@ def refresher():
     hprog = [time.time()]
     done = [False]
 
-    def beat():                         # 16.14: alive = this process runs and its loop made progress in the last 30 s
+    def beat():                         # 16.14 + Lead 08:12: alive = this process runs and both loops finished a pass in the
+        # last REFRESHER_STUCK_S (90 s): a refresher in its (cold) first build is alive, workers wait for its first copy
         while not done[0]:
-            if time.time() - prog[0] < 30 and time.time() - hprog[0] < 30:
+            if time.time() - prog[0] < REFRESHER_STUCK_S and time.time() - hprog[0] < REFRESHER_STUCK_S:
                 try:
                     with open(os.path.join(SNAP_DIR, "refresh.hb.tmp"), "w") as o:
                         o.write(f"{time.time():.1f} {n} {ghcond.STATS['counted']} {ghcond.STATS['not_modified']} "

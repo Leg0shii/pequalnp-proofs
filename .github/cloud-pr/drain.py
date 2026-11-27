@@ -222,12 +222,17 @@ def retry_due(v):
     return r in RETRYABLE and n < RETRY_MAX and time.time() - v[1] >= RETRY_WAIT[min(n, len(RETRY_WAIT)) - 1] - 1
 
 
+MATCH = os.environ.get("DRAIN_MATCH", "")
+
+
 def pending():
     r = sh("git", "ls-remote", URL, f"refs/heads/{PREFIX}/*", timeout=60)
     out = []
     for l in r.stdout.splitlines():
         sha, ref = l.split()
         sid = ref[len(f"refs/heads/{PREFIX}/"):]
+        if MATCH and not re.fullmatch(MATCH, sid):        # rehearsal: only the drill units (DRAIN_MATCH)
+            continue
         if re.fullmatch(r"L-[a-z0-9]+(-[a-z0-9]+)*", sid) and retry_due(SEEN.get((sid, sha))):
             out.append((sid, sha))
     def num(s):
@@ -419,7 +424,7 @@ def one(sid, sha, prefix=None, extra=None):
     # Lead 19:14: the per-stage seconds of every unit in the drain log (prep = fetch of the ready commit + upstream
     # checkout before submit.py starts)
     for l in (r.stdout or "").splitlines():
-        if " TIMES " in l or " gate: " in l or " SKIP " in l or " halted: " in l:
+        if " TIMES " in l or " gate: " in l or " SKIP " in l or " halted: " in l or "WOULD-CREATE " in l or "SIGHT-TO-CREATE " in l:
             log(sid, l.strip()[:200], f"prep={t_sub - T_ONE.get(sid, t_sub):.1f}" if " TIMES " in l else "")
     res = dict(l.split("=", 1) for l in open(outp).read().splitlines() if "=" in l) if os.path.exists(outp) else {}
     tail = (r.stdout + r.stderr).strip().splitlines()[-1:] or [""]
@@ -516,6 +521,17 @@ def main():
         log("RUN-TOKEN rate_limit unreadable:", repr(e)[:80])
     inflight = {}; idle = None
     rf = refresher_start()
+    warm = float(os.environ.get("DRAIN_WARM_S", "0") or 0)
+    if rf and warm > 0:                    # Lead 08:12 (b): units are released only after the refresher's first copies
+        t_w = time.time()                  # exist (or WARM_S passed), so the cold first build is not on any unit's path
+        while time.time() - t_w < warm and not all(os.path.exists(os.path.join(W, x)) for x in ("rival_snap.json", "halt.json")):
+            time.sleep(0.5)
+        log(f"WARM {time.time() - t_w:.1f} s: refresher copies", "ready" if all(os.path.exists(os.path.join(W, x))
+            for x in ("rival_snap.json", "halt.json")) else "NOT ready (released anyway)", "- units released now")
+        if PREFIX == "loadtest":           # rehearsal marker for the builder: toolkit ref drill/warm-<epoch>
+            ok = alert_ref(f"WARM drain run {os.environ.get('GITHUB_RUN_ID', '?')} released units at {time.time():.0f}",
+                           "warm", prefix="drill")
+            log("WARM marker ref drill/warm-*", "pushed" if ok else "push FAILED")
     try:
         _loop(inflight, idle)
     finally:
@@ -586,7 +602,7 @@ def stall_alerts(now, n_inflight, last_done, t_start, stall_until):
     return [(k, m) for k, m in out if now - ALERTED.get(k, 0) >= 300]
 
 
-def alert_ref(msg, kind):
+def alert_ref(msg, kind, prefix="alert"):
     """toolkit ref alert/<kind>-<epoch> (an empty commit whose message is the alert), the same channel as the closer's
     TAKEN-STALE; the Lead's audit and the infra box read alert/*"""
     g = os.path.join(W, "alert.git")
@@ -596,7 +612,7 @@ def alert_ref(msg, kind):
     env = dict(os.environ, GIT_AUTHOR_NAME="drain", GIT_AUTHOR_EMAIL="drain@localhost",
                GIT_COMMITTER_NAME="drain", GIT_COMMITTER_EMAIL="drain@localhost")
     c = subprocess.run(["git", "-C", g, "commit-tree", tree, "-m", msg], capture_output=True, text=True, env=env).stdout.strip()
-    return bool(c) and sh("git", *auth(), "-C", g, "push", "-q", TK, f"{c}:refs/heads/alert/{kind}-{int(time.time())}",
+    return bool(c) and sh("git", *auth(), "-C", g, "push", "-q", TK, f"{c}:refs/heads/{prefix}/{kind}-{int(time.time())}",
                           timeout=60).returncode == 0
 
 
@@ -781,7 +797,7 @@ def _loop(inflight, idle):
                     break
             else:
                 idle = None
-            time.sleep(1 if inflight else 3)
+            time.sleep(1 if inflight else float(os.environ.get("DRAIN_IDLE_POLL_S", "3")))
 
 
 if __name__ == "__main__":
