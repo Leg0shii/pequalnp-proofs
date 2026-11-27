@@ -195,6 +195,8 @@ def child_submit(src, w):
             hdr = int(now_c) - 20
             if hasattr(S, "TL_HDR"):
                 S.TL_HDR[0] = hdr
+            if hasattr(S, "TL_COMPLETE"):
+                S.TL_COMPLETE[0] = True
             rows = {}
             for p in sorted(pulls_open + pulls_closed, key=lambda p: -p["number"]):
                 if time.mktime(time.strptime(p["created_at"][:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone >= hdr:
@@ -664,7 +666,7 @@ def cases():
         if k == "X8":
             w["proof_statement"] = x["proof_statement"]
         if k == "X3b":                               # Lead 05:32 A20: "steps 0" is legitimate; the closer half decides
-            w.pop("taken"); w["taken_text"] = "# updated {T} 05:00:00 steps 0\n"
+            w.pop("taken"); w["taken_text"] = "# updated {T} 05:00:00 steps 0 complete 0 rl 4000 0\n"
         out.append(("hostile/" + k, "submit", w, "no PR" if k != "X3b" else "no PR or closed"))
     # X3b second half: if the opener filed, the closer must close within 60 s (title "Prove L-meta-90001", merged T-120s)
     x = hx["X3b"]
@@ -817,6 +819,17 @@ def cases():
     out.append(("hostile/X13", "submit", {"gid": "L-meta-90103", "gaps": [unit("L-meta-90103")], "taken": {"L-meta-1": "someone"},
                 "open_pulls": [rival_pr(50103, "Batch of proofs", created=-10, files=["lean/PEqualNP/Outside/L_meta_90103.lean"])],
                 "files_fail": [50103]}, "no PR"))
+    # A3 (W6 43099ec6, Lead ruling): a partial (or old-format) taken list is not the authority: a rival PR older than the
+    # header that the list missed must still block (full open sweep); with no rival the unit is still filed
+    out.append(("hostile/A3-partial-rival", "submit", {"gid": "L-meta-92301", "gaps": [unit("L-meta-92301")],
+                "taken_text": "# updated {T} 05:00:00 steps 1 partial 1795700000 rl 4000 0\nL-meta-5 1 someone 04:00:00\n",
+                "open_pulls": [rival_pr(50301, "Batch of proofs", created=-3000, files=["lean/PEqualNP/Outside/L_meta_92301.lean"])]}, "no PR"))
+    out.append(("hostile/A3-oldformat-rival", "submit", {"gid": "L-meta-92302", "gaps": [unit("L-meta-92302")],
+                "taken_text": "# updated {T} 05:00:00 steps 1\nL-meta-5 1 someone 04:00:00\n",
+                "open_pulls": [rival_pr(50302, "Batch of proofs", created=-3000, files=["lean/PEqualNP/Outside/L_meta_92302.lean"])]}, "no PR"))
+    out.append(("hostile/A3-partial-free", "submit", {"gid": "L-meta-92303", "gaps": [unit("L-meta-92303")],
+                "taken_text": "# updated {T} 05:00:00 steps 1 partial 1795700000 rl 4000 0\nL-meta-5 1 someone 04:00:00\n",
+                "open_pulls": [rival_pr(50303, "Batch of proofs", created=-3000, files=["lean/PEqualNP/Outside/L_meta_5.lean"])]}, "PR"))
     # a0 (w12 stall drill): the first create gets a 403 and backs off 30 s; meanwhile a rival opens (at +5 s) or a stop
     # ref appears (at +5 s): the retry must re-check both (rival snapshot at most 2 s old, halt) and open nothing
     out.append(("hostile/a0-rival", "submit", {"gid": "L-meta-92201", "gaps": [unit("L-meta-92201")], "taken": {"L-meta-1": "someone"},
@@ -837,11 +850,11 @@ def cases():
                                                "gate_refs": refs, "expect_claim": claim}, "PR"))
     # A20: the real taken-list parser. Header count differs from the rows (truncated) = no PR; "steps 0" fresh = files
     out.append(("hostile/A20-truncated", "submit", {"gid": "L-meta-92001", "gaps": [unit("L-meta-92001")],
-                                                    "taken_text": "# updated {T} 05:00:00 steps 3\nL-meta-5 1 someone 04:00:00\n"}, "no PR"))
+                                                    "taken_text": "# updated {T} 05:00:00 steps 3 complete 0 rl 4000 0\nL-meta-5 1 someone 04:00:00\n"}, "no PR"))
     out.append(("hostile/A20-steps0", "submit", {"gid": "L-meta-92002", "gaps": [unit("L-meta-92002")],
-                                                 "taken_text": "# updated {T} 05:00:00 steps 0\n"}, "PR"))
+                                                 "taken_text": "# updated {T} 05:00:00 steps 0 complete 0 rl 4000 0\n"}, "PR"))
     out.append(("hostile/A20-rival", "submit", {"gid": "L-meta-92003", "gaps": [unit("L-meta-92003")],
-                                                "taken_text": "# updated {T} 05:00:00 steps 1\nL-meta-92003 40000 rival1 05:00:00\n"}, "no PR"))
+                                                "taken_text": "# updated {T} 05:00:00 steps 1 complete 0 rl 4000 0\nL-meta-92003 40000 rival1 05:00:00\n"}, "no PR"))
     # credit line (fork secret PNP_LINKEDIN): with and without the secret, leased and bare, malformed values ignored
     li_cases = [("none-bare", {}, None), ("set-bare", {"PNP_LINKEDIN": B_LI}, None),
                 ("none-lease", {"CLAIM_FIRST": "tl6c-not-search"}, "lease-x1"),

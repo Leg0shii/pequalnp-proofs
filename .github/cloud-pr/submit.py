@@ -320,6 +320,7 @@ TAKEN_REF = "refs/heads/status/taken"
 
 _TL = []
 TL_HDR = [None]          # header epoch of the last taken list read: every PR created before it is in the list (A19)
+TL_COMPLETE = [True]     # W6 43099ec6 (Lead ruling A3): header field 7 "complete"; partial or old format = not the authority
 
 
 TL_T = [0.0]
@@ -356,7 +357,10 @@ def _taken_list():
     if not m or int(m.group(1)) != len(rows):
         log(f"taken list: header says {m.group(1) if m else 'no count'}, {len(rows)} rows (truncated, fail closed)")
         return None
-    log(f"taken list: fresh, steps {len(rows)}, {age:.0f} s old")
+    h = t[0].split()
+    TL_COMPLETE[0] = len(h) > 7 and h[6] == "complete"
+    log(f"taken list: fresh, steps {len(rows)}, {age:.0f} s old" +
+        ("" if TL_COMPLETE[0] else ", PARTIAL (or old format): every open PR is read by the snapshot"))
     TL_HDR[0] = int(t[0].split()[2])
     return rows
 
@@ -366,6 +370,12 @@ def race_check(step_id):
     list, or the list is stale) the GitHub search below, on the run's own token."""
     _TL.clear()                          # fresh copy right before the push
     tl = taken_list()
+    if tl is not None and not TL_COMPLETE[0]:     # A3: a partial list proves nothing about absent units
+        rv = rival_now(step_id, SNAP_MAX_AGE_S)
+        log("race check: taken list partial, full open sweep:", rv or "clear")
+        if rv:
+            return [{"number": "?", "state": "OPEN", "ours": False, "why": rv}]
+        return []
     if tl is not None and step_id not in tl:
         log("race check: not on the taken list (no API call)")
         return []
@@ -658,13 +668,15 @@ def _build_snapshot(files):
     tl = taken_list()
     if tl is None:
         raise RuntimeError("taken list missing, older than 180 s or truncated (fail closed)")
-    cut = TL_HDR[0] - 30
+    full = not TL_COMPLETE[0]               # A3: partial list -> every open PR (100 a page), not only the newest
+    cut = -1e18 if full else TL_HDR[0] - 30
+    size, maxp = (100, 60) if full else (SNAP_PAGE, SNAP_MAX_PAGES)
     recent = []
-    for k in range(1, SNAP_MAX_PAGES + 1):
+    for k in range(1, maxp + 1):
         # 16.7: small pages (only PRs since the header are needed) read with If-None-Match: an unchanged page is a
         # 304 and costs nothing of the run token's hourly limit; any failed read raises (fail closed)
         try:
-            pulls, counted, rem = ghcond.get(f"repos/{UP}/pulls?state=open&sort=created&direction=desc&per_page={SNAP_PAGE}&page={k}",
+            pulls, counted, rem = ghcond.get(f"repos/{UP}/pulls?state=open&sort=created&direction=desc&per_page={size}&page={k}",
                                              gh=lambda a: gh(a, timeout=60))
         except ghcond.ReadFail as e:
             raise RuntimeError(f"open pulls page {k}: {e}")
@@ -686,10 +698,10 @@ def _build_snapshot(files):
                 files[key] = sorted({u for u in map(file_unit, pr_files(p["number"])) if u})
             recent.append({"n": p["number"], "who": who, "units": sorted(us | set(files[key])),
                            "by_file": sorted(set(files[key]) - us)})
-        if old or len(pulls) < SNAP_PAGE:
+        if old or len(pulls) < size:
             return {"t": t_build, "hdr": TL_HDR[0], "taken": tl, "recent": recent, "files": files,
-                    "rl": ghcond.STATS["remaining"]}
-    raise RuntimeError(f"more than {SNAP_MAX_PAGES} pages of open PRs since the taken list (fail closed)")
+                    "rl": ghcond.STATS["remaining"], "full": full}
+    raise RuntimeError(f"more than {maxp} pages of open PRs since the taken list (fail closed)")
 
 
 def rival_snapshot(max_age=None):

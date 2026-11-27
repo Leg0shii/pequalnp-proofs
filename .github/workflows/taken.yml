@@ -67,9 +67,12 @@ jobs:
           export GIT_AUTHOR_EMAIL=46093332+Leg0shii@users.noreply.github.com GIT_COMMITTER_EMAIL=46093332+Leg0shii@users.noreply.github.com
           export TAKEN_OUT=$W/taken.txt TAKEN_OPEN_OUT=$W/open.json TAKEN_MINUTES=$MIN
           # W6 (16.7): seed the file cache from the last published open.json, so a restart re-reads only moved heads
+          # (W6 43099ec6: one dir with the previous taken.txt and open.json; TAKEN_SEED names open.json, the list beside it)
+          mkdir -p "$W/seed"
           if timeout 60 git -C "$G" fetch -q --depth=1 https://github.com/Leg0shii/pnp-toolkit.git +refs/heads/status/taken:refs/heads/prev \
-             && git -C "$G" show prev:open.json > "$W/seed.json" 2>/dev/null && [ -s "$W/seed.json" ]; then
-            export TAKEN_SEED=$W/seed.json; echo "seed: $(wc -c < "$W/seed.json") bytes of open.json"
+             && git -C "$G" show prev:open.json > "$W/seed/open.json" 2>/dev/null && [ -s "$W/seed/open.json" ]; then
+            git -C "$G" show prev:taken.txt > "$W/seed/taken.txt" 2>/dev/null || rm -f "$W/seed/taken.txt"
+            export TAKEN_SEED=$W/seed/open.json; echo "seed: $(wc -c < "$W/seed/open.json") bytes of open.json, list $(head -1 "$W/seed/taken.txt" 2>/dev/null)"
           else
             echo "seed: none (first run or no open.json yet)"
           fi
