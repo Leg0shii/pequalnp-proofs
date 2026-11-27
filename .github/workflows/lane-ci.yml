@@ -33,6 +33,11 @@ permissions:
   contents: read
   actions: read
   pull-requests: read
+# The canary waits its turn (infra 08:23): GitHub keeps ONE waiting run per concurrency group and a new one CANCELS the
+# waiting one, so a lane PR must never wait inside the group "loadcanary" (it knocked w12's rehearsal out at 08:21).
+# Job "queue" polls until no loadcanary run and no other lane-ci canary is queued or running (up to 40 min, every
+# 20 s, run token only), and only then does the canary join the group. Queue still busy at 40 min: no canary, the line
+# says so and the lane re-runs the run.
 concurrency:                       # never the group "loadcanary" (a caller sharing a called workflow's group deadlocks)
   group: lane-ci-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
@@ -53,8 +58,39 @@ jobs:
     secrets: inherit
     with:
       ref: ${{ github.event.pull_request.head.sha || inputs.ref }}
-  canary:
+  queue:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      go: ${{ steps.wait.outputs.go }}
+      why: ${{ steps.wait.outputs.why }}
+    steps:
+      - name: Wait until no other canary is queued or running
+        id: wait
+        env:
+          GH_TOKEN: ${{ github.token }}
+          R: ${{ github.repository }}
+        shell: bash
+        run: |
+          busy() {   # prints what holds the canary queue, nothing when it is free
+            gh api "repos/$R/actions/workflows/loadcanary.yml/runs?per_page=20" \
+              --jq '.workflow_runs[] | select(.status != "completed") | "loadcanary run \(.id) \(.status)"'
+            for id in $(gh api "repos/$R/actions/workflows/lane-ci.yml/runs?per_page=20" --jq ".workflow_runs[] | select(.status != \"completed\" and .id != $GITHUB_RUN_ID) | .id"); do
+              gh api "repos/$R/actions/runs/$id/jobs" --jq '.jobs[] | select((.name | startswith("canary")) and .status != "completed") | "lane-ci run '"$id"' canary \(.status)"'
+            done
+          }
+          t0=$(date +%s)
+          while :; do
+            b=$(busy 2>&1 | head -3 | paste -sd';' -)
+            [ -z "$b" ] && { echo "queue free after $(( $(date +%s) - t0 )) s"; echo "go=true" >> "$GITHUB_OUTPUT"; exit 0; }
+            [ $(( $(date +%s) - t0 )) -ge 2400 ] && break
+            echo "$(date -u +%T) waiting: $b"; sleep 20
+          done
+          echo "go=false" >> "$GITHUB_OUTPUT"; echo "why=queue busy 40 min ($b): re-run this run" >> "$GITHUB_OUTPUT"
+  canary:
+    needs: queue
+    if: needs.queue.outputs.go == 'true'
     uses: ./.github/workflows/loadcanary.yml
     secrets: inherit
     with:
@@ -63,7 +99,7 @@ jobs:
       slots: ${{ inputs.slots }}
       warm_s: ${{ inputs.warm_s || '0' }}
   line:
-    needs: [mintdrill, nodesk, preflight-live, canary]
+    needs: [mintdrill, nodesk, preflight-live, queue, canary]
     if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 3
@@ -75,9 +111,10 @@ jobs:
           R_ND: ${{ needs.nodesk.result }}
           R_PL: ${{ needs['preflight-live'].result }}
           R_LC: ${{ needs.canary.result }}
+          Q_WHY: ${{ needs.queue.outputs.why }}
         shell: bash
         run: |
-          l="${LINE:-LANE-CI ? verdict=BAD (no canary line, canary job $R_LC)} suites mintdrill=$R_MD nodesk=$R_ND preflight-live=$R_PL canary=$R_LC"
+          l="${LINE:-LANE-CI ? verdict=BAD (no canary line, canary job $R_LC${Q_WHY:+, $Q_WHY})} suites mintdrill=$R_MD nodesk=$R_ND preflight-live=$R_PL canary=$R_LC"
           echo "$l"; echo "$l" > line.txt
           { echo '### LANE-CI (paste into team/board/<lane>.md)'; echo '```'; echo "$l"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           case "$l" in *verdict=ok*) ;; *) echo "::warning::canary verdict not ok";; esac
