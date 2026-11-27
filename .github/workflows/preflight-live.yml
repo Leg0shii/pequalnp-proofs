@@ -37,20 +37,21 @@ jobs:
           echo "RL start ${left} left, reset $(date -u -d @${reset:-0} +%H:%M) UTC"
           [ "${left:-0}" -ge 2500 ] || { echo "::error::run token left ${left} < 2500 (Lead floor): exit before any read"; exit 1; }
       - uses: actions/checkout@v4
+        id: co
         with:
           ref: ${{ inputs.ref }}
           persist-credentials: false
       - name: Static check (every secret used is listed here, no silent skip)
         run: python3 -I .github/cloud-pr/secretcheck.py static "$GITHUB_WORKSPACE" | tee static.txt
       - name: Live check (each secret exists, PR_TOKEN works)
-        if: always()
+        if: always() && steps.co.outcome == 'success'     # w12 21:2x: a floor exit skips the checkout; no 'file not found' after it
         env:
           SECRETCHECK_NAMES: PR_TOKEN,PNP_LINKEDIN
           SC_PR_TOKEN: ${{ secrets.PR_TOKEN }}
           SC_PNP_LINKEDIN: ${{ secrets.PNP_LINKEDIN || vars.PNP_LINKEDIN }}
         run: python3 -I .github/cloud-pr/secretcheck.py live | tee live.txt
       - name: Queue delay
-        if: always()
+        if: always() && steps.co.outcome == 'success'     # w12 21:2x: a floor exit skips the checkout; no 'file not found' after it
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python3 -I .github/cloud-pr/qdelay.py run | tee qd.txt

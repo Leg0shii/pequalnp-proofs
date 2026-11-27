@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """stagecanary.py (P2c, Lead 20:56 UTC 27 Nov): the opener side of gate-staged PR heads on the real runner.
 The w12 gate pushed, in ONE multi-ref push, for each unit i a ready commit stagecanary/<tag>/r<i> (ready/<mod>.lean, the
-message with "Staged-Head: <head> <parent> <time> <nonce>") and the staged head stagecanary/<tag>/h<i>. Unit 3's ready
-file differs from its head's file (a tamper case). Each unit runs through the real submit() from a cold blobless clone
+message with "Staged-Head: <head> <parent> <time> <nonce>") and the staged head stagecanary/<tag>/h<i>. A unit whose
+ready message says "Tamper: yes" has a ready file that differs from its head's file (must be refused). Each unit runs through the real submit() from a cold blobless clone
 of upstream main as drain.py makes it; push_branch raises (the staged path must never push) and create_pr is a
-recorder (no PR, nothing upstream). Units 1-2 must reach the create with the head rebuilt bit for bit; unit 3 must be
-refused. Then a fresh FULL clone of every staged head: fsck --full, one commit on an upstream base, diff = the file.
+recorder (no PR, nothing upstream). Every other unit must reach the create with the head rebuilt bit for bit (the 20-row
+replay: real lemma files under drill names). Then a fresh FULL clone of every staged head: fsck --full, one commit on an upstream base, diff = the file.
 Prints STAGECANARY lines and "STAGECANARY PASS" or "STAGECANARY FAIL: ...". Exit 0 iff PASS. Env: W, PC_TAG, PR_TOKEN."""
 import base64, json, os, re, subprocess, sys, time
 
@@ -39,7 +39,11 @@ print("PCRESULT " + json.dumps(dict(why=why, submit_s=round(time.time() - t, 3),
 '''
 
 
+SUBS = []
+
+
 def main():
+    global SUBS
     os.makedirs(W, exist_ok=True)
     base = os.path.join(W, "upstream-base")
     t = time.time()
@@ -54,8 +58,10 @@ def main():
     refs = dict((l.split()[1], l.split()[0]) for l in sh("git", *AUTH, "ls-remote", url, f"refs/heads/stagecanary/{TAG}/*").stdout.splitlines())
     print(f"STAGECANARY refs {len(refs)}", flush=True)
     rb = os.path.join(W, "ready.git"); sh("git", "init", "-q", "--bare", rb)
-    procs, bad = [], []
-    for i in (1, 2, 3):
+    procs, bad, SUBS = [], [], []
+    units = sorted(int(m.group(1)) for r in refs for m in [re.fullmatch(rf"refs/heads/stagecanary/{TAG}/r(\d+)", r)] if m)
+    tam = set()
+    for i in units:
         rr, hr = f"refs/heads/stagecanary/{TAG}/r{i}", f"refs/heads/stagecanary/{TAG}/h{i}"
         if rr not in refs or hr not in refs:
             bad.append(f"unit {i}: refs missing"); continue
@@ -71,6 +77,8 @@ def main():
         open(proof, "w").write(sh("git", "-C", rb, "show", f"refs/r{i}:{files[0]}").stdout)   # as drain.py one()
         msg = sh("git", "-C", rb, "log", "-1", "--format=%B", f"refs/r{i}").stdout
         mod = os.path.basename(files[0])[:-5]
+        if re.search(r"(?m)^Tamper: yes$", msg):
+            tam.add(i)
         env = dict(os.environ, PC_SRC=HERE, PC_HEAD=f"stagecanary/{TAG}/h{i}", ID=f"L-drill-sc-{i}", MOD=mod, PROOF=proof,
                    TREE=tree, W=wd, DRY="0", READY_MSG=msg, GITHUB_OUTPUT=os.path.join(wd, "out"))
         procs.append((i, mod, refs[hr], subprocess.Popen([sys.executable, "-c", CHILD], env=env, stdout=subprocess.PIPE,
@@ -84,14 +92,16 @@ def main():
         if not m:
             bad.append(f"unit {i}: submit crashed: " + " | ".join(out.strip().splitlines()[-3:])); continue
         r = json.loads(m.group(1))
+        if r["stg"].get("staged") is not None and i not in tam:
+            SUBS.append(r["stg"]["staged"])
         print(f"STAGECANARY unit {i} submit_s={r['submit_s']} staged_s={r['stg'].get('staged')} why={r['why'][:110]}", flush=True)
-        if i < 3 and r["why"] != "no create (stagecanary)":
+        if i not in tam and r["why"] != "no create (stagecanary)":
             bad.append(f"unit {i}: did not reach the create: {r['why'][:120]}")
-        if i == 3 and not r["why"].startswith("staged head refused: "):
-            bad.append(f"unit 3 (tampered): not refused: {r['why'][:120]}")
+        if i in tam and not r["why"].startswith("staged head refused: "):
+            bad.append(f"unit {i} (tampered): not refused: {r['why'][:120]}")
         if r["why"].startswith("PUSHED"):
             bad.append(f"unit {i}: pushed")
-        if i == 3:
+        if i in tam:
             continue
         v = os.path.join(W, f"v{i}"); tv = time.time()
         c = sh("git", *AUTH, "clone", "-q", "--no-local", "--single-branch", "--branch", f"stagecanary/{TAG}/h{i}", url, v)
@@ -112,6 +122,11 @@ def main():
         if fs.returncode: bad.append(f"unit {i}: fsck: {(fs.stdout + fs.stderr).strip()[:160]}")
         if diff != [f"lean/PEqualNP/Outside/{mod}.lean"]: bad.append(f"unit {i}: diff {diff}")
         if "Leg0shii <46093332+Leg0shii@users.noreply.github.com> | Leg0shii" not in au: bad.append(f"unit {i}: author {au}")
+    sub = sorted(x for x in SUBS)
+    if sub:
+        print(f"STAGECANARY staged_s p50={sub[len(sub) // 2]} max={sub[-1]} n={len(sub)}; units {len(units)}, tampered {len(tam)}")
+    if not units or not tam or len(units) == len(tam):
+        bad.append(f"units {len(units)}, tampered {len(tam)}: need both kinds")
     print("STAGECANARY PASS" if not bad else "STAGECANARY FAIL: " + "; ".join(bad))
     return 1 if bad else 0
 

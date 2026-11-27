@@ -2156,11 +2156,14 @@ def _staged_rebuild(gid, head, parent, ts, nonce):
             return "upbase read failed"
         if r.stdout.split()[:1] != [parent]:
             return f"parent {parent[:12]} is not an upstream base (no fork upbase ref at it)"
-    if git("cat-file", "-e", f"{parent}^{{tree}}").returncode:
+    # presence check with lazy fetching OFF: in the blobless clone a missing commit is otherwise fetched lazily with
+    # its history (20-31 s measured, stagecanary sc2112); the explicit shallow fetch takes about 0.6 s
+    nolazy = dict(os.environ, GIT_NO_LAZY_FETCH="1")
+    if git("cat-file", "-e", f"{parent}^{{tree}}", env=nolazy).returncode:
         r = git("fetch", "-q", "--depth=1", "--filter=blob:none", "origin", parent, timeout=120)
-        if r.returncode or git("cat-file", "-e", f"{parent}^{{tree}}").returncode:
+        if r.returncode or git("cat-file", "-e", f"{parent}^{{tree}}", env=nolazy).returncode:
             return f"parent {parent[:12]} not fetchable from upstream"
-    if git("cat-file", "-e", f"{parent}:{REL}").returncode == 0:
+    if git("cat-file", "-e", f"{parent}:{REL}", env=nolazy).returncode == 0:
         return "file already on the staged parent"
     blob = git("hash-object", "-w", PROOF).stdout.strip()
     try:
