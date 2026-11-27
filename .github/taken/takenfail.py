@@ -17,9 +17,13 @@ Cases (B6 clock skew, B7 consistency, B9 partial failures, B10 process death):
   T6 write-fails-once  the output write fails once (mount hiccup): the publisher keeps running, the next pass writes
   T7 killed-mid-pass   the process dies during a pass: the old file stays whole (no truncated list)
   T8 restart-backfill  after a restart (HOURS_BACK 3) an open no-id PR 5 h old is still listed by its file
+  T9 restart-3500-in-3h  R2: over the page cap, a partial list at once, caught up within 5 passes, no wedge
+  T10 null-fields      null user, head, head repo, title, body: listed, sound
+  T11 wave-5100-open   16.7: 5,100 open PRs for an hour, under 1,500 counted reads, header never over 60 s old
+  T12 seeded-restart   a restart with 500 open PRs reuses the last open.json: at most 40 counted reads
   python3 takenfail.py [SRC]  -> one line per case, then "TAKENFAIL PASS <sha>" (exit 0) or "TAKENFAIL FAIL <sha>: ..."
 """
-import importlib.util, json, os, re, subprocess, sys, tempfile, time
+import hashlib, importlib.util, json, os, random, re, subprocess, sys, tempfile, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 T0 = 1795700000.0
@@ -39,15 +43,22 @@ def load(src, out):
 
 
 class World:
-    """fake GitHub REST: PRs with state, created_at (GitHub clock), head sha, files; hooks between page reads"""
+    """fake GitHub REST: PRs with state, created_at / updated_at (GitHub clock), head sha, files; hooks between page
+    reads. Lists honour sort=created|updated and direction; GET pulls/<n>; conditional answers (cond: 304 when the
+    content is unchanged, not counted, as GitHub does). counted = reads GitHub would count against the token."""
     def __init__(self, prs):
         self.prs = prs
-        self.hook = None            # f(path, page) called after a page is served
+        self.hook = None            # f(state, page) called after a page is served
+        self.tick = None            # f(path) called before every request (time passes, the world moves)
         self.files_fail = {}        # number -> message (always fails)
         self.reads = 0
+        self.counted = 0
+        self.by_n = None
 
     def __call__(self, path):
         self.reads += 1
+        if self.tick:
+            self.tick(path)
         m = re.search(r"pulls/(\d+)/files", path)
         if m:
             n = int(m.group(1))
@@ -55,19 +66,41 @@ class World:
                 raise TP.ReadFail(self.files_fail[n])
             p = next(x for x in self.prs if x["number"] == n)
             return [{"filename": f} for f in p["files"]]
+        m = re.fullmatch(r"repos/[^/]+/[^/]+/pulls/(\d+)", path)
+        if m:
+            p = next((x for x in self.prs if x["number"] == int(m.group(1))), None)
+            if p is None:
+                raise TP.ReadFail("http=404")
+            return {k: v for k, v in p.items() if k != "files"}
         st = re.search(r"state=(\w+)", path).group(1)
         pg = int(re.search(r"[?&]page=(\d+)", path).group(1))
+        sort = (re.search(r"sort=(\w+)", path) or [0, "created"])[1]
+        asc = "direction=asc" in path
+        k = "updated_at" if sort == "updated" else "created_at"
         rows = sorted([x for x in self.prs if st == "all" or x["state"] == st],
-                      key=lambda x: (x.get("created_at") or "", x["number"]), reverse=True)
+                      key=lambda x: (x.get(k) or x.get("created_at") or "", x["number"]), reverse=not asc)
         out = [{k: v for k, v in x.items() if k != "files"} for x in rows[(pg - 1) * 100:pg * 100]]
         if self.hook:
             self.hook(st, pg)
         return out
 
+    def cond(self, path, etag):
+        self.cond_used = True
+        rows = self(path)
+        tag = hashlib.sha1(json.dumps(rows, sort_keys=True).encode()).hexdigest()
+        if etag == tag:
+            return 304, None, tag
+        self.counted += 1
+        return 200, rows, tag
+
+    def count(self):
+        """reads GitHub counts: every request of a publisher without conditional requests, else the non-304 ones"""
+        return self.counted if getattr(self, "cond_used", False) else self.reads
+
 
 def pr(n, created, files=(), title=None, who="rival1", state="open", sha="s0", ref="patch-1"):
     p = {"number": n, "title": title or "Batch of proofs %d" % n, "user": {"login": who}, "head": {"ref": ref, "sha": sha},
-         "state": state, "created_at": iso(created), "files": list(files)}
+         "state": state, "created_at": iso(created), "updated_at": iso(created), "body": None, "files": list(files)}
     return p
 
 
@@ -79,6 +112,20 @@ def parse(txt):
     lines = txt.splitlines()
     h = lines[0].split()
     return int(h[2]), {l.split()[0]: l.split() for l in lines[1:]}
+
+
+def named(txt):
+    """PR numbers the header names as skipped (data incomplete)"""
+    m = re.search(r"\bskipped ([\d,]+)", txt.splitlines()[0])
+    return {int(x) for x in m.group(1).split(",") if x} if m else set()
+
+
+def step(m, st):
+    """one publisher pass as main() runs it: the pass, then the sweep when the publisher has one after publishing"""
+    t = m.one_pass(st)
+    if hasattr(m, "sweep_pass"):
+        m.sweep_pass(st)
+    return t
 
 
 def unsound(txt, world, unit_of):
@@ -100,6 +147,7 @@ def unsound(txt, world, unit_of):
 
 def clock(m, gh_t, skew=0.0):
     m.time.time = lambda: gh_t[0] + skew
+    m.FAKE_DATE = lambda: gh_t[0]                     # GitHub's Date header (a publisher that ignores it uses its clock)
 
 
 TP = None
@@ -114,6 +162,7 @@ def case_T1(src, d):
     st = m.State(3 * 3600)
     t1 = m.one_pass(st)
     p = w.prs[0]; p["files"].append(fpath("L-meta-95002")); p["head"]["sha"] = "b"   # rival pushes one more file
+    p["updated_at"] = iso(T0 + 10)
     g[0] = T0 + 18
     t2 = m.one_pass(st)
     bad = unsound(t2, w, m.unit_of_file) if t2 else ["no list"]
@@ -129,15 +178,21 @@ def case_T2(src, d):
     st = m.State(3 * 3600)
     m.one_pass(st)
     newest_first = sorted(prs, key=lambda x: x["created_at"], reverse=True)
-    victim = newest_first[40]                        # on page 1 of the open list
+    oldest_first = newest_first[::-1]
+    victims = [newest_first[40], oldest_first[40]]   # on page 1 of the open list, either order
 
     def hook(stt, pg):
-        if stt == "open" and pg == 1 and victim["state"] == "open":
-            victim["state"] = "closed"               # closed (not merged) between the page reads
+        if stt == "open" and pg == 1:
+            for v in victims:
+                if v["state"] == "open":
+                    v["state"] = "closed"            # closed (not merged) between the page reads
+                    v["updated_at"] = iso(g[0])
     w.hook = hook
-    g[0] = T0 + 61                                   # the next full open scan
-    t2 = m.one_pass(st)
+    g[0] = T0 + 301                                  # the next full open scan (60 s or 300 s)
+    t2 = step(m, st)
     w.hook = None
+    g[0] = T0 + 319
+    t2 = m.one_pass(st) if hasattr(m, "sweep_pass") else t2
     bad = unsound(t2, w, m.unit_of_file) if t2 else ["no list"]
     return bad, f"reads={w.reads}"
 
@@ -174,7 +229,13 @@ def case_poison(src, d, kind):
     if all(x is None for x in got):
         return ["3 passes, no list: one PR stops the list (and all filing) for every unit"], f"reads={w.reads}"
     t = [x for x in got if x][-1]
-    return unsound(t, w, m.unit_of_file), f"reads={w.reads}"
+    bad = [x for x in unsound(t, w, m.unit_of_file) if "#801" not in x or 801 not in named(t)]
+    _, rows = parse(t)
+    if "L-meta-98002" not in rows and 801 not in named(t):
+        bad.append("#801 neither listed nor named in the header")
+    if "L-meta-98001" not in rows:
+        bad.append("L-meta-98001 of the good PR #800 missing")
+    return bad, f"reads={w.reads} header: {t.splitlines()[0][:90]}"
 
 
 def run_main(m, g, passes):
@@ -264,10 +325,160 @@ def case_T8(src, d):
     return bad, f"reads={w.reads}"
 
 
+def case_T9(src, d):
+    """R2: restart with 3,500 PRs in 3 h (35+ pages by creation): a list is published at once, marked partial, and the
+    later passes catch up to every unit without a wedge"""
+    m = load(src, os.path.join(d, "t.txt")); globals()["TP"] = m
+    g = [T0]; clock(m, g)
+    prs = [pr(30000 + i, T0 - 10500 + 3 * i, title="Prove L-meta-%d" % (110000 + i), state="closed") for i in range(3500)]
+    prs += [pr(40000 + i, T0 - 10400 + 500 * i, [fpath("L-meta-%d" % (120000 + i))]) for i in range(20)]
+    w = World(prs)
+    m.FAKE = w
+    st = m.State(3 * 3600)
+    t1 = m.one_pass(st)
+    if t1 is None:
+        return ["restart pass gave no list (wedged: over the page cap, every reader stops)"], f"reads={w.reads}"
+    bad = []
+    if " partial " not in t1.splitlines()[0] + " ":
+        _, r1 = parse(t1)
+        if any("L-meta-%d" % (110000 + i) not in r1 for i in range(3500)):
+            bad.append("incomplete first list not marked partial")
+    bad += unsound(t1, w, m.unit_of_file)
+    t = t1
+    for k in range(1, 6):
+        g[0] = T0 + 18 * k
+        t = m.one_pass(st) or t
+        if "partial" not in t.splitlines()[0]:
+            break
+    _, rows = parse(t)
+    miss = [i for i in range(3500) if "L-meta-%d" % (110000 + i) not in rows]
+    if "partial" in t.splitlines()[0]:
+        bad.append("still partial after 5 passes")
+    if miss:
+        bad.append(f"{len(miss)} closed units missing after catch-up")
+    return bad, f"passes={k + 1} reads={w.reads} first header: {t1.splitlines()[0][:70]}"
+
+
+def case_T10(src, d):
+    """null fields GitHub really sends (deleted user, deleted fork head repo, null body/title, null file name)"""
+    m = load(src, os.path.join(d, "t.txt")); globals()["TP"] = m
+    g = [T0]; clock(m, g)
+    a = pr(1100, T0 - 400, [fpath("L-meta-99401")]); a.update(user=None, head=None, title=None)
+    b = pr(1101, T0 - 300, [fpath("L-meta-99403")], title="Prove L-meta-99402"); b.update(user={"login": None},
+                                                                                        head={"ref": None, "sha": None, "repo": None})
+    w = World([a, b])
+    m.FAKE = w
+    st = m.State(3 * 3600)
+    t = m.one_pass(st)
+    if t is None:
+        return ["no list"], ""
+    _, rows = parse(t)
+    bad = unsound(t, w, m.unit_of_file) + [u + " missing" for u in ("L-meta-99402",) if u not in rows]
+    return bad, "null user/head/title/body"
+
+
+class Stop(BaseException):
+    pass
+
+
+def case_T11(src, d):
+    """16.7 wave: 5,100 open PRs for one hour, a new rival PR every 10 s, a merge every 30 s, 0.25 s per request.
+    takenpub alone stays under 1,500 counted reads in the hour (the closer and the openers read its files), and the
+    published header is never more than 60 s old"""
+    out = os.path.join(d, "t.txt")
+    m = load(src, out); globals()["TP"] = m
+    g = [T0]; clock(m, g)
+    rnd = random.Random(11)
+    prs = [pr(10000 + i, T0 - 36000 + 7 * i, [fpath("L-meta-%d" % (200000 + i))]) for i in range(5100)]
+    w = World(prs)
+    m.FAKE = w
+    S = {"live": False, "new": 0, "merge": 0, "n": 20000, "c0": 0, "t0": 0, "w": []}
+
+    def tick(path):
+        if not S["live"]:
+            if g[0] > T0 + 1800:                     # no list after 30 min of retries: wedged
+                raise Stop()
+            return
+        g[0] += 0.25
+        if g[0] > S["t0"] + 3600 + 600:
+            raise Stop()
+        while g[0] >= S["new"]:
+            S["n"] += 1
+            w.prs.append(pr(S["n"], S["new"], [fpath("L-meta-%d" % (300000 + S["n"]))], who="rival9"))
+            S["new"] += 10
+        while g[0] >= S["merge"]:
+            v = rnd.choice([x for x in w.prs if x["state"] == "open"])
+            v["state"], v["updated_at"] = "closed", iso(S["merge"])
+            S["merge"] += 30
+    w.tick = tick
+    real_write = m.write
+
+    def wr(txt):
+        real_write(txt)
+        if not S["live"]:                            # the hour starts once the first list is out (warm publisher)
+            S.update(live=True, t0=g[0], new=g[0] + 10, merge=g[0] + 30, c0=w.count())
+            m.END = g[0] + 3600
+        S["w"].append((g[0], int(txt.split()[2])))
+    m.write = wr
+    e = run_main(m, g, 0)
+    if not S["live"]:
+        return [f"no list in the backfill ({type(e).__name__ if e else 'ended'}): every reader stops"], f"reads={w.reads}"
+    used = w.count() - S["c0"]
+    ws = S["w"]
+    age = max([b[0] - a[1] for a, b in zip(ws, ws[1:])] + [g[0] - ws[-1][1]])
+    bad = []
+    if used > 1500:
+        bad.append(f"{used} counted reads in the hour (budget 1,500 for takenpub)")
+    if age > 60:
+        bad.append(f"header {age:.0f} s old at worst (limit 60)")
+    if isinstance(e, Exception):
+        bad.append(f"died: {type(e).__name__}: {str(e)[:50]}")
+    last = open(out).read()
+    bad += unsound(last, w, m.unit_of_file)[:3]
+    return bad, f"counted={used} requests={w.reads} lists={len(ws)} worst_age={age:.0f}s"
+
+
+def case_T12(src, d):
+    """restart (the job chain restarts every 58 min) with 500 open PRs: the new process reuses the file units of
+    unchanged heads from the last open.json (TAKEN_SEED) instead of 500 file reads"""
+    out = os.path.join(d, "t.txt")
+    m = load(src, out); globals()["TP"] = m
+    g = [T0]; clock(m, g)
+    w = World([pr(50000 + i, T0 - 20000 + 30 * i, [fpath("L-meta-%d" % (130000 + i))], sha="h%d" % i) for i in range(500)])
+    m.FAKE = w
+    st = m.State(3 * 3600)
+    t = m.one_pass(st)
+    if t is None:
+        return ["no first list"], ""
+    if hasattr(m, "publish"):
+        m.publish(st, t)
+    else:
+        m.write(t)
+    os.environ["TAKEN_SEED"] = os.path.join(d, "open.json")
+    try:
+        m2 = load(src, out); globals()["TP"] = m2
+    finally:
+        os.environ.pop("TAKEN_SEED", None)
+    clock(m2, g)
+    g[0] = T0 + 60
+    w2 = World(w.prs)
+    m2.FAKE = w2
+    t2 = m2.one_pass(m2.State(3 * 3600))
+    if t2 is None:
+        return ["no list after the restart"], ""
+    used = w2.count()
+    bad = unsound(t2, w2, m2.unit_of_file)[:3]
+    if used > 40:
+        bad.append(f"restart cost {used} counted reads (file units re-read, budget 40)")
+    return bad, f"restart counted={used}"
+
+
 CASES = [("T1-head-moved", case_T1), ("T2-page-shift", case_T2), ("T3-clock-ahead", case_T3),
          ("T4-poison-files", lambda s, d: case_poison(s, d, "files")),
          ("T5-poison-created", lambda s, d: case_poison(s, d, "created")),
-         ("T6-write-fails-once", case_T6), ("T7-killed-mid-pass", case_T7), ("T8-restart-backfill", case_T8)]
+         ("T6-write-fails-once", case_T6), ("T7-killed-mid-pass", case_T7), ("T8-restart-backfill", case_T8),
+         ("T9-restart-3500-in-3h", case_T9), ("T10-null-fields", case_T10), ("T11-wave-5100-open", case_T11),
+         ("T12-seeded-restart", case_T12)]
 
 
 def main():
