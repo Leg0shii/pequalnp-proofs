@@ -25,6 +25,7 @@ from concurrent.futures import ThreadPoolExecutor
 REAL_SLEEP = time.sleep      # 16.14 refresher heartbeat thread (tests patch time.sleep)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # drain runs submit.py with -I (no script dir on the path)
 import ghcond, haltrule                                              # RC-b: 16.7 conditional reads, 16.1 halt rule
+import treebuild                                                     # lane tree (W7): the unit's tree along one path
 
 UP = "open-goat/pequalnp-proofs"
 GAPS = "https://data.pequalnp.com/data/desk/gaps.json"
@@ -1278,8 +1279,10 @@ def submit(gid, lease):
     # Lead 06:12 (W6 mintfail): the head branch Leg0shii:<ID> is created once with a create-only push and never
     # forced. If it exists: our open PR on it = done; our closed PR on it = stop (nothing reopens, I5); neither = the
     # earlier run died between push and create: open the PR from the existing commit.
+    t_hd = time.time()
     try:
         head = fork_head(gid)
+        STG["head"] = round(time.time() - t_hd, 3)
         if head:
             op = our_prs_on_branch(gid, "open")
             if op:
@@ -1291,29 +1294,50 @@ def submit(gid, lease):
     except RuntimeError as e:
         return None, "head check failed (fail closed): " + str(e)[:120]
     t_cm = time.time()
+    t = time.time()
     base = git("rev-parse", "HEAD").stdout.strip()
+    STG["g_revparse"] = round(time.time() - t, 3)
     if not base:
         return None, "no upstream main"
+    t = time.time()
     if git("cat-file", "-e", f"{base}:{REL}").returncode == 0:
         return None, "file already in upstream main"
-    idx = os.path.join(W, "submit.idx")
-    env = dict(os.environ, GIT_INDEX_FILE=idx)
+    STG["g_catfile"] = round(time.time() - t, 3)
+    t = time.time()
     blob = git("hash-object", "-w", PROOF).stdout.strip()
-    if git("read-tree", base, env=env).returncode:
-        return None, "read-tree failed"
-    git("update-index", "--add", "--cacheinfo", f"100644,{blob},{REL}", env=env)
-    tree = git("write-tree", env=env).stdout.strip()
+    STG["g_hashobj"] = round(time.time() - t, 3)
+    # lane tree (W7, 08:20 UTC 27 Nov): no index. The base tree's sub-trees along REL are read with ls-tree and the new
+    # trees written bottom-up with mktree --missing (treebuild.py); the same tree sha as read-tree/update-index/write-tree
+    # (treebuild_test.py). Was: read-tree of the whole upstream tree per unit, 59.5 s p50 at w28.
+    t = time.time()
+    try:
+        tree = treebuild.tree_with_file(TREE, base, REL, blob)
+        STG["tree_src"] = "mktree"
+    except Exception as e:                   # never blocks a unit: the old index path, logged
+        log("treebuild failed, index path:", str(e)[:120])
+        idx = os.path.join(W, "submit.idx")
+        env = dict(os.environ, GIT_INDEX_FILE=idx)
+        if git("read-tree", base, env=env).returncode:
+            return None, "read-tree failed"
+        git("update-index", "--add", "--cacheinfo", f"100644,{blob},{REL}", env=env)
+        tree = git("write-tree", env=env).stdout.strip()
+        STG["tree_src"] = "index"
+    STG["tree"] = round(time.time() - t, 3)
+    t = time.time()
     changed = git("diff-tree", "--name-only", "-r", base, tree).stdout.split()
+    STG["g_difftree"] = round(time.time() - t, 3)
     if changed != [REL]:
         return None, f"unexpected changed files {changed}"
     # rule 16.5 (2): a per-opener nonce, so two openers never build the same sha
     msg = gid + f"\n\nOpener-Nonce: cloud-{os.environ.get('GITHUB_RUN_ID', 'x')}-{os.urandom(6).hex()}" \
         "\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\n"
     cenv = dict(os.environ, GIT_AUTHOR_NAME=HANDLE, GIT_COMMITTER_NAME=HANDLE, GIT_AUTHOR_EMAIL=EMAIL, GIT_COMMITTER_EMAIL=EMAIL)
+    t = time.time()
     c = git("commit-tree", tree, "-p", base, "-m", msg, env=cenv).stdout.strip()
+    STG["g_committree"] = round(time.time() - t, 3)
     if not c:
         return None, "commit-tree failed"
-    STG["commit"] = round(time.time() - t_cm, 1)
+    STG["commit"] = round(time.time() - t_cm, 3)     # whole stage, rev-parse to commit-tree (same span as before)
     if DRY:
         tw = time.time()                 # rehearsal (Lead 08:12): the would-create time per unit, epoch to 0.001 s
         log(f"WOULD-CREATE {gid} {tw:.3f}"); log(sight_line(gid, tw))
@@ -1561,6 +1585,7 @@ T_START = time.time()
 def main():
     t0 = time.time()
     h, hwhy = filing_halted()             # Lead 05:10: before anything else (no guards, no desk, no PR); branch kept
+    STG["halt1"] = round(time.time() - t0, 3)              # lane tree: guards split (halt1, prlookup, gaps, checkcore)
     if h:
         log("halted:", ID, hwhy)
         finish("halted", hwhy)
@@ -1572,10 +1597,12 @@ def main():
         finish("formatfail", f"file is {os.path.getsize(PROOF)} bytes, over the CI limit {SIZE_LIMIT}")
     if not DRY and not PR_TOKEN:
         finish("skipped", "no PR_TOKEN secret: the PC watcher takes this file from pnp-toolkit ready/ instead")
+    t_pl = time.time()
     try:
         url = open_pr_for_branch(ID)
     except Exception as e:
         finish("error", f"PR lookup failed: {e}")
+    STG["prlookup"] = round(time.time() - t_pl, 3)
     if url and DRY:
         log("dry run: our PR is already open, testing the rest anyway:", url)
     elif url:
@@ -1596,6 +1623,7 @@ def main():
     # its ready/ branch was deleted, so the ready-wait path never ran. Unlisted: guards in prestage mode (no gap guard,
     # the file's own imports), then keep the branch; ready-wait.yml dispatches this job again at listing.
     unlisted = False
+    t_gj = time.time()
     try:
         gj0 = gaps_json()
         env["GAPS_FILE"] = os.path.join(os.environ.get("RIVAL_SNAP_DIR") or os.environ.get("PR_GATE_DIR") or W, "gaps.json")
@@ -1614,12 +1642,15 @@ def main():
                        f"held by {hn} other agent(s) at the desk and no lease of ours: no new PR (Lead 14:22)")
     except Exception as e:
         log("gaps.json read failed, full guards:", repr(e)[:120])
+    STG["gaps"] = round(time.time() - t_gj, 3)
     if unlisted:
         imps = re.findall(r"^import\s+(\S+)", open(PROOF, errors="replace").read(), re.M) or ["PEqualNP.Defs"]
         env["PRESTAGE_IMPORTS"] = json.dumps(imps)
         log("not listed yet: prestage guards (imports", imps, ")")
+    t_cc = time.time()
     r = run(["bash", os.path.join(os.path.dirname(os.path.abspath(__file__)), "checkcore.sh"), PROOF, ID, TREE,
              os.path.join(W, "guard"), "--quick"], env=env, timeout=600)
+    STG["checkcore"] = round(time.time() - t_cc, 3)
     print(r.stdout[-3000:], r.stderr[-2000:], sep="\n", flush=True)
     git("clean", "-q", "-f", "--", "lean/PEqualNP/Outside/")          # the closure guard copied the file in
     if r.returncode:
@@ -1656,7 +1687,9 @@ def main():
     if late:
         lease = None
     LEASE[0] = lease
+    t_h2 = time.time()
     h, hwhy = filing_halted()             # Lead 05:10: again right before the PR (a stop may have come meanwhile)
+    STG["halt2"] = round(time.time() - t_h2, 3)
     if h and not DRY:
         free_slot()
         log("halted:", ID, hwhy, "(before the PR)")
