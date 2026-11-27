@@ -19,8 +19,9 @@ subprocess.run(["git", "-C", up, "update-ref", "refs/heads/main", head], check=T
 subprocess.run(["git", "-C", up, "symbolic-ref", "HEAD", "refs/heads/main"], check=True)
 for k, v in (("uploadpack.allowFilter", "true"), ("uploadpack.allowAnySHA1InWant", "true")):
     subprocess.run(["git", "-C", up, "config", k, v], check=True)
-MOVE_S, N, DUR = 1.0, 30, 20.0
-os.environ.update(SRC=d, W=os.path.join(d, "w"), DRAIN_UPSTREAM="file://" + up, DRAIN_BASE_FETCH_S="0.5", DRAIN_BASE_MAX_S="60")
+MOVE_S, N, DUR, ADOPT_S = 1.0, 30, 20.0, 5.0
+os.environ.update(SRC=d, W=os.path.join(d, "w"), DRAIN_UPSTREAM="file://" + up, DRAIN_BASE_FETCH_S="0.5", DRAIN_BASE_MAX_S="60",
+                  DRAIN_BASE_ADOPT_S=str(ADOPT_S))
 os.makedirs(os.environ["W"])
 sys.path.insert(0, here)
 sys.argv = ["drain.py"]
@@ -50,8 +51,11 @@ if fails or len(out) != N:
     bad.append(f"{len(fails)} failed of {len(out)}: {fails[:2]}")
 if D._BASE["clones"] != 1:
     bad.append(f"clones {D._BASE['clones']}")
-if D._BASE["moves"] < 5 or D._BASE["fetches"] < 5:
-    bad.append(f"refresher fetches {D._BASE['fetches']} moves {D._BASE['moves']}")
+if D._BASE["seen"] < 10 or D._BASE["fetches"] < 10:
+    bad.append(f"refresher fetches {D._BASE['fetches']} main moves seen {D._BASE['seen']}")
+if not 2 <= D._BASE["moves"] <= DUR / ADOPT_S + 2:      # Lead 09:59: a new base for the copies at most every ADOPT_S
+    bad.append(f"bases adopted {D._BASE['moves']} in {DUR:.0f} s (adopt every {ADOPT_S:.0f} s at most)")
+
 # age of each copy: the copied sha was main at some time; the NEXT move after it is when it stopped being main
 order = sorted(moves.items(), key=lambda kv: kv[1])
 def superseded(sha):
@@ -66,10 +70,13 @@ for i, why, sha, t, mt in out:
         if sup == "unknown":
             bad.append(f"unit {i} copied {sha}, never main"); continue
         lags.append(0.0 if sup is None or sup > t else t - sup)
-if lags and max(lags) > 60:
-    bad.append(f"a copy {max(lags):.1f} s behind main")
+nbj = __import__("json").load(open(os.path.join(os.environ["W"], "upbase.json")))
+if nbj["sha"][:12] not in [x for x, _ in order[-3:]]:     # the path check reads the NEWEST sha, not the adopted one
+    bad.append(f"upbase.json newest {nbj['sha'][:12]} is not among the last 3 moves of main")
+if lags and max(lags) > ADOPT_S + 2:
+    bad.append(f"a copy {max(lags):.1f} s behind main (adopt {ADOPT_S:.0f} s + fetch)")
 print(f"units {len(out)}, failed {len(fails)}, clones {D._BASE['clones']}, copies redone {D._BASE.get('copy_retry', 0)}, fetches {D._BASE['fetches']}, moves seen "
-      f"{D._BASE['moves']} of {len(moves) - 1}, copy lag behind main p50 {sorted(lags)[len(lags) // 2]:.2f} s max {max(lags):.2f} s")
+      f"{D._BASE['seen']} of {len(moves) - 1}, bases adopted {D._BASE['moves']}, copy lag behind main p50 {sorted(lags)[len(lags) // 2]:.2f} s max {max(lags):.2f} s")
 # stuck refresher: base 61 s old -> one inline fetch, unit gets the newest
 D.BASE_FETCH_S = D.BASE_IDLE_S = 3600; time.sleep(1.5)        # the refresher thread now sleeps for an hour (stuck)
 D._BASE["t"] -= 61; n0 = D._BASE["fetches"]

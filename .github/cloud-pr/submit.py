@@ -1310,6 +1310,19 @@ def upbase_ref(base):
             r = run(["git"] + auth_cfg() + ["ls-remote", url, f"refs/heads/{name}"], timeout=15)
             have = r.returncode == 0 and r.stdout.split()[:1] == [base]
             if not have:
+                # Lead 09:59: the ref create is a content-creating call like a PR create: it takes a token from the
+                # drain's create bucket (bucket_wait: 60 a minute shared with the creates, stalls and giveup included)
+                d, t_bw = os.environ.get("PR_GATE_DIR"), time.time()
+                while d:
+                    w = bucket_wait(d, time.time())
+                    if w == float("inf"):
+                        log("upbase: creates given up in this drain: no ref create (fork-tip base for this unit)")
+                        return None
+                    if w <= 0:
+                        break
+                    time.sleep(min(w, 5))
+                if d and time.time() - t_bw > 0.5:
+                    STG["upbase_wait"] = round(time.time() - t_bw, 1)
                 r = run(["gh", "api", "-X", "POST", f"repos/{FORK}/git/refs", "-f", f"ref=refs/heads/{name}", "-f", f"sha={base}"],
                         timeout=15, env=dict(os.environ, GH_TOKEN=PR_TOKEN))
                 have = r.returncode == 0 or "Reference already exists" in (r.stdout + r.stderr)

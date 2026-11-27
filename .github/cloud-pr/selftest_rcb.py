@@ -683,6 +683,37 @@ if hasattr(S, "RIVAL_GONE_S"):
 else:
     case("09:40-gone-rival-held-60s", False, "(no RIVAL_GONE_S in this submit.py)")
 
+# ---- Lead 09:59 (lane movingmain): the upbase/<base8> REST ref create takes a token from the create bucket
+if hasattr(S, "upbase_ref"):
+    S.time.time = lambda: CLK[0]
+    S.time.sleep = lambda s: CLK.__setitem__(0, CLK[0] + s)
+    UG = tempfile.mkdtemp(); svg = os.environ.get("PR_GATE_DIR"); os.environ["PR_GATE_DIR"] = UG
+    sv = (S.run, S.log); posts = []
+    def urun(cmd, timeout=300, env=None, cwd=None):
+        if cmd[0] == "gh" and "POST" in cmd:
+            posts.append(CLK[0]); return cp("{}", 0)
+        return cp("", 0)                              # ls-remote: no ref at the base yet
+    S.run = urun; S.log = lambda *a: None
+    try:
+        rate = S.gate_rate(UG)
+        t0u = CLK[0]
+        open(os.path.join(UG, "creates.log"), "w").write("\n".join(f"{t0u - 30 + i * 0.01:.3f}" for i in range(rate)))
+        n = S.upbase_ref("ab" * 20)
+        nlog = len(open(os.path.join(UG, "creates.log")).read().split())
+        case("09:59-upbase-create-takes-a-bucket-token", n == "upbase/abababab" and len(posts) == 1 and posts[0] - t0u >= 29.9
+             and nlog == rate + 1, f"(ref {n}, POST {posts[0] - t0u if posts else None} s after a full minute bucket, creates.log {nlog} of {rate}+1)")
+        posts.clear(); open(os.path.join(UG, "giveup"), "w").write("x")
+        n2 = S.upbase_ref("cd" * 20)
+        case("09:59-upbase-no-create-after-giveup", n2 is None and not posts, f"(ref {n2}, posts {len(posts)})")
+    finally:
+        S.run, S.log = sv
+        if svg is None:
+            os.environ.pop("PR_GATE_DIR", None)
+        else:
+            os.environ["PR_GATE_DIR"] = svg
+else:
+    case("09:59-upbase-create-takes-a-bucket-token", False, "(no upbase_ref)")
+
 bad = [n for n, ok in res if not ok]
 print(f"RCB SELFTEST OK {len(res)}" if not bad else "RCB SELFTEST FAIL " + " ".join(bad))
 sys.exit(1 if bad else 0)
