@@ -384,7 +384,8 @@ def child_close(src, w):
         if a[0] == "git" and "fetch" in a and "status/taken" in s and "open_json" in w and "taken_hdr_age" not in w:
             return subprocess.CompletedProcess(a, 0, "", "")
         if a[0] == "git" and "show" in a and "status/taken" in s and "taken_hdr_age" in w:
-            return subprocess.CompletedProcess(a, 0, f"# updated {int(clock[0] - w['taken_hdr_age'])} 05:00:00 steps 0\n", "")
+            tail = {"complete": " complete 0 rl 5000 0", "partial": " partial %d rl 5000 0" % int(clock[0] - 50), "old": ""}[w.get("taken_hdr_state", "complete")]
+            return subprocess.CompletedProcess(a, 0, f"# updated {int(clock[0] - w['taken_hdr_age'])} 05:00:00 steps 0{tail}\n", "")
         if a[0] == "git" and "ls-remote" in a and PASS[0] in w.get("tk_lsremote_fail_passes", []):
             return subprocess.CompletedProcess(a, 128, "", "fatal: unable to access")   # 16.8 S1: toolkit refs unreadable
         if a[0] == "git" and "ls-remote" in a:                  # fixture refs ("ref" or {"ref", "msg"}) + what was pushed
@@ -435,6 +436,8 @@ def child_close(src, w):
             out["deaths"] += 1; dead = True
         except Exception as e:
             out["unexpected"].append("one_pass: " + repr(e)[:120])
+    if "taken_hdr_age" in w:
+        out["taken_ok"] = D.taken() is not None
     out["caches"] = {k: len(getattr(D, k)) for k in ("CMT", "CLOSER", "MERGED", "MSGS", "HALTED", "CLOSED") if hasattr(D, k)}
     out["closed_at"] = {}
     import haltrule                        # Lead 16.1: the drill judges with the one rule (tie halted, odd names halted)
@@ -538,7 +541,7 @@ def body_bad(prs, ex):
     return bad
 
 
-def judge_close(name, w, r, must_close, must_keep=(), must_push=None, no_push=False, max_reads=None, go_count=None, last_stop=None, halted=None, stop_count=None, cache_max=None, self_halted=None, must_delete=None, keep_branch=(), push_count=None, max_open_reads=None, max_reads_all=None):
+def judge_close(name, w, r, must_close, must_keep=(), must_push=None, no_push=False, max_reads=None, go_count=None, last_stop=None, halted=None, stop_count=None, cache_max=None, self_halted=None, must_delete=None, keep_branch=(), push_count=None, max_open_reads=None, max_reads_all=None, taken_ok=None):
     if r.get("crash"):
         return False, "crash " + " | ".join(r["crash"])
     bad = []
@@ -564,6 +567,8 @@ def judge_close(name, w, r, must_close, must_keep=(), must_push=None, no_push=Fa
             bad.append(f"caches over cap {big}")
     if halted is not None and r.get("halted") != halted:
         bad.append("filing " + ("NOT halted" if halted else "still halted") + " at the end")
+    if taken_ok is not None and r.get("taken_ok") != taken_ok:
+        bad.append(f"taken() {'gave no list' if taken_ok else 'trusted a list it must not'}")
     if max_open_reads is not None and r.get("open_reads", 0) > max_open_reads:
         bad.append(f"{r.get('open_reads', 0)} open-list page reads (cap {max_open_reads})")
     if max_reads_all is not None:
@@ -827,6 +832,10 @@ def cases():
     out.append(("hostile/OL5", "close", {"open_pulls": [r55] + w51[:150] + [o55], "closed_pulls": five, "passes": [0, 20, 40],
                                          "open_json": {"age": 15}, "taken_map": {"L-meta-91999": (61000, "rival1")}},
                 {"must_close": [61001], "no_push": True, "push_count": {"refs/heads/alert/openliststale-": 0}}))
+    # W6 43099ec6 / Lead ruling A3: the closer trusts taken.txt alone only when header h[6] == "complete"
+    for nm, hs, ok_ in (("TK1", "complete", True), ("TK2", "partial", False), ("TK3", "old", False)):
+        out.append(("hostile/" + nm, "close", {"closed_pulls": five, "taken_hdr_age": 10, "taken_hdr_state": hs, "passes": [0, 20]},
+                    {"must_close": [], "no_push": True, "taken_ok": ok_}))
     # B9 partial failures. B9a: gh pr close times out AFTER the close happened (our own duplicate, CI comment) -> no halt
     d1, d2 = our_pr(50300, "L-meta-93300", created=-200), our_pr(50301, "L-meta-93300", created=-100)
     d2["comments"] = [{"body": "CI: build started", "user": {"login": "ci-bot"}, "created_at": iso(T0 - 50)}]

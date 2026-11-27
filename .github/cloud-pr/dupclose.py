@@ -287,6 +287,11 @@ def taken():
         taken_stale(TKST["age"])
     if TKST["age"] is None or TKST["age"] > 180:
         return None
+    h = t[0].split()                                  # W6 43099ec6 (Lead ruling A3): trust the list alone only when
+    if len(h) <= 7 or h[6] != "complete":             # h[6] == "complete"; partial or an old header -> no list
+        TKST["partial"] = True
+        return None
+    TKST["partial"] = False
     out = {}
     for l in t[1:]:
         p = l.split()
@@ -499,7 +504,7 @@ def heartbeat(n, d, fresh):
     # 19:50: PR_TOKEN (Leg0shii, shared with PR creation and the PC) hit 0; rate_limit calls are free
     rlp = sh("gh", "api", "rate_limit", "--jq", r'"\(.resources.core.remaining)/\(.resources.core.reset)"', env=ghenv(), timeout=30).stdout.strip() or "?"
     msg = (f"dupclose {int(time.time())} open={n} dups={d} closed={len(CLOSED)} taken={'fresh' if fresh else 'stale'} "
-           f"{SPLIT['txt']} br={BR['deleted']}/{len(BR['cand'])}/{BR['kept']} badref={BADREF.get('n', '-')} taken_age={'-' if TKST['age'] is None else int(TKST['age'])} pages={OPEN.get('pages', '-')} openlist={OPEN.get('src', '-')} rej10={REJ.get('n', '-')} rl={rl} rl_pr={rlp} tok={'read' if os.environ.get('READ_TOKEN') else 'pr'} "
+           f"{SPLIT['txt']} br={BR['deleted']}/{len(BR['cand'])}/{BR['kept']} badref={BADREF.get('n', '-')} taken_age={'-' if TKST['age'] is None else int(TKST['age'])}{'p' if TKST.get('partial') else ''} pages={OPEN.get('pages', '-')} openlist={OPEN.get('src', '-')} rej10={REJ.get('n', '-')} rl={rl} rl_pr={rlp} tok={'read' if os.environ.get('READ_TOKEN') else 'pr'} "
            f"run={os.environ.get('GITHUB_RUN_ID', '-')}")
     c = subprocess.run(["git", "-C", g, "commit-tree", tree, "-m", msg], capture_output=True, text=True, env=env).stdout.strip()
     sh("git", *auth(), "-C", g, "push", "-q", "-f", TK, f"{c}:refs/heads/status/dupclose", timeout=60)
