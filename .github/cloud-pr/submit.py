@@ -171,7 +171,7 @@ def gaps_json():
     with open(os.path.join(d, "gaps.lock"), "w") as lk:
         fcntl.flock(lk, fcntl.LOCK_EX)
         s1 = stamp()                     # a pull that STARTED after we asked answers us: no age re-check after the wait
-        fresh = s1 is not None and (s1 >= ask or 0 <= time.time() - s1 < GAPS_MAX_AGE_S)
+        fresh = s1 is not None and (s1 > ask or 0 <= time.time() - s1 < GAPS_MAX_AGE_S)
         if not fresh:
             t = time.time()
             gj = curl_json(GAPS, 60)
@@ -862,7 +862,7 @@ def rival_snapshot(max_age=None, final=False):
                 raise RuntimeError(f"SNAP-SLOW: 3 refresher copies in a row missed the 16.12 bound max({max_age}, d + 1) "
                                    f"(last read {float(c.get('d') or 0):.1f} s)")
         else:
-            c = wait_copy(f, lambda c: c["t"] >= ask)
+            c = wait_copy(f, lambda c: c["t"] > ask)
             if c is not None:
                 return c
         _refdead("rival snapshot")
@@ -871,7 +871,7 @@ def rival_snapshot(max_age=None, final=False):
     with open(os.path.join(SNAP_DIR, "rival_snap.lock"), "w") as lk:
         fcntl.flock(lk, fcntl.LOCK_EX)
         old = _load(f) or {}
-        if max_age > 0 and old.get("t") and (snap_fresh(old, max_age) or (not final and old["t"] >= ask)):
+        if max_age > 0 and old.get("t") and (snap_fresh(old, max_age) or (not final and old["t"] > ask)):
             return old                 # 16.14 (2): a read that started after we asked, no age re-check
         if not IS_REFRESHER[0]:
             WREADS["snap"] += 1
@@ -1487,7 +1487,7 @@ def filing_halted(max_age=None):
     except Exception:
         pass
     if max_age > 0 and refresher_alive():          # 16.14 (4): the refresher's next copy, no own read
-        c = wait_copy(f, lambda c: c["t"] >= ask)
+        c = wait_copy(f, lambda c: c["t"] > ask)
         if c is not None:
             return bool(c["halted"]), c["why"]
         _refdead("halt")
@@ -1499,7 +1499,7 @@ def filing_halted(max_age=None):
             fcntl.flock(lk, fcntl.LOCK_EX)
             try:
                 h = json.load(open(f))
-                if 0 <= time.time() - h["t"] <= max_age or (max_age > 0 and h["t"] >= ask):   # 16.14 (2)
+                if 0 <= time.time() - h["t"] <= max_age or (max_age > 0 and h["t"] > ask):   # 16.14 (2)
                     return bool(h["halted"]), h["why"]
             except Exception:
                 pass
