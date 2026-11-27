@@ -141,7 +141,10 @@ for name, txt, rc, exp in (("16.1-tie", "0\trefs/heads/filing/stop/200\n0\trefs/
 os.environ["RIVAL_SNAP_DIR"] = SNAPD
 
 # ---- 16.1 rule table on haltrule.verdict (the one rule file, w9's, used by submit, drain and the closer)
-import haltrule
+try:
+    import haltrule
+except ImportError:
+    haltrule = None
 R = lambda *names: "".join(f"0123\trefs/heads/filing/{n}\n" for n in names)
 for name, txt, rc, exp in (("unreadable", "", 128, True), ("no refs", R(), 0, False), ("only go", R("go/100"), 0, False),
                            ("stop newer", R("stop/200", "go/100"), 0, True), ("go newer", R("stop/100", "go/200"), 0, False),
@@ -152,7 +155,7 @@ for name, txt, rc, exp in (("unreadable", "", 128, True), ("no refs", R(), 0, Fa
                            ("nested stop name", R("stop/100/a", "go/200"), 0, True),
                            ("unicode digits", R("stop/\u0661\u0662", "go/200"), 0, True),
                            ("other refs", "0\trefs/heads/filing/x\n0\trefs/heads/main\n", 0, False)):
-    got = haltrule.verdict(txt, rc)[0]
+    got = haltrule.verdict(txt, rc)[0] if haltrule and hasattr(haltrule, "verdict") else "no haltrule.verdict"
     if got != exp:
         case("16.1-table-" + name.replace(" ", "-"), False, f"(halted={got}, want {exp})")
 case("16.1-table-13", not [1 for n, ok in res if n.startswith("16.1-table-") and not ok], "(13 rule rows on haltrule.verdict)")
@@ -230,6 +233,29 @@ while CLK[0] < t0 + 3600:
     CLK[0] += 0.8
 case("16.7-wave-hour-opener-reads", builds >= 4400 and CNT["counted"] < 1000,
      f"(builds {builds}, counted {CNT['counted']} (files {CNT['files']}), 304s {CNT['304'] - c304}, limit < 1,000)")
+
+# ---- 6 PR-STALL by name within 60 s (drain.py stall_alerts / stall_tick)
+os.environ.setdefault("SRC", "/tmp")
+try:
+    import drain as D
+    have = hasattr(D, "stall_alerts")
+except Exception as e:
+    have, D = False, None
+if have:
+    D.ALERTED.clear()
+    a1 = D.stall_alerts(1000.0, 3, 900.0, 800.0, 1060.0)
+    case("6-PR-STALL-bucket-at-once", any(k == "prstall-bucket" and m.startswith("PR-STALL") for k, m in a1), f"({a1})")
+    case("6-PR-STALL-noprogress-61s", any(k == "prstall-noprogress" for k, m in D.stall_alerts(1000.0, 3, 939.0, 800.0, 0)), "")
+    case("6-no-alert-at-59s", not D.stall_alerts(1000.0, 3, 941.0, 800.0, 0), "")
+    case("6-no-alert-when-idle", not D.stall_alerts(1000.0, 0, 100.0, 50.0, 0), "")
+    sent = []
+    D.alert_ref = lambda m, k: sent.append((k, m)) or True
+    D.W = tempfile.mkdtemp(); open(os.path.join(D.W, "stall"), "w").write(str(time.time() + 60))   # time = the case clock
+    D.LAST_DONE[0] = time.time(); D.T0 = time.time()
+    D.ALERTED.clear(); D.stall_tick(2); D.stall_tick(2)
+    case("6-PR-STALL-ref-once-per-5-min", [k for k, m in sent] == ["prstall-bucket"], f"(sent {sent})")
+else:
+    case("6-PR-STALL-alerts", False, "(no stall_alerts in this drain.py)")
 
 bad = [n for n, ok in res if not ok]
 print(f"RCB SELFTEST OK {len(res)}" if not bad else "RCB SELFTEST FAIL " + " ".join(bad))

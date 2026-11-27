@@ -309,11 +309,56 @@ def refresher_stop(p):
     log("refresher stopped, rc", p.returncode, "last heartbeat (epoch passes counted not_modified remaining):", hb)
 
 
+TK = "https://github.com/Leg0shii/pnp-toolkit.git"
+STALL_S = float(os.environ.get("PR_STALL_S", "60"))
+ALERTED = {}             # kind -> epoch of the last alert (at most one per kind per 5 min)
+LAST_DONE = [0.0]
+
+
+def stall_alerts(now, n_inflight, last_done, t_start, stall_until):
+    """RC-b 6 (Lead 06:22): PR-STALL by name within 60 s. (kind, message) list for this drain loop tick:
+    prstall-bucket   GitHub refused a create (403/429): every worker stops creating until stall_until
+    prstall-noprogress  units in flight and none finished for STALL_S seconds (the drain is stuck)"""
+    out = []
+    if stall_until > now:
+        out.append(("prstall-bucket", f"PR-STALL bucket: GitHub refused a create, no PR for {stall_until - now:.0f} s"))
+    if n_inflight and now - max(last_done, t_start) > STALL_S:
+        out.append(("prstall-noprogress", f"PR-STALL no unit finished for {now - max(last_done, t_start):.0f} s, {n_inflight} in flight"))
+    return [(k, m) for k, m in out if now - ALERTED.get(k, 0) >= 300]
+
+
+def alert_ref(msg, kind):
+    """toolkit ref alert/<kind>-<epoch> (an empty commit whose message is the alert), the same channel as the closer's
+    TAKEN-STALE; the Lead's audit and the infra box read alert/*"""
+    g = os.path.join(W, "alert.git")
+    if not os.path.isdir(g):
+        sh("git", "init", "-q", "--bare", g)
+    tree = subprocess.run(["git", "-C", g, "mktree"], input="", capture_output=True, text=True).stdout.strip()
+    env = dict(os.environ, GIT_AUTHOR_NAME="drain", GIT_AUTHOR_EMAIL="drain@localhost",
+               GIT_COMMITTER_NAME="drain", GIT_COMMITTER_EMAIL="drain@localhost")
+    c = subprocess.run(["git", "-C", g, "commit-tree", tree, "-m", msg], capture_output=True, text=True, env=env).stdout.strip()
+    return bool(c) and sh("git", *auth(), "-C", g, "push", "-q", TK, f"{c}:refs/heads/alert/{kind}-{int(time.time())}",
+                          timeout=60).returncode == 0
+
+
+def stall_tick(n_inflight):
+    try:
+        su = float(open(os.path.join(W, "stall")).read())
+    except (OSError, ValueError):
+        su = 0.0
+    for kind, msg in stall_alerts(time.time(), n_inflight, LAST_DONE[0], T0, su):
+        ALERTED[kind] = time.time()
+        ok = DRY or alert_ref(msg, kind)
+        log(msg.split(":")[0] if kind == "prstall-bucket" else "PR-STALL", msg, "(alert ref pushed)" if ok else "(alert ref push FAILED)")
+
+
 def _loop(inflight, idle):
     with ThreadPoolExecutor(WORKERS) as ex:
         while time.time() - T0 < MAX_S:
             for k in [k for k, fu in inflight.items() if fu.done()]:
                 inflight.pop(k)
+                LAST_DONE[0] = time.time()
+            stall_tick(len(inflight))
             if halted():
                 log("halted: no new branch, in-flight ones stop before their PR,", _FH[2]); todo = []
                 if not inflight:
