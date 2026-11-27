@@ -424,7 +424,7 @@ def one(sid, sha, prefix=None, extra=None):
     # Lead 19:14: the per-stage seconds of every unit in the drain log (prep = fetch of the ready commit + upstream
     # checkout before submit.py starts)
     for l in (r.stdout or "").splitlines():
-        if " TIMES " in l or " gate: " in l or " SKIP " in l or " halted: " in l or "WOULD-CREATE " in l or "SIGHT-TO-CREATE " in l:
+        if " TIMES " in l or " gate: " in l or " SKIP " in l or " halted: " in l or "WOULD-CREATE " in l or "SIGHT-TO-CREATE " in l or "COMMIT-STAGES" in l:
             log(sid, l.strip()[:900], f"prep={t_sub - T_ONE.get(sid, t_sub):.1f}" if " TIMES " in l else "")
     res = dict(l.split("=", 1) for l in open(outp).read().splitlines() if "=" in l) if os.path.exists(outp) else {}
     tail = (r.stdout + r.stderr).strip().splitlines()[-1:] or [""]
