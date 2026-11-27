@@ -1,0 +1,33 @@
+# CLOSER CANARY (Lead 08:17 UTC 27 Nov, red team UNTESTED row 2): DRY closer passes on the real runner against the real
+# upstream open list: loop time and counted reads. Closes nothing, pushes nothing (DRY=1). Start: push branch
+# closercanary/<sha8>-w9 at the commit; delete the branch after the run.
+name: closercanary
+
+on:
+  push:
+    branches: ['closercanary/**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: closercanary
+  cancel-in-progress: true
+
+jobs:
+  dry:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: src
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Dry closer passes
+        env:
+          PR_TOKEN: ${{ secrets.PR_TOKEN }}
+          READ_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          DRY=1 PASSES=12 W=$GITHUB_WORKSPACE/work python3 -I "$GITHUB_WORKSPACE/src/.github/cloud-pr/closercanary.py"
