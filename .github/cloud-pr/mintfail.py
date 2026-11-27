@@ -227,6 +227,14 @@ def child_drain(src, w):
             return cp(a, 0, (st["seen"] or "") if a[-1].endswith("seen.txt") else "")
         if a[0] == "git" and "fetch" in a and any("refs/heads/ready/" in x for x in a):
             return cp(a, 0 if gid in st["ready"] else 1)
+        if a[0] == "git" and "ls-remote" in a and "refs/heads/main" in a:     # w12 fix 3: live upstream main sha
+            return cp(a, 0, "mainsha0\trefs/heads/main\n")
+        if a[0] == "git" and "rev-parse" in a and any("upstream-base" in x for x in a):
+            return cp(a, 0, "mainsha0\n")
+        if a[0] == "cp" and "-a" in a:                                        # w12 fix 3: a copy of the shared base
+            import shutil
+            shutil.copytree(a[-2], a[-1], dirs_exist_ok=True)
+            return cp(a)
         if a[0] == "git" and "rev-parse" in a:
             return cp(a, 0, st["ready"].get(gid, "") + "\n")
         if a[0] == "git" and "ls-tree" in a:

@@ -1250,6 +1250,16 @@ def parse_create(r):
 REFUSED = re.compile(r"secondary rate limit|submitted too quickly|abuse detection", re.I)
 
 
+def sight_line(gid, now):
+    """Lead 07:31: seconds from sight to create for every created PR. Sight = a "Sight: <epoch>" line in the ready
+    commit message (the builder's first sight of the unit) when present; the ready commit time (READY_T) always."""
+    m = re.search(r"(?mi)^Sight:\s*(\d{9,}(?:\.\d+)?)\s*$", os.environ.get("READY_MSG", ""))
+    rt = os.environ.get("READY_T", "")
+    sight = f"sight->create {now - float(m.group(1)):.1f} s" if m else "sight->create n/a (no Sight: line)"
+    ready = f"ready->create {now - float(rt):.1f} s" if rt.isdigit() else "ready->create n/a"
+    return f"SIGHT-TO-CREATE {gid} {sight}, {ready}, opener start->create {now - T_START:.1f} s"
+
+
 def create_pr(gid, lease):
     r = None
     t_pr = time.time()
@@ -1284,6 +1294,8 @@ def create_pr(gid, lease):
             r = run(pr_create_cmd(gid, body), timeout=120, env=dict(os.environ, GH_TOKEN=PR_TOKEN))
         lat = time.time() - t_c
         code, hdr, url, ctext = parse_create(r)
+        if url and code == 201:
+            log(sight_line(gid, time.time()))
         if url and code == 201 and os.environ.get("PR_GATE_DIR"):
             try:                                    # Lead 07:27: accepted creates, counted per 10 s by drain.py
                 with open(os.path.join(os.environ["PR_GATE_DIR"], "accepted.log"), "a") as o:

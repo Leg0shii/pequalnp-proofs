@@ -398,6 +398,7 @@ def one(sid, sha, prefix=None, extra=None):
     open(proof, "w").write(sh("git", "-C", SRC, "show", f"{lref}:{files[0]}").stdout)
     mod = os.path.basename(files[0])[:-5]
     msg = sh("git", "-C", SRC, "log", "-1", "--format=%B", lref).stdout
+    ready_t = sh("git", "-C", SRC, "log", "-1", "--format=%ct", lref).stdout.strip()   # Lead 07:31: ready push time
     outs = [re.sub(r"\.", "/", m) for m in re.findall(r"(?m)^import (PEqualNP\.Outside\.[A-Za-z0-9_.]+)", open(proof).read())]
     tree = os.path.join(d, "tree")
     why = upstream_tree(tree, outs)                       # w12 fix 3: a copy of the shared checkout at live main
@@ -408,7 +409,8 @@ def one(sid, sha, prefix=None, extra=None):
     os.makedirs(os.path.join(tree, "lean", "PEqualNP", "Outside"), exist_ok=True)
     outp = os.path.join(d, "out")
     env = dict(os.environ, ID=sid, MOD=mod, PROOF=proof, TREE=tree, W=d, DRY=CHILD_DRY, GITHUB_REF_NAME=f"{prefix}/{sid}",
-               GITHUB_OUTPUT=outp, PR_GATE_DIR=W, PR_GATE_N=str(PR_SLOTS), READY_MSG=msg, RIVAL_SNAP_DIR=W)
+               GITHUB_OUTPUT=outp, PR_GATE_DIR=W, PR_GATE_N=str(PR_SLOTS), READY_MSG=msg, RIVAL_SNAP_DIR=W,
+               READY_T=ready_t if ready_t.isdigit() else "")
     env.update(extra or {})
     if DRY:
         return "dry", f"would run submit.py for {sid} {mod} ({os.path.getsize(proof)} bytes, sha {got[:8]})"

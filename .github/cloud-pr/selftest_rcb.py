@@ -438,6 +438,16 @@ if hasattr(S, "bucket_refusal") and hasattr(S, "parse_create"):
 else:
     case("16.13-refusal-protocol", False, "(no bucket_refusal in this submit.py)")
 
+# ---- Lead 07:31: sight-to-create per created PR
+if hasattr(S, "sight_line"):
+    os.environ["READY_MSG"] = "ready L-meta-1\n\nSight: 1800000000\n"; os.environ["READY_T"] = "1800000020"
+    l = S.sight_line("L-meta-1", 1800000041.5)
+    os.environ["READY_MSG"] = ""; os.environ["READY_T"] = ""
+    l2 = S.sight_line("L-meta-1", 1800000041.5)
+    case("07:31-sight-to-create-logged", "sight->create 41.5 s" in l and "ready->create 21.5 s" in l and "n/a" in l2, f"({l})")
+else:
+    case("07:31-sight-to-create-logged", False, "(no sight_line)")
+
 bad = [n for n, ok in res if not ok]
 print(f"RCB SELFTEST OK {len(res)}" if not bad else "RCB SELFTEST FAIL " + " ".join(bad))
 sys.exit(1 if bad else 0)
