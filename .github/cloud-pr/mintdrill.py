@@ -230,6 +230,10 @@ def child_close(src, w):
     D.time.sleep = lambda s: None
     out = {"closed": [], "pushes": [], "unexpected": []}
     PASS = [0]
+    PUSHED = {}                            # ref -> commit sha (pushed by the code under test)
+    FIXREFS = [r if isinstance(r, str) else r["ref"] for r in w.get("toolkit_refs", [])]
+    FIXSHA = {r["ref"]: "f%039d" % i for i, r in enumerate(w.get("toolkit_refs", [])) if not isinstance(r, str)}
+    FIXMSG = {FIXSHA[r["ref"]]: r.get("msg", "") for r in w.get("toolkit_refs", []) if not isinstance(r, str)}
 
     def visible(p):                       # a PR exists from created_at on
         return D.time.mktime(time.strptime(p["created_at"][:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone <= clock[0]
@@ -288,14 +292,29 @@ def child_close(src, w):
         if a[0] == "gh" and "rate_limit" in s:
             return subprocess.CompletedProcess(a, 0, "5000", "")
         if a[0] == "git" and "push" in a:
-            ref = a[-1].split(":", 1)[-1]
+            sha, ref = a[-1].split(":", 1) if ":" in a[-1] else ("0", a[-1])
             if "filing/stop/" in ref and out.setdefault("stop_fails", 0) < w.get("stop_push_fail", 0):
                 out["stop_fails"] += 1                                       # Y6: the stop push fails
                 return subprocess.CompletedProcess(a, 1, "", "remote rejected")
-            out["pushes"].append(ref); return subprocess.CompletedProcess(a, 0, "", "")
-        if a[0] == "git" and "ls-remote" in a:
-            refs = [r for r in w.get("toolkit_refs", []) if any(r.startswith(x.split("*")[0]) for x in a if x.startswith("refs/"))]
-            return subprocess.CompletedProcess(a, 0, "".join(f"0\t{r}\n" for r in refs), "")
+            out["pushes"].append(ref); PUSHED[ref] = sha
+            if "filing/stop/" in ref:
+                g = a[a.index("-C") + 1] if "-C" in a else None
+                out.setdefault("stop_msgs", []).append(subprocess.run(["git", "-C", g, "log", "-1", "--format=%B", sha],
+                                                                      capture_output=True, text=True).stdout.strip() if g else "?")
+            return subprocess.CompletedProcess(a, 0, "", "")
+        if a[0] == "git" and "ls-remote" in a:                  # fixture refs ("ref" or {"ref", "msg"}) + what was pushed
+            pats = [x.split("*")[0] for x in a if x.startswith("refs/")]
+            rows = [(FIXSHA.get(r, "0"), r) for r in FIXREFS] + [(v, k) for k, v in PUSHED.items()]
+            return subprocess.CompletedProcess(a, 0, "".join(f"{h}\t{r}\n" for h, r in rows if any(r.startswith(x) for x in pats)), "")
+        if a[0] == "git" and "fetch" in a and any("filing/stop/" in x for x in a):      # Y4j: a stop ref's commit
+            return subprocess.CompletedProcess(a, 1 if w.get("unreadable_stops") else 0, "", "fetch failed" if w.get("unreadable_stops") else "")
+        if a[0] == "git" and "log" in a:
+            h = a[-1]
+            if h in FIXMSG:
+                return subprocess.CompletedProcess(a, 1 if w.get("unreadable_stops") else 0, "" if w.get("unreadable_stops") else FIXMSG[h] + "\n", "")
+            if w.get("unreadable_stops"):
+                return subprocess.CompletedProcess(a, 128, "", "bad object")
+            return subprocess.run(a, capture_output=True, text=True)
         if a[0] == "git" and "init" in a:
             return subprocess.run(a, capture_output=True, text=True)
         if a[0] == "git" and "fetch" in a and "pequalnp-proofs" in s:
@@ -417,7 +436,7 @@ def body_bad(prs, ex):
     return bad
 
 
-def judge_close(name, w, r, must_close, must_keep=(), must_push=None, no_push=False, max_reads=None):
+def judge_close(name, w, r, must_close, must_keep=(), must_push=None, no_push=False, max_reads=None, go_count=None, last_stop=None):
     if r.get("crash"):
         return False, "crash " + " | ".join(r["crash"])
     bad = []
@@ -433,12 +452,21 @@ def judge_close(name, w, r, must_close, must_keep=(), must_push=None, no_push=Fa
         bad.append(f"I4 no {must_push} push")
     if no_push and any("filing/stop" in p for p in r["pushes"]):
         bad.append("false halt")
+    if go_count is not None:
+        ng = sum(1 for p in r["pushes"] if "filing/go/" in p)
+        if ng != go_count:
+            bad.append(f"{ng} filing/go pushes (want {go_count})")
+    if last_stop is not None:
+        sm = r.get("stop_msgs") or [""]
+        if last_stop not in sm[-1]:
+            bad.append(f"newest stop {sm[-1][:60]!r}, want {last_stop!r}")
     if max_reads is not None:
         nr = r.get("closed_reads", 0) + r.get("comment_reads", 0) + r.get("issue_reads", 0)
         if nr > max_reads:
             bad.append(f"{nr} GitHub reads (cap {max_reads})")
     reads = "" if "closed_reads" not in r else f" reads={r.get('closed_reads', 0)}+{r.get('comment_reads', 0)}+{r.get('issue_reads', 0)}"
-    return (not bad), "; ".join(bad) or f"closed {sorted(r['closed'])}" + (" halt" if any("filing/stop" in p for p in r["pushes"]) else "") + reads
+    gos = sum(1 for p in r["pushes"] if "filing/go/" in p)
+    return (not bad), "; ".join(bad) or f"closed {sorted(r['closed'])}" + (" halt" if any("filing/stop" in p for p in r["pushes"]) else "") + (f" go={gos}" if gos else "") + reads
 
 
 def unit(gid, tpl="tl6c-not-search", **k):
@@ -558,6 +586,21 @@ def cases():
     m300 = [rival_pr(70000 + i, "Prove L-meta-%d" % (96000 + i), created=-900, merged=-590 + 2 * i) for i in range(300)]
     o30 = [ours_closed(52000 + i, "L-meta-%d" % (97000 + i), -400 + 10 * i, by=HANDLE) for i in range(30)]
     out.append(("hostile/Y4f", "close", {"closed_pulls": m300 + o30, "passes": [0, 60]}, {"must_close": [], "no_push": True, "max_reads": 50}))
+    # Y4g-j (Lead 05:50): blind halts lift themselves after two clean full scans; rejection halts never do
+    five = many[:5]
+    out.append(("hostile/Y4g", "close", {"closed_pulls": five, "closed_fail_passes": [0, 1, 2], "passes": [0, 60, 120, 180, 240, 300, 360]},
+                {"must_close": [], "must_push": "refs/heads/filing/stop/", "go_count": 1}))
+    rj_old = ours_closed(50105, "L-meta-93006", -590, by="makers-bot", comments=[{"body": "REJECTED", "user": {"login": "makers-bot"}, "at": -589}])
+    out.append(("hostile/Y4h", "close", {"closed_pulls": five + [rj_old], "passes": [0, 60, 120, 180]},
+                {"must_close": [], "must_push": "refs/heads/filing/stop/", "go_count": 0, "last_stop": "filing stop: REJ-HALT"}))
+    rj_new = ours_closed(50106, "L-meta-93007", 200, by="makers-bot", comments=[{"body": "REJECTED", "user": {"login": "makers-bot"}, "at": 201}])
+    out.append(("hostile/Y4i", "close", {"closed_pulls": five + [rj_new], "closed_fail_passes": [0, 1, 2], "passes": [0, 60, 120, 180, 240, 300, 360]},
+                {"must_close": [], "must_push": "refs/heads/filing/stop/", "go_count": 0, "last_stop": "filing stop: REJ-HALT"}))
+    out.append(("hostile/Y4j", "close", {"closed_pulls": five, "closed_fail_passes": [0, 1, 2], "passes": [0, 60, 120, 180, 240, 300],
+                                         "toolkit_refs": [{"ref": "refs/heads/filing/stop/%d" % (T0 + 130), "msg": "filing stop: Lead by hand"}]},
+                {"must_close": [], "must_push": "refs/heads/filing/stop/", "go_count": 0}))
+    out.append(("hostile/Y4j2", "close", {"closed_pulls": five, "closed_fail_passes": [0, 1, 2], "passes": [0, 60, 120, 180, 240, 300],
+                                          "unreadable_stops": True}, {"must_close": [], "must_push": "refs/heads/filing/stop/", "go_count": 0}))
     # Y5: a new dupclose job (empty CLOSED); our PR closed BY US 3 min ago, a CI-bot comment on it -> no halt
     out.append(("hostile/Y5", "close", {"closed_pulls": [ours_closed(50103, "L-meta-93004", -180, by=HANDLE,
                                                                      comments=[{"body": "build passed", "user": {"login": "ci-bot"}, "at": -170}])],

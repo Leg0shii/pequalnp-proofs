@@ -268,6 +268,54 @@ def filing_stop(msg):
     return sh("git", *auth(), "-C", g, "push", "-q", TK, f"{c}:refs/heads/filing/stop/{int(time.time())}").returncode == 0
 
 
+BLIND_TAG = "filing stop: BLIND"
+
+
+def newest_ref(pattern):
+    """(epoch, sha) of the newest toolkit ref refs/heads/<pattern>/<epoch>; None if unreadable."""
+    r = sh("git", *auth(), "ls-remote", TK, f"refs/heads/{pattern}/*", timeout=60)
+    if r.returncode:
+        return None
+    best = (0, None)
+    for h, e in re.findall(r"^(\S+)\s+refs/heads/" + re.escape(pattern) + r"/(\d+)$", r.stdout, re.M):
+        if int(e) > best[0]:
+            best = (int(e), h)
+    return best
+
+
+def ref_message(sha, ref):
+    """commit message of a toolkit ref, fetched from the remote (None if it cannot be read)."""
+    g = os.path.join(W, "taken.git")
+    if not os.path.isdir(g):
+        sh("git", "init", "-q", "--bare", g)
+    if sh("git", *auth(), "-C", g, "fetch", "-q", TK, ref, timeout=60).returncode:
+        return None
+    r = sh("git", "-C", g, "log", "-1", "--format=%B", sha, timeout=30)
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def blind_lift():
+    """push filing/go/<epoch> + alert BLIND-LIFT if the newest filing/stop is our blind stop and newer than every go."""
+    st, go = newest_ref("filing/stop"), newest_ref("filing/go")
+    if not st or not go or not st[1] or st[0] <= go[0]:
+        return False                                  # unreadable, no stop, or already lifted
+    msg = ref_message(st[1], f"refs/heads/filing/stop/{st[0]}")
+    if not msg or not msg.startswith(BLIND_TAG):
+        return False                                  # not ours, a rejection halt, or unreadable: only the Lead lifts it
+    g = os.path.join(W, "taken.git")
+    tree = subprocess.run(["git", "-C", g, "mktree"], input="", capture_output=True, text=True).stdout.strip()
+    env = dict(os.environ, GIT_AUTHOR_NAME="dupclose", GIT_AUTHOR_EMAIL="dupclose@localhost",
+               GIT_COMMITTER_NAME="dupclose", GIT_COMMITTER_EMAIL="dupclose@localhost")
+    c = subprocess.run(["git", "-C", g, "commit-tree", tree, "-m", f"filing go: BLIND-LIFT of stop {st[0]} (two full scans, no rejection)"],
+                       capture_output=True, text=True, env=env).stdout.strip()
+    ok = sh("git", *auth(), "-C", g, "push", "-q", TK, f"{c}:refs/heads/filing/go/{max(int(time.time()), st[0] + 1)}").returncode == 0
+    if ok:
+        alert_ref(f"BLIND-LIFT stop {st[0]}", "blindlift")
+        REJ["clean"] = 0
+    log("BLIND-LIFT", st[0], "go pushed" if ok else "go PUSH FAILED, retry next pass")
+    return ok
+
+
 def alert_ref(msg, kind):
     g = os.path.join(W, "taken.git")
     if not os.path.isdir(g):
@@ -339,6 +387,7 @@ def rej_burst():
         else:
             scan = f"over {REJ_MAX_PAGES} pages of closed PRs in {REJ_WIN} s"
         # a failed read is retried next pass; REJ_FAIL_MAX failed passes in a row (or over REJ_MAX_PAGES pages) = blind
+        REJ["full"] = scan == "ok"                    # this pass saw every close in the window (blind-lift input)
         REJ["fails"] = REJ.get("fails", 0) + 1 if scan == "closed-PR read failed" else 0
         if scan == "closed-PR read failed" and REJ["fails"] < REJ_FAIL_MAX:
             REJ["t"] = 0
@@ -399,12 +448,15 @@ def rej_burst():
                 or any("proved first" in (c.get("body") or "").lower() or ((c.get("user") or {}).get("login") or HANDLE) != HANDLE
                        for c in p.get("comments") or []))]
     scan = REJ.get("scan", "ok")
+    blind = False
     if scan != "ok" and not hit and f"scan@{go}" not in HALTED:
         hit = [f"scan@{go}"]                          # cannot see every close in the window: fail closed (once per go)
+        blind = True
     if hit:
         if not DRY:
             why = " ".join(map(str, hit[:20])) + ("" if scan == "ok" else f" ({scan})")
-            ok = filing_stop(f"filing stop: REJ-HALT {len(hit)} {why}")
+            # BLIND_TAG marks a stop pushed only because the detector could not see; blind_lift() may lift only those
+            ok = filing_stop(f"{BLIND_TAG} {scan} go={go}" if blind else f"filing stop: REJ-HALT {len(hit)} {why}")
             if ok:                                    # Y6: marked done only once the stop ref exists
                 HALTED.update(hit)
                 alert_ref(f"REJ-HALT {len(hit)} {' '.join(map(str, hit[:10]))}", "rejhalt")
@@ -414,6 +466,16 @@ def rej_burst():
                 log("REJ-HALT", hit, "stop ref PUSH FAILED, retry next pass")
         else:
             log("REJ-HALT (dry)", hit)
+    # Lead 05:50 BLIND HALTS LIFT THEMSELVES: two full scans in a row with no rejection of ours anywhere in the window
+    # (HALTED and filing/go ignored) -> if the newest filing/stop ref is a blind stop of ours (its commit message read
+    # from the remote, so a chain restart changes nothing) and newer than every filing/go: push filing/go + BLIND-LIFT
+    rej_any = [p["number"] for p in prs if not p.get("mergedAt") and p.get("closedAt") and now - t(p["closedAt"]) <= REJ_WIN
+               and ((p.get("closedBy") not in (None, HANDLE))
+                    or any("proved first" in (c.get("body") or "").lower() or ((c.get("user") or {}).get("login") or HANDLE) != HANDLE
+                           for c in p.get("comments") or []))]
+    REJ["clean"] = REJ.get("clean", 0) + 1 if (REJ.get("full") and not rej_any and not hit) else 0
+    if REJ["clean"] >= 2 and not DRY:
+        blind_lift()
     REJ["n"] = n                                      # 20:10: rej10=<n> in the heartbeat (late-lease loop tripwire)
     if n >= REJ_MIN and now - REJ["alerted"] >= REJ_WIN:
         REJ["alerted"] = now
