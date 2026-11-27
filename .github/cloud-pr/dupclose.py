@@ -509,7 +509,7 @@ def rej_burst():
             blind = True
     if hit:
         if not DRY:
-            why = " ".join(map(str, hit[:20])) + ("" if scan == "ok" else f" ({scan})")
+            why = " ".join(map(str, hit[:200])) + ("" if scan == "ok" else f" ({scan})")   # Lead 06:12: name all (cap 200)
             # BLIND_TAG marks a stop pushed only because the detector could not see; blind_lift() may lift only those
             ok = filing_stop(f"{BLIND_TAG} {scan} go={go}" if blind else f"filing stop: REJ-HALT {len(hit)} {why}")
             if ok:                                    # Y6: marked done only once the stop ref exists
