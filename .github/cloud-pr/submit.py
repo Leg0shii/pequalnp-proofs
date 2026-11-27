@@ -314,6 +314,19 @@ def primary_rl(r):
 
 
 RUNTOKEN_FLOOR = int(os.environ.get("RUNTOKEN_FLOOR", "200"))
+PRTOKEN_READ_FLOOR = int(os.environ.get("PRTOKEN_READ_FLOOR", "1500"))   # W8 09:46: PR_TOKEN under this = no reads on it
+                                                                         # (kept for the creates); reads fail closed
+
+
+def _prlow_file():
+    return os.path.join(os.environ.get("RIVAL_SNAP_DIR") or os.environ.get("PR_GATE_DIR") or W, "prtoken-low")
+
+
+def prtoken_low(now=None):
+    try:
+        return (time.time() if now is None else now) < float(open(_prlow_file()).read().split()[0])
+    except (OSError, ValueError, IndexError):
+        return False
 
 
 def _rt_empty_file():
@@ -361,7 +374,7 @@ def gh(args, write=False, timeout=120):
     if write:
         toks = [PR_TOKEN]
     elif fb and runtoken_empty():
-        toks = [PR_TOKEN]
+        toks = [] if prtoken_low() else [PR_TOKEN]
     else:
         toks = [READ_TOKEN or ("" if os.environ.get("GITHUB_ACTIONS") else PR_TOKEN)]
     r = None
@@ -375,11 +388,23 @@ def gh(args, write=False, timeout=120):
                 m = re.search(r"^x-ratelimit-remaining:\s*(\d+)\s*$", r.stdout, re.I | re.M)   # before it is empty
                 if m and int(m.group(1)) < RUNTOKEN_FLOOR and not runtoken_empty():
                     _mark_runtoken_empty(r, args)
+            if fb and t == PR_TOKEN and (r.stdout or "").startswith("HTTP/"):
+                m = re.search(r"^x-ratelimit-remaining:\s*(\d+)\s*$", r.stdout, re.I | re.M)
+                mr = re.search(r"^x-ratelimit-reset:\s*(\d+)\s*$", r.stdout, re.I | re.M)
+                if m and int(m.group(1)) < PRTOKEN_READ_FLOOR and not prtoken_low():
+                    try:
+                        with open(_prlow_file(), "w") as o:
+                            o.write(f"{float(mr.group(1)) if mr else time.time() + 600:.0f} {m.group(1)}\n")
+                    except OSError:
+                        pass
+                    log(f"PR-TOKEN-LOW: PR_TOKEN at {m.group(1)} (< {PRTOKEN_READ_FLOOR}): no more reads on it, "
+                        "the rest is kept for creates (reads fail closed)")
             if r.returncode == 0:
                 return r
             if fb and t == READ_TOKEN and primary_rl(r):
                 _mark_runtoken_empty(r, args)
-                toks.append(PR_TOKEN)
+                if not prtoken_low():
+                    toks.append(PR_TOKEN)
                 break
             if not TRANSIENT.search(r.stderr + r.stdout):
                 break
@@ -1907,6 +1932,7 @@ def main():
 
 
 REFRESH_S = float(os.environ.get("REFRESH_S", "0.8"))
+FALLBACK_REFRESH_S = float(os.environ.get("FALLBACK_REFRESH_S", "2"))   # W8 09:46: on PR_TOKEN about 300-500 reads/h
 
 
 def refresher():
@@ -1953,9 +1979,9 @@ def refresher():
             log("refresher: snapshot failed (workers read inline)", str(e)[:120])
         n += 1
         prog[0] = time.time()
-        # Lead 09:37: on PR_TOKEN (run token empty) the refresher reads at most once a second (304s are free, but the
+        # Lead 09:37 / W8 09:46: on PR_TOKEN (run token empty) the refresher passes every FALLBACK_REFRESH_S (304s are free, but the
         # account limit is shared by the PC and every create)
-        time.sleep(max(0.05, (max(REFRESH_S, 1.0) if runtoken_empty() else REFRESH_S) - (time.time() - t)))
+        time.sleep(max(0.05, (max(REFRESH_S, FALLBACK_REFRESH_S) if runtoken_empty() else REFRESH_S) - (time.time() - t)))
     done[0] = True
 
 

@@ -661,6 +661,16 @@ def stall_tick(n_inflight):
             log(m, "(alert ref pushed)" if ok else "(alert ref push FAILED)")
     except (OSError, ValueError, IndexError):
         pass
+    try:                                   # W8 09:46: PR_TOKEN under its read floor while the run token is empty
+        pl = open(os.path.join(W, "prtoken-low")).read().split()
+        if time.time() - ALERTED.get("prtoken-low", 0) >= 300 and time.time() < float(pl[0]):
+            ALERTED["prtoken-low"] = time.time()
+            m = f"PR-TOKEN-LOW PR_TOKEN at {pl[1]}: no reads on it (kept for creates), reads fail closed until " \
+                f"{time.strftime('%H:%M:%S', time.gmtime(float(pl[0])))} UTC"
+            ok = DRY or alert_ref(m, "prtoken-low")
+            log(m, "(alert ref pushed)" if ok else "(alert ref push FAILED)")
+    except (OSError, ValueError, IndexError):
+        pass
     try:                                   # 16.13: four create refusals ended this drain's creates
         gv = open(os.path.join(W, "giveup")).read().strip()
         if not ALERTED.get("prstall-giveup"):

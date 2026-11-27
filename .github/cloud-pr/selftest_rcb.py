@@ -626,6 +626,26 @@ if hasattr(S, "runtoken_empty"):
     else:
         os.environ["RIVAL_SNAP_DIR"] = svd
     case("09:34-runtoken-under-200-switches", u5 == ["RT", "PT"], f"({u5})")
+    def lrun(a, **k):
+        tok = (k.get("env") or {}).get("GH_TOKEN"); used.append(tok)
+        if tok == "RT":
+            return subprocess.CompletedProcess(a, 1, "", "HTTP 403: API rate limit exceeded for installation ID 1")
+        return subprocess.CompletedProcess(a, 0, "HTTP/2.0 200 OK\nX-Ratelimit-Remaining: 1200\nX-Ratelimit-Reset: %d\n\n[]"
+                                           % (int(REAL_TIME()) + 900), "")
+    RD2 = tempfile.mkdtemp(); os.environ["RIVAL_SNAP_DIR"] = RD2
+    S.run = lrun; S.gh = REAL_GH; S.READ_TOKEN, S.PR_TOKEN = "RT", "PT"; S.time.time = REAL_TIME
+    used.clear(); S.gh(["api", "-i", "p"])
+    try:
+        S.gh(["api", "-i", "p"]); second = "read"
+    except RuntimeError:
+        second = "refused"
+    u6 = list(used)
+    S.run = svr; S.gh = svgh; S.READ_TOKEN, S.PR_TOKEN = svt; S.time.time = svtime
+    if svd is None:
+        os.environ.pop("RIVAL_SNAP_DIR", None)
+    else:
+        os.environ["RIVAL_SNAP_DIR"] = svd
+    case("09:46-prtoken-under-1500-no-reads", u6 == ["RT", "RT", "PT"] and second == "refused", f"({u6}, second read {second})")
     case("09:29-runtoken-empty-reads-go-to-PR_TOKEN", u1 == ["RT", "PT"] and u2 == ["PT"] and u3 == ["PT"] and sec_ok,
          f"(first {u1}, next {u2}, write {u3}, secondary {u4})")
 else:
