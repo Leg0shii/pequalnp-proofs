@@ -1338,6 +1338,9 @@ def submit(gid, lease):
     if not c:
         return None, "commit-tree failed"
     STG["commit"] = round(time.time() - t_cm, 3)     # whole stage, rev-parse to commit-tree (same span as before)
+    # drain.py cuts each unit line at 200 chars, so the long TIMES line loses these: one short line of its own
+    log("COMMIT-STAGES", gid, " ".join(f"{k}={STG[k]}" for k in ("commit", "tree", "tree_src", "head", "halt2", "g_revparse",
+                                                               "g_catfile", "g_hashobj", "g_difftree", "g_committree") if k in STG))
     if DRY:
         tw = time.time()                 # rehearsal (Lead 08:12): the would-create time per unit, epoch to 0.001 s
         log(f"WOULD-CREATE {gid} {tw:.3f}"); log(sight_line(gid, tw))
