@@ -927,7 +927,7 @@ def main():
         print("ok  " if ok else "FAIL", name, why)
         if not ok:
             fails.append(name)
-    for tool, args in (("haltrule.py", []), ("lift.py", ["selftest"])):     # 16.1 / 16.8 S3: pure rule + lift tool
+    for tool, args in (("haltrule.py", []), ("lift.py", ["selftest"]), ("beattest.py", [src])):     # 16.1 / 16.8 S3: pure rule + lift tool
         tp = os.path.join(src, ".github", "cloud-pr", tool)
         if os.path.exists(tp):
             rr = subprocess.run([sys.executable, tp] + args, capture_output=True, text=True, timeout=300)
