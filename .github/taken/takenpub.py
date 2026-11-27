@@ -85,7 +85,7 @@ def _date(t):
 # before). Alert line RUN-TOKEN-EMPTY at most once per 5 min. RUNTOKEN_FALLBACK=0 turns it off. Same rule as submit.py gh().
 PR_TOKEN = os.environ.get("PR_TOKEN", "")
 RT_LOW = int(os.environ.get("TAKEN_RT_LOW", "200"))
-PR_FLOOR = int(os.environ.get("TAKEN_PR_FLOOR", "1000"))
+PR_FLOOR = int(os.environ.get("TAKEN_PR_FLOOR", "1500"))
 FB = {"until": 0.0, "alert": 0.0, "pr_rem": None, "n": 0}     # fallback to PR_TOKEN until FB["until"] (epoch)
 
 
