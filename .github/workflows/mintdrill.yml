@@ -14,6 +14,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Replay suite
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: python3 -I .github/cloud-pr/mintdrill.py "$GITHUB_WORKSPACE" | tee drill.txt; grep -q '^PREFLIGHT PASS' drill.txt
       - name: Summary
         if: always()

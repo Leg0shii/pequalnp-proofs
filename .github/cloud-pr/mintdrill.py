@@ -23,6 +23,8 @@ import contextlib, copy, json, os, re, subprocess, sys, tempfile, time
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "mintdrill")
 HANDLE = "Leg0shii"
+TOKEN_RX_D = re.compile(r"(?<![A-Za-z0-9_-])(L-[a-z0-9]+(?:-[a-z0-9]+)*-\d+)(?![A-Za-z0-9_-])")   # the publisher's rules,
+FILE_RX_D = re.compile(r"lean/PEqualNP/Outside/(L_[a-z0-9]+(?:_[a-z0-9]+)*_\d+)\.lean")              # written out here
 T0 = 1795700000.0                      # fixed clock of every case (no wall time in the results)
 
 
@@ -42,6 +44,7 @@ def norm_pull(p, now, k):
     q = dict(p)
     q.setdefault("user", {"login": "rival1"})
     q.setdefault("head", {"ref": "patch-1"})
+    q["head"] = dict({"sha": "%040x" % (int(q.get("number") or 0) + 0xb15)}, **q["head"])   # B15: real heads carry a sha
     q.setdefault("body", "")
     q.setdefault("files", [])
     q["created_at"] = reltime(p.get("created_at"), now) or iso(now - 600 + k)
@@ -84,31 +87,39 @@ def child_submit(src, w):
         return gaps_now()
     S.curl_json = curl_json
 
-    pulls_open = sorted(w.get("open_pulls", []), key=lambda p: -p["number"])
+    now_c = T0 + w.get("t", 0)
+    CLK = [now_c]                           # the case clock; S.time.sleep advances it (retries, backoffs)
+    vis = lambda p: time.mktime(time.strptime(p["created_at"][:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone <= CLK[0]
+    pulls_open = sorted(w.get("open_pulls", []), key=lambda p: -p["number"])      # filtered by vis() at each read
     pulls_closed = sorted(w.get("closed_pulls", []), key=lambda p: -p["number"])
+    out["reads"] = 0
 
     def cp(stdout="", rc=0, err=""):
         return subprocess.CompletedProcess([], rc, stdout, err)
 
     def gh(args, write=False, timeout=120):
         a = list(args)
+        out["reads"] += 1
         if a[0] == "api" and "/pulls?" in a[1]:
             q = dict(x.split("=", 1) for x in a[1].split("?", 1)[1].split("&"))
-            if "head" in q:                          # open_pr_for_branch: our own open PR on fork branch <gid>
+            if "head" in q:                          # open_pr_for_branch: our own open (or closed) PR on fork branch <gid>
                 h = q["head"].split(":", 1)[-1]
-                return cp("".join("https://github.com/open-goat/pequalnp-proofs/pull/%d\n" % p["number"] for p in pulls_open
+                src_h = pulls_open if q.get("state", "open") == "open" else pulls_closed
+                return cp("".join("https://github.com/open-goat/pequalnp-proofs/pull/%d\n" % p["number"] for p in src_h
                                   if p["user"]["login"] == HANDLE and (p.get("head") or {}).get("ref") == h))
-            src_l = pulls_open if q.get("state") == "open" else pulls_closed
+            src_l = [p for p in (pulls_open if q.get("state") == "open" else pulls_closed) if vis(p)]
             pp, pg = int(q.get("per_page", 30)), int(q.get("page", 1))
             return cp(json.dumps(src_l[(pg - 1) * pp:pg * pp]))
         m = re.search(r"/pulls/(\d+)/files", a[1]) if a[0] == "api" else None
         if m:
+            if int(m.group(1)) in (w.get("files_fail") or []):
+                return cp("", 1, "HTTP 403: secondary rate limit")
             p = next((x for x in pulls_open + pulls_closed if x["number"] == int(m.group(1))), {})
             return cp(json.dumps([{"filename": f} for f in p.get("files") or []]))
         if a[:2] == ["pr", "list"]:
             n = a[a.index("--search") + 1]
             res = []
-            for p in pulls_open + pulls_closed:
+            for p in [x for x in pulls_open + pulls_closed if vis(x)]:
                 if n in (p.get("title") or "") or any(n in f for f in p.get("files") or []):
                     st = "OPEN" if not p.get("closed_at") else ("MERGED" if p.get("merged_at") else "CLOSED")
                     res.append({"number": p["number"], "state": st, "title": p.get("title"), "author": p["user"],
@@ -148,8 +159,11 @@ def child_submit(src, w):
     S.git = git
 
     def run(cmd, timeout=300, env=None, cwd=None):
-        if cmd[:3] == ["gh", "pr", "create"]:
-            body = cmd[cmd.index("--body") + 1]
+        if (cmd[:3] == ["gh", "pr", "create"] or (cmd[:2] == ["gh", "api"] and "POST" in cmd and any(str(x).endswith("/pulls") for x in cmd))):
+            out["creates"] = out.get("creates", 0) + 1
+            if out["creates"] <= w.get("create_fail", 0):  # a0: GitHub refuses the first attempts (secondary limit)
+                return cp("", 1, "HTTP 403: You have exceeded a secondary rate limit")
+            body = cmd[cmd.index("--body") + 1] if "--body" in cmd else next(x[5:] for x in cmd if str(x).startswith("body="))
             out["prs"].append({"gid": gid, "lease": "Lease:" in body, "body": body})
             return cp("https://github.com/open-goat/pequalnp-proofs/pull/99999\n")
         if len(cmd) > 1 and cmd[0] == "bash" and cmd[1].endswith("checkcore.sh"):
@@ -160,6 +174,10 @@ def child_submit(src, w):
                 if g.get("statement") and g["statement"] != ps:
                     return cp("FAIL: statement differs from gaps.json\n", 1)
             return cp("guards ok\n")
+        if w.get("gate_refs") is not None and cmd[0] == "git" and "ls-remote" in cmd and any("deskgate" in x for x in cmd):
+            if w["gate_refs"] == "fail":                       # Y2: the toolkit refs cannot be read
+                return cp("", 128, "fatal: unable to access")
+            return cp("".join(f"0\t{r}\n" for r in w["gate_refs"]))
         if "taken_text" in w and cmd[0] == "git":            # the real _taken_list: init, fetch, show of status/taken
             if "init" in cmd or "fetch" in cmd:
                 return cp()
@@ -171,7 +189,27 @@ def child_submit(src, w):
 
     tl = w.get("taken", {})
     if "taken_text" not in w:
-        S._taken_list = lambda: (None if tl is None else dict(tl))
+        def fake_taken():
+            if tl is None:
+                return None
+            hdr = int(now_c) - 20
+            if hasattr(S, "TL_HDR"):
+                S.TL_HDR[0] = hdr
+            if hasattr(S, "TL_COMPLETE"):
+                S.TL_COMPLETE[0] = True
+            rows = {}
+            for p in sorted(pulls_open + pulls_closed, key=lambda p: -p["number"]):
+                if time.mktime(time.strptime(p["created_at"][:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone >= hdr:
+                    continue
+                us = set(TOKEN_RX_D.findall(p.get("title") or "")) | \
+                    set(TOKEN_RX_D.findall((p.get("head") or {}).get("ref", "").replace("_", "-")))
+                if not p.get("closed_at"):
+                    us |= {m.group(1).replace("_", "-") for m in map(FILE_RX_D.fullmatch, p.get("files") or []) if m}
+                for u in us:
+                    rows[u] = p["user"]["login"]
+            rows.update(tl)
+            return rows
+        S._taken_list = fake_taken
     S._TL.clear()
 
     class DG:
@@ -188,24 +226,36 @@ def child_submit(src, w):
     S.push_branch = lambda c, g: None
     S.delete_ready = lambda: None
     S.pr_gate = contextlib.nullcontext
+    if hasattr(S, "fork_head"):              # fork branches of ours that exist already (W6 create-only head)
+        S.fork_head = lambda g: (w.get("fork_heads") or {}).get(g)
+    if hasattr(S, "gate_answer_lease"):
+        S.gate_answer_lease = lambda g: (w.get("gate_answers_ref") or {}).get(g)
+    out["li_reads"] = 0
+
+    def fake_li():                          # config/linkedin.txt in the toolkit (Lead 05:50): None = unreadable
+        out["li_reads"] += 1
+        return w.get("li_file") or ""
+    S.li_from_toolkit = fake_li
     S.release = lambda lid, why: out["desk"].append("release " + str(lid)) if lid else None
-    S.time.sleep = lambda s: None
-    S.time.time = lambda: T0                # the fixtures' clock (created_at of the pulls is relative to T0)
+    S.time.sleep = lambda s: CLK.__setitem__(0, CLK[0] + s)
+    S.time.time = lambda: CLK[0]            # the fixtures' clock (created_at of the pulls is relative to T0)
 
     def gate_open_now():
         gj = S.LAST_GJ[0] or {}
         if any((p.get("handle") if isinstance(p, dict) else p) == HANDLE for p in gj.get("paused") or []):
             return False, "paused in the mirror"
         return (True, "open ref") if w.get("gate_open", True) else (False, "no open ref")
-    S.gate_open_now = gate_open_now
+    if w.get("gate_refs") is None:                # else the real gate_open_now reads the (fake) toolkit refs
+        S.gate_open_now = gate_open_now
 
     def gate_claim(g):
         out["desk"].append("claim " + g)
         ans = (w.get("gate_answers") or {}).get(g) or (w.get("gate_answers") or {}).get("*", "ok")
         return (ans, "lease-x1") if ans == "ok" else (ans, None)
     S.gate_claim = gate_claim
-    if hasattr(S, "filing_halted"):
-        S.filing_halted = lambda: ((True, "filing halted (drill)") if w.get("halted") else (False, ""))
+    if hasattr(S, "filing_halted"):          # halt_at: a stop ref appears at that case time (seconds after T0 + t)
+        S.filing_halted = lambda: ((True, "filing halted (drill)") if w.get("halted") or
+                                   (w.get("halt_at") is not None and CLK[0] >= now_c + w["halt_at"]) else (False, ""))
     elif w.get("halted"):
         out["unexpected"].append("no filing_halted in this checkout")
     try:
@@ -463,6 +513,9 @@ def spawn(kind, src, w):
     for k in ("PNP_LINKEDIN", "CLAIM_FIRST", "FILE_FIRST"):
         env.pop(k, None)
     env.update(w.get("env") or {})
+    if w.get("snap"):                                # one drain: every worker shares the rival snapshot directory
+        os.makedirs(w["snap"], exist_ok=True)
+        env["RIVAL_SNAP_DIR"] = w["snap"]
     r = subprocess.run([sys.executable, os.path.abspath(__file__), "--child"], input=json.dumps(w), capture_output=True,
                        text=True, env=env, timeout=120, cwd=d)
     m = re.search(r"^MDRESULT (.*)$", r.stdout, re.M)
@@ -513,6 +566,10 @@ def judge_submit(name, w, r, expect):
         bad.append("not halted: " + r["result"])
     if w.get("body_expect") is not None:
         bad += body_bad(r["prs"], w["body_expect"])
+    if w.get("expect_claim") is not None and any(x.startswith("claim") for x in r["desk"]) != w["expect_claim"]:
+        bad.append(f"Y2 desk claims {r['desk']} (want {'a claim' if w['expect_claim'] else 'none'})")
+    if w.get("li_reads") is not None and r.get("li_reads") != w["li_reads"]:
+        bad.append(f"credit file read {r.get('li_reads')} times (want {w['li_reads']})")
     return (not bad), "; ".join(bad) or f"{got} ({r['result']}: {r['why'][:70]})"
 
 
@@ -620,19 +677,45 @@ def our_pr(n, gid, lease=False, created=-300, title=None):
 
 
 def rival_pr(n, title, created=-100, merged=None, closed=None, login="rival1", files=(), ref="patch-1"):
-    return {"number": n, "title": title, "user": {"login": login}, "head": {"ref": ref}, "files": list(files), "body": "",
+    return {"number": n, "title": title, "user": {"login": login}, "head": {"ref": ref, "sha": "%040x" % n}, "files": list(files), "body": "",
             "created_at": iso(T0 + created), "merged_at": iso(T0 + merged) if merged is not None else None,
             "closed_at": iso(T0 + (closed if closed is not None else merged)) if (closed is not None or merged is not None) else None}
+
+
+def upstream_world(t_end, new_every=30, base=60000):
+    """81 open PRs as upstream at 05:40 27 Nov (41 with no unit id in title or branch, files of other units), all older
+    than the mint, plus one new no-id rival PR every new_every s during the mint (they need file reads)."""
+    ws = [rival_pr(base + i, "Prove L-meta-%d" % (70000 + i), created=-7200 + i, login="r%d" % (i % 7),
+                   files=["lean/PEqualNP/Outside/L_meta_%d.lean" % (70000 + i)]) for i in range(40)]
+    ws += [rival_pr(base + 40 + i, "Batch %d of circuit proofs" % i, created=-7000 + i, login="b%d" % (i % 5),
+                    files=["lean/PEqualNP/Outside/L_meta_%d.lean" % (71000 + i)]) for i in range(41)]
+    ws += [rival_pr(base + 200 + j, "more proofs %d" % j, created=j * new_every, login="late%d" % j,
+                    files=["lean/PEqualNP/Outside/L_meta_%d.lean" % (72000 + j)]) for j in range(int(t_end // new_every) + 1)]
+    return ws
+
+
+SNAPS = tempfile.mkdtemp(prefix="mintdrill-snap-")
 
 
 def cases():
     rec = json.load(open(os.path.join(DATA, "recorded.json")))
     out = []
     # F3: the held mint. Every provable unit free at first sight must get our PR, no claim.
-    for u in [x for x in rec["f3_units"] if x["meet"]]:
-        w = {"gid": u["id"], "gaps": [unit(u["id"], u["template"])], "taken": {"L-meta-1": "someone"}, "gate_open": True,
-             "gate_answers": {"*": rec["f3_gate_answer"]}}
+    # A19: the upstream world of 05:40 (81 open PRs, 41 without an id) and one drain: units 3 s apart, one snapshot dir
+    f3u = [x for x in rec["f3_units"] if x["meet"]]
+    wf3 = upstream_world(3 * len(f3u))
+    gf3 = [unit(u["id"], u["template"]) for u in f3u]          # one export for the whole drain (B2 shares it)
+    for i, u in enumerate(f3u):
+        w = {"gid": u["id"], "gaps": gf3, "taken": {"L-meta-1": "someone"}, "gate_open": True,
+             "gate_answers": {"*": rec["f3_gate_answer"]}, "open_pulls": wf3, "t": 3 * i, "snap": SNAPS + "/f3"}
         out.append(("recorded/F3-" + u["id"], "submit", w, "PR"))
+    # A19 budget: a 400-unit mint drained at 20 units a minute against the same world; every unit free
+    w400 = upstream_world(3 * 400, base=80000)
+    g400 = [unit("L-meta-%d" % (93000 + i)) for i in range(400)]
+    for i in range(400):
+        g = "L-meta-%d" % (93000 + i)
+        out.append(("budget/M400-" + g, "submit", {"gid": g, "gaps": g400, "taken": {"L-meta-1": "someone"},
+                                                    "open_pulls": w400, "t": 3 * i, "snap": SNAPS + "/m400"}, "PR"))
     # F4: yifgu's later merged "Prove L-meta-N" settles our 12 leased PRs: all closed in the first pass
     ours = [our_pr(n, g, lease=l, created=-12000) for n, g, l in rec["f4_ours"]]
     riv = [rival_pr(40000 + i, rec["f4_title"].format(gid=g), created=-9000, merged=-8000, login=rec["f4_rival"])
@@ -665,10 +748,11 @@ def cases():
              "closed_pulls": [norm_pull(p, T0, i) for i, p in enumerate(x.get("closed_pulls", []))]}
         if k == "X4":                                # listed at the first reads, gone at the fresh holder check
             w["gaps_seq"] = [gl, gl, []]
+            w["env"] = {"GAPS_MAX_AGE_S": "0"}       # B2: the shared copy expired between the reads
         if k == "X8":
             w["proof_statement"] = x["proof_statement"]
         if k == "X3b":                               # Lead 05:32 A20: "steps 0" is legitimate; the closer half decides
-            w.pop("taken"); w["taken_text"] = "# updated {T} 05:00:00 steps 0\n"
+            w.pop("taken"); w["taken_text"] = "# updated {T} 05:00:00 steps 0 complete 0 rl 4000 0\n"
         out.append(("hostile/" + k, "submit", w, "no PR" if k != "X3b" else "no PR or closed"))
     # X3b second half: if the opener filed, the closer must close within 60 s (title "Prove L-meta-90001", merged T-120s)
     x = hx["X3b"]
@@ -689,6 +773,14 @@ def cases():
     out.append(("hostile/X7", "close", {"open_pulls": [our_pr(50011, "L-meta-90001", created=-120),
                                                         our_pr(50012, "L-meta-90001", created=-90, title="Prove L-meta-90001")],
                                         "passes": [0, 30]}, {"must_close": [50012], "must_keep": [50011]}))
+    # B15 (fakedrift): real PRs can have body null. A rival's open PR on our unit with body null: no PR from us, and the
+    # closer still closes our later PR on that unit (it reads body for the Lease line)
+    rb = rival_pr(50201, "Prove L-meta-90201", created=-60); rb["body"] = None
+    out.append(("hostile/B15-body-null", "submit", {"gid": "L-meta-90201", "gaps": [unit("L-meta-90201")], "taken": {"L-meta-1": "someone"},
+                                                     "open_pulls": [rb]}, "no PR"))
+    rb2 = dict(rb, merged_at=iso(T0 - 30), closed_at=iso(T0 - 30))
+    out.append(("hostile/B15-body-null-close", "close", {"open_pulls": [our_pr(50202, "L-meta-90201", created=-20)],
+                                                          "closed_pulls": [rb2], "passes": [0, 30]}, {"must_close": [50202]}))
     # X9: makers close ours with a text that is not "proved first": halt
     x = hx["X9"]["ours_closed"][0]
     c = our_pr(x["number"], x["gid"], created=-900)
@@ -876,13 +968,51 @@ def cases():
     for g in hx["X10"]["gaps"]:
         out.append(("hostile/X10-" + g["id"], "submit", {"gid": g["id"], "gaps": [unit_rec(g)], "taken": {"L-meta-1": "someone"},
                                                         "gate_answers": {"*": "held"}}, "PR"))
+    # X12: a batch PR titled with ANOTHER unit carries our unit's file; recent (opener reads files) and old (publisher)
+    for k, cr in (("X12-recent", -10), ("X12-old", -600)):
+        out.append(("hostile/" + k, "submit", {"gid": "L-meta-90101", "gaps": [unit("L-meta-90101")], "taken": {"L-meta-1": "someone"},
+                    "open_pulls": [rival_pr(50101, "Prove L-meta-90102", created=cr, files=["lean/PEqualNP/Outside/L_meta_90101.lean",
+                                                                                             "lean/PEqualNP/Outside/L_meta_90102.lean"])]}, "no PR"))
+    # X13: the files read of a recent no-id PR fails (403 secondary limit): no PR
+    out.append(("hostile/X13", "submit", {"gid": "L-meta-90103", "gaps": [unit("L-meta-90103")], "taken": {"L-meta-1": "someone"},
+                "open_pulls": [rival_pr(50103, "Batch of proofs", created=-10, files=["lean/PEqualNP/Outside/L_meta_90103.lean"])],
+                "files_fail": [50103]}, "no PR"))
+    # A3 (W6 43099ec6, Lead ruling): a partial (or old-format) taken list is not the authority: a rival PR older than the
+    # header that the list missed must still block (full open sweep); with no rival the unit is still filed
+    out.append(("hostile/A3-partial-rival", "submit", {"gid": "L-meta-92301", "gaps": [unit("L-meta-92301")],
+                "taken_text": "# updated {T} 05:00:00 steps 1 partial 1795700000 rl 4000 0\nL-meta-5 1 someone 04:00:00\n",
+                "open_pulls": [rival_pr(50301, "Batch of proofs", created=-3000, files=["lean/PEqualNP/Outside/L_meta_92301.lean"])]}, "no PR"))
+    out.append(("hostile/A3-oldformat-rival", "submit", {"gid": "L-meta-92302", "gaps": [unit("L-meta-92302")],
+                "taken_text": "# updated {T} 05:00:00 steps 1\nL-meta-5 1 someone 04:00:00\n",
+                "open_pulls": [rival_pr(50302, "Batch of proofs", created=-3000, files=["lean/PEqualNP/Outside/L_meta_92302.lean"])]}, "no PR"))
+    out.append(("hostile/A3-partial-free", "submit", {"gid": "L-meta-92303", "gaps": [unit("L-meta-92303")],
+                "taken_text": "# updated {T} 05:00:00 steps 1 partial 1795700000 rl 4000 0\nL-meta-5 1 someone 04:00:00\n",
+                "open_pulls": [rival_pr(50303, "Batch of proofs", created=-3000, files=["lean/PEqualNP/Outside/L_meta_5.lean"])]}, "PR"))
+    # a0 (w12 stall drill): the first create gets a 403 and backs off 30 s; meanwhile a rival opens (at +5 s) or a stop
+    # ref appears (at +5 s): the retry must re-check both (rival snapshot at most 2 s old, halt) and open nothing
+    out.append(("hostile/a0-rival", "submit", {"gid": "L-meta-92201", "gaps": [unit("L-meta-92201")], "taken": {"L-meta-1": "someone"},
+                "create_fail": 1, "open_pulls": [rival_pr(50201, "Batch of proofs", created=5,
+                                                          files=["lean/PEqualNP/Outside/L_meta_92201.lean"])]}, "no PR"))
+    out.append(("hostile/a0-halt", "submit", {"gid": "L-meta-92202", "gaps": [unit("L-meta-92202")], "taken": {"L-meta-1": "someone"},
+                "create_fail": 1, "halt_at": 5}, "no PR"))
+    out.append(("hostile/a0-clear", "submit", {"gid": "L-meta-92203", "gaps": [unit("L-meta-92203")], "taken": {"L-meta-1": "someone"},
+                "create_fail": 1}, "PR"))
+    # Y2: the opener's gate check with the real gate_open_now. Refs unreadable = closed (no claim; the closed-gate rule
+    # then files bare as GATEWAY 4 says); open newer than stop = claim; stop newer = no claim
+    for k, refs, claim in (("Y2-unreadable", "fail", False),
+                           ("Y2-open", ["refs/heads/deskgate/open/200", "refs/heads/deskgate/stop/100"], True),
+                           ("Y2-stopped", ["refs/heads/deskgate/open/100", "refs/heads/deskgate/stop/200"], False)):
+        g = "L-meta-%d" % (92100 + len(k))
+        out.append(("hostile/" + k, "submit", {"gid": g, "gaps": [unit(g)], "taken": {"L-meta-1": "someone"},
+                                               "env": {"CLAIM_FIRST": "tl6c-not-search"}, "gate_answers": {"*": "ok"},
+                                               "gate_refs": refs, "expect_claim": claim}, "PR"))
     # A20: the real taken-list parser. Header count differs from the rows (truncated) = no PR; "steps 0" fresh = files
     out.append(("hostile/A20-truncated", "submit", {"gid": "L-meta-92001", "gaps": [unit("L-meta-92001")],
-                                                    "taken_text": "# updated {T} 05:00:00 steps 3\nL-meta-5 1 someone 04:00:00\n"}, "no PR"))
+                                                    "taken_text": "# updated {T} 05:00:00 steps 3 complete 0 rl 4000 0\nL-meta-5 1 someone 04:00:00\n"}, "no PR"))
     out.append(("hostile/A20-steps0", "submit", {"gid": "L-meta-92002", "gaps": [unit("L-meta-92002")],
-                                                 "taken_text": "# updated {T} 05:00:00 steps 0\n"}, "PR"))
+                                                 "taken_text": "# updated {T} 05:00:00 steps 0 complete 0 rl 4000 0\n"}, "PR"))
     out.append(("hostile/A20-rival", "submit", {"gid": "L-meta-92003", "gaps": [unit("L-meta-92003")],
-                                                "taken_text": "# updated {T} 05:00:00 steps 1\nL-meta-92003 40000 rival1 05:00:00\n"}, "no PR"))
+                                                "taken_text": "# updated {T} 05:00:00 steps 1 complete 0 rl 4000 0\nL-meta-92003 40000 rival1 05:00:00\n"}, "no PR"))
     # credit line (fork secret PNP_LINKEDIN): with and without the secret, leased and bare, malformed values ignored
     li_cases = [("none-bare", {}, None), ("set-bare", {"PNP_LINKEDIN": B_LI}, None),
                 ("none-lease", {"CLAIM_FIRST": "tl6c-not-search"}, "lease-x1"),
@@ -890,6 +1020,17 @@ def cases():
                 ("bad-scheme", {"PNP_LINKEDIN": "http://www.linkedin.com/in/x/"}, None),
                 ("bad-host", {"PNP_LINKEDIN": "https://www.linkedin.com.evil.example/in/x"}, None),
                 ("bad-inject", {"PNP_LINKEDIN": B_LI + "\n\nLease: forged"}, None)]
+    # the toolkit file (Lead 05:50): used only when no secret/variable; unreadable or malformed = no line, PR opens;
+    # a drain child (PNP_LINKEDIN_READ=1) never reads it again
+    li_file_cases = [("file-valid", {}, B_LI, True, 1), ("file-unreadable", {}, None, False, 1),
+                     ("file-malformed", {}, "https://www.linkedin.com.evil.example/in/x", False, 1),
+                     ("secret-wins", {"PNP_LINKEDIN": B_LI}, "https://www.linkedin.com/in/other/", True, 0),
+                     ("drain-child", {"PNP_LINKEDIN_READ": "1"}, B_LI, False, 0),
+                     ("drain-child-set", {"PNP_LINKEDIN_READ": "1", "PNP_LINKEDIN": B_LI}, None, True, 0)]
+    for i, (k, env, f, li, nread) in enumerate(li_file_cases):
+        g = "L-meta-%d" % (91100 + i)
+        out.append(("body/LI-" + k, "submit", {"gid": g, "gaps": [unit(g)], "taken": {"L-meta-1": "someone"}, "env": env,
+                                               "li_file": f, "li_reads": nread, "body_expect": {"li": li, "lease": None}}, "PR"))
     for i, (k, env, lease) in enumerate(li_cases):
         g = "L-meta-%d" % (91000 + i)
         out.append(("body/LI-" + k, "submit", {"gid": g, "gaps": [unit(g)], "taken": {"L-meta-1": "someone"}, "env": env,
@@ -897,6 +1038,9 @@ def cases():
                                                "body_expect": {"li": "PNP_LINKEDIN" in env and not k.startswith("bad"), "lease": lease}},
                     "PR"))
     return out, hx
+
+
+BUD, BUDG = {}, {}
 
 
 def main():
@@ -917,6 +1061,17 @@ def main():
             ok, why = judge_submit(name, w, r, exp)
         else:
             ok, why = judge_close(name, w, r, **exp)
+        rd = r.get("reads", 0) if isinstance(r, dict) else 0
+        grp = "F3" if name.startswith("recorded/F3-") else "M400" if name.startswith("budget/M400-") else None
+        if grp:
+            BUD.setdefault(grp, []).append(rd)
+            BUDG.setdefault(grp, []).append(r.get("gaps_reads", 0) if isinstance(r, dict) else 0)
+        if name.startswith("budget/M400-"):
+            if not ok:
+                fails.append(name)
+                if len([f for f in fails if f.startswith("budget/")]) <= 3:
+                    print("FAIL", name, why)
+            continue
         if name.startswith("recorded/F3-"):
             n_f3 += 1; ok_f3 += ok
             if not ok and len([f for f in fails if f.startswith("recorded/F3-")]) < 3:
@@ -924,7 +1079,7 @@ def main():
             if not ok:
                 fails.append(name)
             continue
-        print("ok  " if ok else "FAIL", name, why)
+        print("ok  " if ok else "FAIL", name, why, f"reads={rd}")
         if not ok:
             fails.append(name)
     for tool, args in (("haltrule.py", []), ("lift.py", ["selftest"]), ("beattest.py", [src])):     # 16.1 / 16.8 S3: pure rule + lift tool
@@ -939,9 +1094,67 @@ def main():
             print(f"FAIL selftest/{tool} missing")
             fails.append(f"selftest/{tool}")
     print(f"recorded/F3 {ok_f3}/{n_f3} provable units of the 21:52-21:53 mint filed")
+    # Lead 06:12 fact fix: the run token's hourly limit is read from rate_limit (about 5,000), not assumed 1,000
+    lim_h, lim_src = 5000, "default, rate_limit not readable here"
+    if os.environ.get("GH_TOKEN"):
+        try:
+            rl = subprocess.run(["gh", "api", "rate_limit", "--jq", ".resources.core.limit"], capture_output=True, text=True, timeout=20)
+            if rl.returncode == 0 and rl.stdout.strip().isdigit():
+                lim_h, lim_src = int(rl.stdout.strip()), "rate_limit of this run's token"
+        except Exception:
+            pass
+    print(f"info budget/token hourly limit {lim_h} ({lim_src})")
+    for grp, lim_avg, lim_tot in (("F3", 2.0, None), ("M400", 2.0, min(800, lim_h // 5))):
+        v = BUD.get(grp) or [0]
+        tot, avg = sum(v), sum(v) / len(v)
+        okb = avg <= lim_avg and (lim_tot is None or tot < lim_tot)
+        print(("ok  " if okb else "FAIL"), f"budget/{grp} GitHub reads total {tot} over {len(v)} units, avg {avg:.2f}/unit, "
+              f"max {max(v)}, {100 * tot / lim_h:.1f}% of the hourly limit (limit avg {lim_avg}" +
+              (f", total < {lim_tot})" if lim_tot else ")"))
+        if not okb:
+            fails.append(f"budget/{grp}")
+        g = BUDG.get(grp) or [0]
+        okg = sum(g) / len(g) <= 0.5
+        print(("ok  " if okg else "FAIL"), f"budget/{grp}-mirror gaps.json pulls total {sum(g)}, avg {sum(g) / len(g):.2f}/unit "
+              f"(limit 0.5; one shared copy per drain, at most 10 s old)")
+        if not okg:
+            fails.append(f"budget/{grp}-mirror")
+    m4 = [f for f in fails if f.startswith("budget/M400-")]
+    if m4:
+        print(f"FAIL budget/M400 {len(m4)} of 400 units not filed")
+    bt = os.path.join(src, ".github", "cloud-pr", "selftest_bucket.py")
+    if os.path.exists(bt):
+        rb = subprocess.run([sys.executable, "-I", bt, os.path.dirname(bt)], capture_output=True, text=True, timeout=120)
+        line = (rb.stdout.strip().splitlines() or ["BUCKET SELFTEST crashed " + rb.stderr.strip()[-120:]])[-1]
+    else:
+        line = "BUCKET SELFTEST FAIL: no selftest_bucket.py in this checkout"
+    print(("ok   " if " OK " in line else "FAIL ") + "rate/" + line)
+    if " OK " not in line:
+        fails.append("rate/bucket")
+    # RC-b (Lead 06:22/06:25): shared halt state, refresher, R3 stamp, rule 16.1 (opener and drain), 16.7 read budget
+    for tool, args, okw, tag in (("selftest_rcb.py", [], "RCB SELFTEST OK", "rcb"), ("haltrule.py", ["selftest"], "HALTRULE OK", "16.1"),
+                                 ("ghcond.py", ["selftest"], "GHCOND SELFTEST OK", "16.7")):
+        tp = os.path.join(src, ".github", "cloud-pr", tool)
+        if os.path.exists(tp):
+            rr = subprocess.run([sys.executable, "-I", tp] + (args or [os.path.dirname(tp)]), capture_output=True, text=True, timeout=600)
+            for l in rr.stdout.strip().splitlines()[:-1]:
+                if l.startswith("FAIL"):
+                    print("  " + l)
+            line = (rr.stdout.strip().splitlines() or [f"{tag} crashed " + rr.stderr.strip()[-120:]])[-1]
+        else:
+            line = f"{okw.split()[0]} FAIL: no {tool} in this checkout"
+        print(("ok   " if line.startswith(okw) else "FAIL ") + f"{tag}/" + line)
+        if not line.startswith(okw):
+            fails.append(f"{tag}/{tool}")
+    dr = open(os.path.join(src, ".github", "cloud-pr", "drain.py")).read()
+    okd = "haltrule.verdict" in dr and re.search(r'DRAIN_PR_SLOTS", "6"', dr)
+    print(("ok   " if okd else "FAIL ") + "rcb/drain uses haltrule.verdict (rule 16.1) and DRAIN_PR_SLOTS defaults to 6")
+    if not okd:
+        fails.append("rcb/drain")
     print("SKIP hostile/X11 mirror export order (team/mirror/mirror.py) and gate stop refs: gate v1.2.1 (T11), not fork code")
     f3 = [f for f in fails if f.startswith("recorded/F3-")]
-    short = [f for f in fails if not f.startswith("recorded/F3-")] + ([f"recorded/F3 ({len(f3)} of {n_f3})"] if f3 else [])
+    short = [f for f in fails if not f.startswith(("recorded/F3-", "budget/M400-"))] + \
+        ([f"recorded/F3 ({len(f3)} of {n_f3})"] if f3 else []) + ([f"budget/M400 ({len(m4)} of 400)"] if m4 else [])
     print(f"{time.time() - t:.0f}s")
     if fails:
         print(f"PREFLIGHT FAIL {sha}: " + ", ".join(short))

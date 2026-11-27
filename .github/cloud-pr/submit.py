@@ -21,6 +21,8 @@ READ_TOKEN (the run's GITHUB_TOKEN, for reads), PR_TOKEN (secret, for the push a
 push, no PR, no branch delete). Prints RESULT=<...> and writes result=<...> to $GITHUB_OUTPUT.
 """
 import base64, fcntl, json, os, re, subprocess, sys, tempfile, time
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # drain runs submit.py with -I (no script dir on the path)
+import ghcond, haltrule                                              # RC-b: 16.7 conditional reads, 16.1 halt rule
 
 UP = "open-goat/pequalnp-proofs"
 GAPS = "https://data.pequalnp.com/data/desk/gaps.json"
@@ -30,14 +32,49 @@ SIZE_LIMIT = 524288
 DESC = "Proof written by an AI worker."
 FOOTER = "\n\n\U0001F916 Generated with [Claude Code](https://claude.com/claude-code)"
 # Owner 05:22 UTC 27 Nov: the makers' optional credit line (PULL_REQUEST_TEMPLATE.md, tools/pnp.sh PNP_LINKEDIN). The address
-# comes ONLY from the fork secret PNP_LINKEDIN (never from a file in a repository); unset or malformed = no line, and the
-# body is then byte for byte what it was before. The Lease paragraph and the footer keep their place and form.
-_LI = os.environ.get("PNP_LINKEDIN", "").strip()
-LI = f"\n\n**LinkedIn profile**: {_LI}" if re.fullmatch(r"https://www\.linkedin\.com/in/[A-Za-z0-9%._-]+/?", _LI) else ""
+# comes from the fork secret or variable PNP_LINKEDIN, else (Lead 05:50, signed) from config/linkedin.txt in the private
+# toolkit, read ONCE per drain by drain.py (children get PNP_LINKEDIN_READ=1 and never read it again) or once by a
+# single-unit run. Unset, unreadable, slow (20 s) or malformed = no line, and the body is then byte for byte what it was
+# before; the PR opens either way. The Lease paragraph and the footer keep their place and form. Never logged.
+LI_RX = r"https://www\.linkedin\.com/in/[A-Za-z0-9%._-]+/?"
+_LIV = []
+
+
+def li_from_toolkit():
+    """config/linkedin.txt on toolkit main: one authenticated blobless shallow fetch, 20 s in all; '' on any failure."""
+    if not os.environ.get("PR_TOKEN"):
+        return ""
+    import shutil
+    g = tempfile.mkdtemp(prefix="li-")
+    try:
+        a = auth_cfg()
+        subprocess.run(["git", "init", "-q", "--bare", g], capture_output=True, timeout=10)
+        subprocess.run(["git", "-C", g, "remote", "add", "origin", TK_URL], capture_output=True, timeout=10)
+        t = time.time()
+        r = subprocess.run(["git", *a, "-C", g, "fetch", "-q", "--depth=1", "--filter=blob:none", "origin", "main"],
+                           capture_output=True, text=True, timeout=20)
+        if r.returncode:
+            return ""
+        r = subprocess.run(["git", *a, "-C", g, "show", "FETCH_HEAD:config/linkedin.txt"], capture_output=True, text=True,
+                           timeout=max(1.0, 20 - (time.time() - t)))
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except Exception:
+        return ""
+    finally:
+        shutil.rmtree(g, ignore_errors=True)
+
+
+def li_line():
+    if not _LIV:
+        v = os.environ.get("PNP_LINKEDIN", "").strip()
+        if not v and os.environ.get("PNP_LINKEDIN_READ") != "1":
+            v = li_from_toolkit()
+        _LIV.append(f"\n\n**LinkedIn profile**: {v}" if re.fullmatch(LI_RX, v) else "")
+    return _LIV[0]
 
 
 def pr_body(lease):
-    return DESC + LI + (f"\n\nLease: {lease}" if lease else "") + FOOTER
+    return DESC + li_line() + (f"\n\nLease: {lease}" if lease else "") + FOOTER
 
 ID = os.environ["ID"]; MOD = os.environ["MOD"]; PROOF = os.environ["PROOF"]; TREE = os.environ["TREE"]
 W = os.environ.get("W", tempfile.mkdtemp())
@@ -108,6 +145,31 @@ def curl_json(url, timeout=60):
     raise RuntimeError(f"curl {url}: {r.stderr.strip()[:200]}")
 
 
+GAPS_MAX_AGE_S = float(os.environ.get("GAPS_MAX_AGE_S", "10"))
+
+
+def gaps_json():
+    """B2 (27 Nov): one gaps.json copy per drain, shared by every worker and read again only when older than
+    GAPS_MAX_AGE_S (7 MB a pull; it was 3 to 4 pulls per unit). The copy is also what the guards read (GAPS_FILE)."""
+    d = os.environ.get("RIVAL_SNAP_DIR") or os.environ.get("PR_GATE_DIR") or W
+    os.makedirs(d, exist_ok=True)
+    f, tf = os.path.join(d, "gaps.json"), os.path.join(d, "gaps.t")
+    with open(os.path.join(d, "gaps.lock"), "w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        try:
+            if 0 <= time.time() - float(open(tf).read()) < GAPS_MAX_AGE_S:
+                return json.load(open(f))
+        except Exception:
+            pass
+        gj = curl_json(GAPS, 60)
+        with open(f + ".tmp", "w") as o:
+            json.dump(gj, o)
+        os.replace(f + ".tmp", f)
+        with open(tf, "w") as o:
+            o.write(str(time.time()))
+        return gj
+
+
 GATE_WAIT_S = float(os.environ.get("GATE_WAIT_S", "60"))   # GATEWAY 4: lease ok within 60 s
 
 
@@ -139,6 +201,19 @@ def _gate(req, gid, wait):
     return None
 
 
+def gate_answer_lease(gid):
+    """the lease id in the gate's last answer ref lease/<gid> ("lease <gid> ok <lease>"), else None"""
+    try:
+        g = dg().REPO
+        if run(["git", "-C", g, "fetch", "-q", "origin", f"+refs/heads/lease/{gid}:refs/gate-ans"], timeout=60).returncode:
+            return None
+        m = re.fullmatch(rf"lease {re.escape(gid)} ok (\S+)",
+                         run(["git", "-C", g, "log", "-1", "--format=%s", "refs/gate-ans"], timeout=30).stdout.strip())
+        return m.group(1) if m else None
+    except Exception:
+        return None
+
+
 STG = {}          # Lead 19:14: seconds per stage per unit (guards, race, gate, push, pr), printed as one TIMES line
 LAST_GJ = [None]  # the gaps.json read of the race check (mirror pause check of gate_open_now)
 
@@ -146,16 +221,22 @@ LAST_GJ = [None]  # the gaps.json read of the race check (mirror pause check of 
 def gate_open_now():
     """Lead 19:14: (open, why) without a gate round trip. Closed at once when the toolkit has no deskgate/open/<epoch>
     ref newer than the newest deskgate/stop/<epoch> ref (if any), or the mirror lists our handle as paused. Then no
-    claim is sent (and the one-claim lock is not used up). A git error = unknown -> ask the gate as before."""
+    claim is sent (and the one-claim lock is not used up). Red team Y2 (Lead 05:35): refs unreadable after 3 tries
+    2 s apart = CLOSED (was "unknown" = open, and the claim went out)."""
     gj = LAST_GJ[0] or {}
     if any((p.get("handle") if isinstance(p, dict) else p) == HANDLE for p in gj.get("paused") or []):
         return False, "paused in the mirror"
-    try:
-        r = run(["git", "-C", dg().REPO, "ls-remote", "origin", "refs/heads/deskgate/open/*", "refs/heads/deskgate/stop/*"], timeout=30)
-    except Exception:
-        return True, "unknown"
-    if r.returncode:
-        return True, "unknown"
+    r = None
+    for k in range(3):
+        try:
+            r = run(["git", "-C", dg().REPO, "ls-remote", "origin", "refs/heads/deskgate/open/*", "refs/heads/deskgate/stop/*"], timeout=30)
+            if r.returncode == 0:
+                break
+        except Exception:
+            r = None
+        time.sleep(2)
+    if r is None or r.returncode:
+        return False, "gate refs unreadable (closed, fail closed)"
     ep = lambda k: [int(m.group(1)) for m in re.finditer(rf"/deskgate/{k}/(\d+)$", r.stdout, re.M)]
     op, st = ep("open"), ep("stop")
     if not op or max(op) <= max(st or [0]):
@@ -185,7 +266,23 @@ def gh(args, write=False, timeout=120):
             if not TRANSIENT.search(r.stderr + r.stdout):
                 break
             time.sleep(5 * (att + 1))
+    LAST_GH[0] = r
     raise RuntimeError("gh " + " ".join(args[:3]) + ": " + (r.stderr.strip()[:200] if r else "no token"))
+
+
+LAST_GH = [None]
+
+
+def gh_cond(args, timeout=60):
+    """for ghcond.get: the CompletedProcess even when gh exits non-zero (w12 07:02: `gh api -i` exits 1 on a 304, which
+    gh() raises on); ghcond reads the status line and decides (304 = cached body, anything else non-2xx = fail closed)"""
+    LAST_GH[0] = None
+    try:
+        return gh(args, timeout=timeout)
+    except RuntimeError as e:
+        if LAST_GH[0] is not None:
+            return LAST_GH[0]
+        return subprocess.CompletedProcess(args, 1, "", str(e))
 
 
 # ---- survey.py port -------------------------------------------------------------------------------------------
@@ -238,11 +335,17 @@ TAKEN_REF = "refs/heads/status/taken"
 
 
 _TL = []
+TL_HDR = [None]          # header epoch of the last taken list read: every PR created before it is in the list (A19)
+TL_COMPLETE = [True]     # W6 43099ec6 (Lead ruling A3): header field 7 "complete"; partial or old format = not the authority
+
+
+TL_T = [0.0]
 
 
 def taken_list():
     if not _TL:
         _TL.append(_taken_list())
+        TL_T[0] = time.time()
     return _TL[0]
 
 
@@ -270,7 +373,11 @@ def _taken_list():
     if not m or int(m.group(1)) != len(rows):
         log(f"taken list: header says {m.group(1) if m else 'no count'}, {len(rows)} rows (truncated, fail closed)")
         return None
-    log(f"taken list: fresh, steps {len(rows)}, {age:.0f} s old")
+    h = t[0].split()
+    TL_COMPLETE[0] = len(h) > 7 and h[6] == "complete"
+    log(f"taken list: fresh, steps {len(rows)}, {age:.0f} s old" +
+        ("" if TL_COMPLETE[0] else ", PARTIAL (or old format): every open PR is read by the snapshot"))
+    TL_HDR[0] = int(t[0].split()[2])
     return rows
 
 
@@ -279,11 +386,19 @@ def race_check(step_id):
     list, or the list is stale) the GitHub search below, on the run's own token."""
     _TL.clear()                          # fresh copy right before the push
     tl = taken_list()
+    if tl is not None and not TL_COMPLETE[0]:     # A3: a partial list proves nothing about absent units
+        rv = rival_now(step_id, SNAP_MAX_AGE_S)
+        log("race check: taken list partial, full open sweep:", rv or "clear")
+        if rv:
+            return [{"number": "?", "state": "OPEN", "ours": False, "why": rv}]
+        return []
     if tl is not None and step_id not in tl:
         log("race check: not on the taken list (no API call)")
         return []
     if tl is not None and tl.get(step_id) == HANDLE:
         return [{"number": "?", "state": "OPEN", "ours": True, "why": "our PR on the taken list"}]
+    if tl is not None and step_id in tl:      # A19: another author's PR on the list is a rival; no search, no file reads
+        return [{"number": "?", "state": "OPEN", "ours": False, "why": f"taken list: first PR by {tl[step_id]}"}]
     n = step_id.split("-")[-1]
     mod = step_id.replace("-", "_")
     out = gh(["pr", "list", "--repo", UP, "--state", "all", "--search", n, "--limit", "200",
@@ -481,6 +596,10 @@ def claim(gid, prio=1):
         old = None if DRY or not PR_TOKEN else dg().lease_of(gid)
         if old:      # D: our own earlier claim (retry or the other opener): reuse its lease, never claim twice
             return old, "reused the lease recorded on claim/" + gid
+        rec = gate_answer_lease(gid)     # W6 B10: the earlier run died after the grant, before record_lease
+        if rec:
+            dg().record_lease(gid, rec)
+            return rec, "recovered the lease from the gate's answer lease/" + gid
         return None, "claim skipped: this step was claimed once already"
     t = time.time()
     cls, lid = gate_claim(gid)
@@ -521,51 +640,182 @@ _FILES = {}
 
 
 def pr_files(n):
-    """changed file paths of an upstream PR (cached per run)"""
+    """changed file paths of an upstream PR (all pages). Raises on any read error: a failed read is never "no files"
+    (red team X13)."""
     if n not in _FILES:
-        _FILES[n] = [f.get("filename") for f in json.loads(gh(["api", f"repos/{UP}/pulls/{n}/files?per_page=100"]).stdout or "[]")]
+        fs, pg = [], 1
+        while True:
+            r = gh(["api", f"repos/{UP}/pulls/{n}/files?per_page=100&page={pg}"])
+            if r.returncode:
+                raise RuntimeError(f"files of #{n}: rc={r.returncode} {r.stderr.strip()[:80]}")
+            got = json.loads(r.stdout)
+            if not isinstance(got, list):
+                raise RuntimeError(f"files of #{n}: not a list")
+            fs += [f.get("filename") for f in got]
+            if len(got) < 100 or pg >= 30:
+                break
+            pg += 1
+        _FILES[n] = fs
     return _FILES[n]
 
 
-def rival_now(gid):
-    """Another author's open PR on the unit, right before we decide and again right before gh pr create.
-    Mintdrill gaps (red team 27 Nov): A1 a title or branch that names NO unit id is checked by its changed file path
-    (lean/PEqualNP/Outside/<unit>.lean); A2 every open PR newer than RIVAL_WINDOW_S is read (all pages, not the newest
-    100; older ones are on the taken list); A3/A4 a missing, stale or empty taken list = rival (fail closed).
-    Any error = rival (no PR). RIVAL_FIXTURE: the pulls JSON (tests)."""
-    tl = None if os.environ.get("RIVAL_FIXTURE") else taken_list()
-    if not os.environ.get("RIVAL_FIXTURE"):
-        if tl is None:
-            return "taken list missing, older than 180 s or truncated (fail closed)"
-        if tl.get(gid) not in (None, HANDLE):
-            return f"taken list: first PR by {tl.get(gid)}"
-    rel = f"lean/PEqualNP/Outside/{gid.replace('-', '_')}.lean"
-    pat = re.compile(r"(?<![A-Za-z0-9])(%s|%s)(?![0-9])" % (re.escape(gid), re.escape(gid.replace("-", "_"))))
+SNAP_MAX_AGE_S = 5       # A19: one snapshot shared by every drain worker
+SNAP_CREATE_AGE_S = float(os.environ.get("SNAP_CREATE_AGE_S", "2"))   # Lead 06:12: at gh pr create at most 2 s old
+SNAP_DIR = os.environ.get("RIVAL_SNAP_DIR") or os.environ.get("PR_GATE_DIR") or W
+SNAP_PAGE, SNAP_MAX_PAGES = 100, 10     # w12 07:16: 100 a page = one read per build in a wave (40 PRs a minute); 304 when unchanged
+FILE_UNIT_RX = re.compile(r"lean/PEqualNP/Outside/(L_[a-z0-9]+(?:_[a-z0-9]+)*_\d+|V_[a-z0-9]+(?:_[a-z0-9]+)*_\d+__k\d+)\.lean")
+
+
+def file_unit(f):
+    m = FILE_UNIT_RX.fullmatch(f or "")
+    if not m:
+        return None
+    u = m.group(1)
+    return ("L_" + u[2:].split("__k")[0] if u.startswith("V_") else u).replace("_", "-")
+
+
+def _build_snapshot(files):
+    """taken list (fresh fetch) + every open PR created after its header minus 30 s, with its units by title, branch
+    and changed files. Older PRs are in the taken list (takenpub.py maps every open PR by file path). Raises on any
+    failed read (fail closed)."""
+    t_build = None    # R3 + Lead 06:52: stamped right before the FIRST open-pulls page request (the read that sees new
+    # PRs); the taken list is reused up to 10 s and is covered by the header-30 s window, so it does not age the snapshot
+    if time.time() - TL_T[0] > 10:          # canary A2: a list fetched in the last 10 s is reused (1 s a fetch)
+        _TL.clear()
+    tl = taken_list()
+    if tl is None:
+        raise RuntimeError("taken list missing, older than 180 s or truncated (fail closed)")
+    full = not TL_COMPLETE[0]               # A3: partial list -> every open PR (100 a page), not only the newest
+    cut = -1e18 if full else TL_HDR[0] - 30
+    size, maxp = (100, 60) if full else (SNAP_PAGE, SNAP_MAX_PAGES)
+    recent, seen_n = [], set()
+    dur = {}
+
+    def page(k):
+        # 16.7: read with If-None-Match: an unchanged page is a 304 and costs nothing of the run token's hourly
+        # limit; any failed read raises (fail closed)
+        t_rd = time.time()
+        try:
+            pulls, counted, rem = ghcond.get(f"repos/{UP}/pulls?state=open&sort=created&direction=desc&per_page={size}&page={k}",
+                                             gh=gh_cond)
+            dur[k] = time.time() - t_rd
+        except ghcond.ReadFail as e:
+            raise RuntimeError(f"open pulls page {k}: {e}")
+        if not isinstance(pulls, list):
+            raise RuntimeError(f"open pulls page {k}: not a list")
+        old = False
+        for p in pulls:
+            c = time.mktime(time.strptime(p["created_at"][:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone
+            if c < cut:
+                old = True
+                continue
+            who = (p.get("user") or {}).get("login") or "?"
+            if who == HANDLE or p["number"] in seen_n:
+                continue
+            seen_n.add(p["number"])
+            us = set(UNIT_TOKEN.findall(p.get("title") or "")) | \
+                set(UNIT_TOKEN.findall(((p.get("head") or {}).get("ref") or "").replace("_", "-")))
+            key = f"{p['number']}:{(p.get('head') or {}).get('sha') or ''}"
+            if key not in files:
+                files[key] = sorted({u for u in map(file_unit, pr_files(p["number"])) if u})
+            recent.append({"n": p["number"], "who": who, "units": sorted(us | set(files[key])),
+                           "by_file": sorted(set(files[key]) - us)})
+        return old or len(pulls) < size
+
+    for k in range(1, maxp + 1):
+        if k == 1:
+            t_build = time.time()
+        if page(k):
+            if k > 1:           # w12 07:16: several pages took time; page 1 (the newest PRs) is read again last and
+                t_build = time.time()     # the snapshot is stamped at THAT request (usually a 304)
+                page(1)
+            return {"t": t_build, "d": round(dur.get(1, 0.0), 3), "hdr": TL_HDR[0], "taken": tl, "recent": recent,
+                    "files": files, "rl": ghcond.STATS["remaining"], "full": full}
+    raise RuntimeError(f"more than {maxp} pages of open PRs since the taken list (fail closed)")
+
+
+SNAP_READ_MAX_S = 6.0    # HARDENING 16.12: a newest-page read slower than this is thrown away (SNAP-SLOW)
+
+
+def snap_fresh(snap, bound, now=None):
+    """HARDENING 16.12 (Lead 07:18): what must be fresh is the newest-page read (the taken list covers everything before
+    its header). Fresh = that read STARTED at most max(bound, d + 1 s) ago, d its own duration, and d <= 6 s."""
+    now = time.time() if now is None else now
+    d = float(snap.get("d") or 0.0)
+    return d <= SNAP_READ_MAX_S and 0 <= now - snap["t"] <= max(bound, d + 1.0)
+
+
+def _snap_note(snap):
+    """one line per build in SNAP_DIR/snapd.log (newest-page read duration), read by drain.py for the per-drain
+    p50/p95/max; a read over 6 s also leaves SNAP_DIR/snapslow for the drain's SNAP-SLOW alert"""
     try:
-        for k in range(1, RIVAL_MAX_PAGES + 1):
-            if os.environ.get("RIVAL_FIXTURE"):
-                pulls = json.load(open(os.environ["RIVAL_FIXTURE"]))[(k - 1) * 100:k * 100]
-            else:
-                pulls = json.loads(gh(["api", f"repos/{UP}/pulls?state=open&sort=created&direction=desc&per_page=100&page={k}"]).stdout)
-            old = False
-            for p in pulls:
-                who = (p.get("user") or {}).get("login")
-                t, ref = p.get("title") or "", (p.get("head") or {}).get("ref") or ""
-                if who != HANDLE and (pat.search(t) or pat.search(ref)):
-                    return f"#{p.get('number')} by {who}"
-                if who != HANDLE and not UNIT_TOKEN.search(t) and not UNIT_TOKEN.search(ref.replace("_", "-")) \
-                        and rel in pr_files(p["number"]):
-                    return f"#{p.get('number')} by {who} (file path)"
-                try:
-                    if time.time() - (time.mktime(time.strptime(p["created_at"][:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone) > RIVAL_WINDOW_S:
-                        old = True
-                except (KeyError, ValueError):
-                    pass
-            if len(pulls) < 100 or old:
-                return None
-        return f"more than {RIVAL_MAX_PAGES} pages of open PRs in {RIVAL_WINDOW_S} s (fail closed)"
+        with open(os.path.join(SNAP_DIR, "snapd.log"), "a") as o:
+            o.write(f"{snap['t']:.1f} {snap.get('d', 0):.3f}\n")
+        if float(snap.get("d") or 0) > SNAP_READ_MAX_S:
+            with open(os.path.join(SNAP_DIR, "snapslow"), "w") as o:
+                o.write(f"{time.time():.0f} {snap.get('d', 0):.1f}\n")
+    except OSError:
+        pass
+
+
+def rival_snapshot(max_age=None):
+    """the shared snapshot, fresh by snap_fresh() for max_age (default SNAP_MAX_AGE_S) (flock in SNAP_DIR; one builder
+    at a time)"""
+    max_age = SNAP_MAX_AGE_S if max_age is None else max_age
+    os.makedirs(SNAP_DIR, exist_ok=True)
+    f = os.path.join(SNAP_DIR, "rival_snap.json")
+    try:                    # RC-b 1: a fresh copy (kept fresh by the drain's refresher) is read WITHOUT the lock, so a
+        old = json.load(open(f))       # worker holding a PR slot never waits on a build in progress
+        if max_age > 0 and snap_fresh(old, max_age):
+            return old
+    except Exception:
+        pass
+    with open(os.path.join(SNAP_DIR, "rival_snap.lock"), "w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        old = {}
+        try:
+            old = json.load(open(f))
+            if max_age > 0 and snap_fresh(old, max_age):
+                return old
+        except Exception:
+            pass
+        snap = _build_snapshot(dict(old.get("files") or {}))
+        _snap_note(snap)
+        bound = max_age if max_age > 0 else SNAP_CREATE_AGE_S     # 0 = forced rebuild (refresher): the create bound
+        for _ in range(3):     # 16.12: not fresh (slow newest-page read, or slow files reads after it): read again
+            if snap_fresh(snap, bound):
+                break
+            snap = _build_snapshot(dict(snap.get("files") or {}))
+            _snap_note(snap)
+        else:
+            if not snap_fresh(snap, bound):
+                raise RuntimeError(f"snapshot {time.time() - snap['t']:.1f} s old, newest-page read {snap.get('d', 0):.1f} s, "
+                                   f"after 4 builds (16.12 bound max({bound}, d + 1), d <= {SNAP_READ_MAX_S:.0f})")
+        with open(f + ".tmp", "w") as o:
+            json.dump(snap, o)
+        os.replace(f + ".tmp", f)
+        log(f"rival snapshot: taken {len(snap['taken'])} rows (header {time.time() - snap['hdr']:.0f} s old), "
+            f"{len(snap['recent'])} open PRs since, file cache {len(snap['files'])}")
+        return snap
+
+
+def rival_now(gid, max_age=None):
+    """Another author's PR on the unit, right before we decide and again right before gh pr create (A19 design, Lead
+    05:40): the taken list is the authority for every PR created before its header (REST publisher, units by title,
+    branch AND changed files of every open PR); open PRs created after the header minus 30 s are read here, with their
+    file paths, once per snapshot shared by all drain workers. Any failed read = rival (no PR)."""
+    try:
+        snap = rival_snapshot(max_age)
     except Exception as e:
-        return "rival check failed: " + repr(e)[:80]
+        return "rival check failed: " + str(e)[:120]
+    STG["snap_age"] = round(time.time() - snap["t"], 1)
+    who = snap["taken"].get(gid)
+    if who not in (None, HANDLE):
+        return f"taken list: first PR by {who}"
+    for p in snap["recent"]:
+        if gid in p["units"]:
+            return f"#{p['n']} by {p['who']}" + (" (file path)" if gid in p.get("by_file", []) else "")
+    return None
 
 
 def rival_open(gid):
@@ -608,7 +858,7 @@ def pr_list(g):
 def race_ok(gid):
     """(ok, why, lease). have=proof always: we hold a finished file."""
     try:
-        gj = curl_json(GAPS, 60)
+        gj = gaps_json()
         LAST_GJ[0] = gj
         if gid in (gj.get("withdrawn") or {}):
             return False, "withdrawn: " + str(gj["withdrawn"][gid])[:120], None
@@ -646,7 +896,7 @@ def race_ok(gid):
             if rv:
                 return False, "dry run: rival: " + rv, None
             try:
-                g2 = next((x for x in curl_json(GAPS, 60)["gaps"] if x["id"] == gid), None)
+                g2 = next((x for x in gaps_json()["gaps"] if x["id"] == gid), None)
             except Exception as e:
                 return False, "dry run: fresh gaps read failed " + repr(e)[:80], None
             if g2 is None or g2.get("held_now") or (g2.get("holders_now") or 0) > 0:
@@ -680,7 +930,7 @@ def race_ok(gid):
                 case = "rival: " + rv
         if case == "bare":
             try:
-                g2 = next((x for x in curl_json(GAPS, 60)["gaps"] if x["id"] == gid), None)
+                g2 = next((x for x in gaps_json()["gaps"] if x["id"] == gid), None)
             except Exception:
                 g2 = {"held_now": True}          # cannot tell: treat as held (fail closed)
             if g2 is None:
@@ -707,13 +957,34 @@ def stopped():
     return r.stdout.strip() == "200"
 
 
+def fork_head(gid):
+    """sha of this fork's branch <gid> (the PR head), None when it does not exist. A git read, no API call. Raises when
+    unreadable (callers fail closed: no push, no PR)."""
+    for k in range(3):
+        r = run(["git"] + (auth_cfg() if PR_TOKEN else []) + ["ls-remote", f"https://github.com/{FORK}.git", f"refs/heads/{gid}"],
+                timeout=60)
+        if r.returncode == 0:
+            o = r.stdout.split()
+            return o[0] if o else None
+        time.sleep(2)
+    raise RuntimeError("fork branch unreadable")
+
+
+def our_prs_on_branch(gid, state):
+    out = gh(["api", f"repos/{UP}/pulls?head={HANDLE}:{gid}&state={state}", "--jq", ".[].html_url"])
+    if out.returncode:
+        raise RuntimeError(f"PR lookup failed rc={out.returncode}")
+    return out.stdout.split()
+
+
 def open_pr_for_branch(gid):
-    """Our own open PR whose head is this fork's branch <gid> (exact, no search index lag). Skipped (no API call) when
-    the fresh taken list has no PR at all for the step."""
+    """Our own open PR whose head is this fork's branch <gid> (exact, no search index lag). No API call when neither
+    the fresh taken list nor the fork has anything for the step (W6 mintfail: a PR younger than the taken list header
+    was missed and a re-run pushed onto it)."""
     tl = taken_list()
-    if tl is not None and gid not in tl:
+    if tl is not None and gid not in tl and fork_head(gid) is None:
         return None
-    out = gh(["api", f"repos/{UP}/pulls?head={HANDLE}:{gid}&state=open", "--jq", ".[].html_url"]).stdout.split()
+    out = our_prs_on_branch(gid, "open")
     return out[0] if out else None
 
 
@@ -735,7 +1006,9 @@ def push_branch(c, gid):
     if nums:
         git("fetch", "-q", "--depth=1", url, f"{nums[0][1]}:refs/fork/tip", timeout=180)
     for att in range(4):
-        r = run(["git"] + auth_cfg() + ["-C", TREE, "push", "-q", "-f", url, f"{c}:refs/heads/{gid}"], timeout=600)
+        # create-only (Lead 06:12): the ref must not exist yet; an existing head is never rewritten
+        r = run(["git"] + auth_cfg() + ["-C", TREE, "push", "-q", f"--force-with-lease=refs/heads/{gid}:", url,
+                                        f"{c}:refs/heads/{gid}"], timeout=600)
         if r.returncode == 0 or not TRANSIENT.search(r.stderr):
             return r.stderr.strip()[:300] if r.returncode else None
         log("push retry", r.stderr.strip()[:150].replace("\n", " | "))
@@ -743,9 +1016,114 @@ def push_branch(c, gid):
     return r.stderr.strip()[:300]
 
 
+PR_PER_MIN = int(os.environ.get("PR_PER_MIN", "70"))       # Lead 06:12: GitHub documents 80/min and 500/hour per token
+PR_PER_HOUR = int(os.environ.get("PR_PER_HOUR", "480"))
+
+
+def bucket_wait(d, now):
+    """PR-create budget shared by every worker of a drain (file PR_GATE_DIR/creates.log under flock): 0 = take a
+    create now (recorded), else the seconds to wait. A stall (PR_GATE_DIR/stall: epoch until) after a 403/429 blocks
+    every worker until it ends."""
+    with open(os.path.join(d, "creates.lock"), "w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        try:
+            until = float(open(os.path.join(d, "stall")).read())
+        except Exception:
+            until = 0.0
+        if now < until:
+            return until - now
+        f = os.path.join(d, "creates.log")
+        try:
+            ts = [float(x) for x in open(f).read().split() if now - float(x) < 3600]
+        except Exception:
+            ts = []
+        if os.path.exists(os.path.join(d, "giveup")):
+            return float("inf")                      # 16.13: four refusals in this drain: no create any more
+        last_min = [t for t in ts if now - t < 60]
+        if len(last_min) >= gate_rate(d):
+            return 60 - (now - min(last_min)) + 0.05
+        if len(ts) >= PR_PER_HOUR:
+            return 3600 - (now - min(ts)) + 0.05
+        ts.append(now)
+        with open(f + ".tmp", "w") as o:
+            o.write("\n".join(f"{t:.3f}" for t in ts))
+        os.replace(f + ".tmp", f)
+        return 0.0
+
+
+PR_RATE_FLOOR = 10
+RL_HDRS = ("retry-after", "x-ratelimit-limit", "x-ratelimit-remaining", "x-ratelimit-used", "x-ratelimit-reset",
+           "x-ratelimit-resource")
+
+
+def refusals(d):
+    try:
+        return int(open(os.path.join(d, "refusals")).read().strip() or 0)
+    except (OSError, ValueError):
+        return 0
+
+
+def gate_rate(d):
+    """HARDENING 16.13 (Lead 07:25) (2): the drain's create rate, halved after every refusal (70, 35, 17, floor 10)"""
+    k = refusals(d)
+    return max(PR_RATE_FLOOR, PR_PER_MIN >> k) if k else PR_PER_MIN
+
+
+def refusal_wait(k, hdr, now):
+    """16.13 (1): retry-after if present, else until x-ratelimit-reset when x-ratelimit-remaining is 0, else 60 s;
+    the k-th refusal of a drain waits at least 60 * 2^(k-1) s (60, 120, 240)"""
+    ra, rem, rs = (str(hdr.get(x) or "").strip() for x in ("retry-after", "x-ratelimit-remaining", "x-ratelimit-reset"))
+    if ra.isdigit():
+        base = float(ra)
+    elif rem == "0" and rs.isdigit():
+        base = max(0.0, float(rs) - now) + 1.0
+    else:
+        base = 60.0
+    return max(base, 60.0 * 2 ** (k - 1)) if k > 1 else base
+
+
+def bucket_refusal(d, hdr, why, now=None):
+    """16.13: GitHub refused a create (403/429/secondary limit). Every worker of the drain stops creating for
+    refusal_wait(); the rate is halved; the 4th refusal ends the drain's creates (PR_GATE_DIR/giveup, PR-STALL-GIVEUP).
+    Returns (k, wait, rate)."""
+    now = time.time() if now is None else now
+    with open(os.path.join(d, "creates.lock"), "w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        k = refusals(d) + 1
+        with open(os.path.join(d, "refusals"), "w") as o:
+            o.write(str(k))
+        wait = refusal_wait(k, hdr, now)
+        try:
+            until = float(open(os.path.join(d, "stall")).read())
+        except Exception:
+            until = 0.0
+        with open(os.path.join(d, "stall"), "w") as o:
+            o.write(str(max(until, now + wait)))
+        if k >= 4:
+            with open(os.path.join(d, "giveup"), "w") as o:
+                o.write(f"{now:.0f} {why[:200]}".replace("\n", " "))
+    rate = gate_rate(d)
+    hs = " ".join(f"{x}={hdr.get(x, '')}" for x in RL_HDRS)
+    if k >= 4:
+        log(f"PR-STALL-GIVEUP refusal {k} in this drain: no more creates in this drain (units stay unseen) ({hs})")
+    else:
+        log(f"PR-STALL refusal {k}/4: every worker stops creating for {wait:.0f} s, rate now {rate}/min ({hs})")
+    return k, wait, rate
+
+
+def bucket_stall(d, seconds, why):
+    """after a 403/429 on a create: no worker creates for `seconds` (the retry-after, else 60 s)"""
+    with open(os.path.join(d, "creates.lock"), "w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        with open(os.path.join(d, "stall"), "w") as o:
+            o.write(str(time.time() + seconds))
+    log(f"PR-STALL {seconds:.0f}s: every worker stops creating PRs ({why[:100]})")
+
+
 class pr_gate:
-    """Drain mode (drain.py, many submit.py at once on one runner): at most PR_GATE_N (2) PR creations in flight,
-    by flock on PR_GATE_DIR/slot<k> (GitHub refuses PR-creation bursts). No PR_GATE_DIR (one run per branch): no gate."""
+    """Drain mode (drain.py, many submit.py at once on one runner): at most PR_GATE_N PR creations in flight (flock on
+    PR_GATE_DIR/slot<k>; drain.py sets it from DRAIN_PR_SLOTS), and at most PR_PER_MIN creates a minute and
+    PR_PER_HOUR an hour for the whole drain (bucket_wait). No PR_GATE_DIR (one run per branch): no gate."""
     def __enter__(self):
         self.f = None
         d = os.environ.get("PR_GATE_DIR")
@@ -753,10 +1131,25 @@ class pr_gate:
             for k in range(int(os.environ.get("PR_GATE_N", "2"))):
                 f = open(os.path.join(d, f"slot{k}"), "w")
                 try:
-                    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB); self.f = f; return self
+                    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB); self.f = f
+                    break
                 except OSError:
                     f.close()
+            if self.f:
+                break
             time.sleep(0.2)
+        t0 = time.time()
+        self.giveup = False
+        while d:
+            w = bucket_wait(d, time.time())
+            if w == float("inf"):
+                self.giveup = True               # 16.13: four refusals: this drain creates nothing more
+                break
+            if w <= 0:
+                break
+            time.sleep(min(w, 5))
+        if d and time.time() - t0 > 0.5:
+            STG["bucket_wait"] = round(time.time() - t0, 1)
         return self
 
     def __exit__(self, *a):
@@ -765,6 +1158,21 @@ class pr_gate:
 
 
 def submit(gid, lease):
+    # Lead 06:12 (W6 mintfail): the head branch Leg0shii:<ID> is created once with a create-only push and never
+    # forced. If it exists: our open PR on it = done; our closed PR on it = stop (nothing reopens, I5); neither = the
+    # earlier run died between push and create: open the PR from the existing commit.
+    try:
+        head = fork_head(gid)
+        if head:
+            op = our_prs_on_branch(gid, "open")
+            if op:
+                return op[0], "ok (our PR on the existing branch)"
+            if our_prs_on_branch(gid, "closed"):
+                return None, "our PR on this branch was closed: no reopen (I5)"
+            log("branch", gid, "exists at", head[:12], "with no PR: opening the PR from it (no push)")
+            return create_pr(gid, lease)
+    except RuntimeError as e:
+        return None, "head check failed (fail closed): " + str(e)[:120]
     base = git("rev-parse", "HEAD").stdout.strip()
     if not base:
         return None, "no upstream main"
@@ -780,7 +1188,9 @@ def submit(gid, lease):
     changed = git("diff-tree", "--name-only", "-r", base, tree).stdout.split()
     if changed != [REL]:
         return None, f"unexpected changed files {changed}"
-    msg = gid + "\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\n"
+    # rule 16.5 (2): a per-opener nonce, so two openers never build the same sha
+    msg = gid + f"\n\nOpener-Nonce: cloud-{os.environ.get('GITHUB_RUN_ID', 'x')}-{os.urandom(6).hex()}" \
+        "\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\n"
     cenv = dict(os.environ, GIT_AUTHOR_NAME=HANDLE, GIT_COMMITTER_NAME=HANDLE, GIT_AUTHOR_EMAIL=EMAIL, GIT_COMMITTER_EMAIL=EMAIL)
     c = git("commit-tree", tree, "-p", base, "-m", msg, env=cenv).stdout.strip()
     if not c:
@@ -793,30 +1203,133 @@ def submit(gid, lease):
     if err:
         return None, "push: " + err
     log("pushed", c[:12], "to", f"{FORK}:{gid}")
+    return create_pr(gid, lease)
+
+
+def pr_create_cmd(gid, body):
+    """16.13 (3): the create through REST with the response headers (gh api -i), so a refusal's retry-after and
+    x-ratelimit headers are seen and logged (gh pr create shows neither)"""
+    return ["gh", "api", "-i", "-X", "POST", f"repos/{UP}/pulls", "-f", f"title={gid}", "-f", f"head={HANDLE}:{gid}",
+            "-f", "base=main", "-f", f"body={body}"]
+
+
+def parse_create(r):
+    """(code, headers, url, text) from a create's CompletedProcess: `gh api -i` output (status line, headers, JSON),
+    or the plain shape (a URL on stdout, "HTTP 403: ..." / "already exists" on stderr). Never the request body."""
+    out, err = r.stdout or "", r.stderr or ""
+    hdr, code, url, text = {}, 0, None, ""
+    if out.startswith("HTTP/"):
+        head, _, body = out.replace("\r\n", "\n").partition("\n\n")
+        m = re.match(r"HTTP/\S+ (\d{3})", head)
+        code = int(m.group(1)) if m else 0
+        for ln in head.split("\n")[1:]:
+            k, _, v = ln.partition(":")
+            if k.strip().lower() in RL_HDRS:
+                hdr[k.strip().lower()] = v.strip()
+        try:
+            j = json.loads(body)
+            url = j.get("html_url") if 200 <= code < 300 else None
+            text = " ".join([str(j.get("message", ""))] + [str(e.get("message", e) if isinstance(e, dict) else e)
+                                                         for e in (j.get("errors") or [])])
+        except Exception:
+            text = body.strip()[:200]
+    else:
+        url = (re.findall(r"https://github\.com/\S+/pull/\d+", out) or [None])[0] if r.returncode == 0 else None
+        m = re.search(r"HTTP (\d{3})", err + out)
+        code = 201 if url else (int(m.group(1)) if m else (422 if "already exists" in err + out else 0))
+        text = err.strip()[:300]
+        for x in RL_HDRS:
+            mm = re.search(r"(?i)%s:?\s*(\d+|\w+)" % re.escape(x), err + out)
+            if mm:
+                hdr[x] = mm.group(1)
+        if code == 422 and not url:
+            url = (re.findall(r"https://github\.com/\S+/pull/\d+", err + out) or [None])[0]
+    return code, hdr, url, (text + " " + err.strip()[:120]).strip()
+
+
+REFUSED = re.compile(r"secondary rate limit|submitted too quickly|abuse detection", re.I)
+
+
+def sight_line(gid, now):
+    """Lead 07:31: seconds from sight to create for every created PR. Sight = a "Sight: <epoch>" line in the ready
+    commit message (the builder's first sight of the unit) when present; the ready commit time (READY_T) always."""
+    m = re.search(r"(?mi)^Sight:\s*(\d{9,}(?:\.\d+)?)\s*$", os.environ.get("READY_MSG", ""))
+    rt = os.environ.get("READY_T", "")
+    sight = f"sight->create {now - float(m.group(1)):.1f} s" if m else "sight->create n/a (no Sight: line)"
+    ready = f"ready->create {now - float(rt):.1f} s" if rt.isdigit() else "ready->create n/a"
+    return f"SIGHT-TO-CREATE {gid} {sight}, {ready}, opener start->create {now - T_START:.1f} s"
+
+
+def create_pr(gid, lease):
     r = None
     t_pr = time.time()
-    if not lease:
-        rv = rival_now(gid)               # Lead 18:53: no unleased PR next to a rival's (2-108 s behind them today)
-        if rv:
-            log("SKIP", gid, "unleased PR not opened, rival", rv)
-            return None, "rival PR open: " + rv
+    url, ctext = None, ""
     for att in range(5):
         if stopped():                    # STOP may appear while this PR waited for a retry
             return None, "STOP file on upstream main"
+        sc = site_closed_now()
+        if sc:
+            log("site-closed:", gid, sc, f"(before create attempt {att + 1}): held, retried when it reopens")
+            return None, "site-closed: " + sc
         body = pr_body(lease)
-        with pr_gate():
-            r = run(["gh", "pr", "create", "--repo", UP, "--head", f"{HANDLE}:{gid}", "--base", "main",
-                     "--title", gid, "--body", body], timeout=120, env=dict(os.environ, GH_TOKEN=PR_TOKEN))
-        if re.search(r"https://\S+", r.stdout) or "already exists" in r.stderr:
-            break                                   # an existing PR for our branch is a success
-        if not TRANSIENT.search(r.stderr + r.stdout) or att == 4:
+        with pr_gate() as g:
+            if getattr(g, "giveup", False):
+                log("PR-STALL-GIVEUP:", gid, "no create (four refusals in this drain): unit stays unseen")
+                return None, "stall-giveup: four create refusals in this drain"
+            # Lead 06:12 a0 (w12 stall drill): before EVERY attempt, after any slot, bucket or backoff wait: the halt
+            # switch, and for an unleased PR a rival snapshot at most SNAP_CREATE_AGE_S old (Lead 18:53)
+            h, hwhy = filing_halted()
+            if h:
+                log("halted:", gid, hwhy, f"(before create attempt {att + 1})")
+                return None, "halted: " + hwhy
+            if not lease:
+                rv = rival_now(gid, SNAP_CREATE_AGE_S)
+                if rv and rv.startswith("rival check failed"):     # a failed or late read: no PR now, the drain
+                    log("SKIP", gid, f"no PR (attempt {att + 1}):", rv)  # retries (submitfail), the branch is kept
+                    return None, rv
+                if rv:
+                    log("SKIP", gid, f"unleased PR not opened (attempt {att + 1}), rival", rv)
+                    return None, "rival PR open: " + rv
+            t_c = time.time()
+            r = run(pr_create_cmd(gid, body), timeout=120, env=dict(os.environ, GH_TOKEN=PR_TOKEN))
+        lat = time.time() - t_c
+        code, hdr, url, ctext = parse_create(r)
+        if url and code == 201:
+            log(sight_line(gid, time.time()))
+        if url and code == 201 and os.environ.get("PR_GATE_DIR"):
+            try:                                    # Lead 07:27: accepted creates, counted per 10 s by drain.py
+                with open(os.path.join(os.environ["PR_GATE_DIR"], "accepted.log"), "a") as o:
+                    o.write(f"{time.time():.3f}\n")
+            except OSError:
+                pass
+        if url:
+            break                                   # created, or GitHub named our existing PR
+        if code == 422 and "already exists" in ctext:
+            try:                                    # REST does not name the existing PR: look it up (READ_TOKEN)
+                op = our_prs_on_branch(gid, "open")
+            except RuntimeError:
+                op = []
+            url = op[0] if op else None
+            if url:
+                break                               # an existing PR for our branch is a success
+        hs = " ".join(f"{x}={hdr.get(x, '')}" for x in RL_HDRS)
+        log(f"CREATE {gid} attempt {att + 1}: http {code} latency {lat:.2f} s {hs} {ctext[:160]!r}")
+        refused = code in (403, 429) or (not 200 <= code < 300 and REFUSED.search(ctext))
+        if refused and os.environ.get("PR_GATE_DIR"):
+            k, wait, rate = bucket_refusal(os.environ["PR_GATE_DIR"], hdr, ctext)
+            if k >= 4:
+                STG["pr"] = round(time.time() - t_pr, 1)
+                return None, "stall-giveup: four create refusals in this drain"
+            if att == 4:
+                break
+            continue                                # the next attempt waits in pr_gate until the stall ends
+        if not (refused or TRANSIENT.search(ctext)) or att == 4:
             break
-        log("PR retry in", 30 * 2 ** att, "s:", r.stderr.strip()[:150])
+        log("PR retry in", 30 * 2 ** att, "s:", ctext[:150])
         time.sleep(30 * 2 ** att)
-    url = (re.findall(r"https://github\.com/\S+/pull/\d+", r.stdout + r.stderr) or [None])[0]
     STG["pr"] = round(time.time() - t_pr, 1)
     LEASE[0] = lease
-    return url, ("ok" if url else r.stderr.strip()[:300])
+    return url, ("ok" if url else (ctext or (r.stderr if r else "")).strip()[:300])
 
 
 def delete_ready():
@@ -840,9 +1353,59 @@ def finish(result, why, url=None):
     sys.exit(1 if result in ("submitfail", "formatfail", "error", "stopped") else 0)
 
 
-def filing_halted():
-    """Lead 05:10 HALT ON ONE REJECTION: (halted, why). Halted when the newest toolkit filing/stop/<epoch> is newer
-    than the newest filing/go/<epoch>; fail closed when the refs cannot be read. FILING_FIXTURE = ls-remote text."""
+HALT_MAX_AGE_S = float(os.environ.get("HALT_MAX_AGE_S", "2"))
+
+
+def site_closed_now():
+    """16.11: the drain's shared copy W/site.json (drain.py site_closed, at most 30 s old): why, or None. Missing or
+    older than 120 s = None (a dead reader never stops filing)."""
+    try:
+        d = json.load(open(os.path.join(SNAP_DIR, "site.json")))
+        if d.get("closed") and 0 <= time.time() - float(d["t"]) <= 120:
+            return d.get("why") or "site not accepting"
+    except Exception:
+        pass
+    return None
+
+
+def filing_halted(max_age=None):
+    """RC-b 1 (Lead 06:22): the halt switch, shared by every drain worker like the rival snapshot: one read at most
+    HALT_MAX_AGE_S old in SNAP_DIR/halt.json (stamped at read START), kept fresh by the drain's refresher. A fresh copy
+    is read without the lock; a stale or missing one (refresher dead, or no drain) means an inline read under the
+    lock, never a stale answer. Anything unreadable = halted."""
+    max_age = HALT_MAX_AGE_S if max_age is None else max_age
+    if not os.environ.get("RIVAL_SNAP_DIR") or os.environ.get("FILING_FIXTURE") is not None:
+        return _filing_halted_read()                 # one run per branch (no drain) or a fixture: inline
+    f = os.path.join(SNAP_DIR, "halt.json")
+    try:
+        h = json.load(open(f))
+        if 0 <= time.time() - h["t"] <= max_age:
+            return bool(h["halted"]), h["why"]
+    except Exception:
+        pass
+    try:
+        os.makedirs(SNAP_DIR, exist_ok=True)
+        with open(os.path.join(SNAP_DIR, "halt.lock"), "w") as lk:
+            fcntl.flock(lk, fcntl.LOCK_EX)
+            try:
+                h = json.load(open(f))
+                if 0 <= time.time() - h["t"] <= max_age:      # another worker read it while we waited
+                    return bool(h["halted"]), h["why"]
+            except Exception:
+                pass
+            t = time.time()
+            hv, why = _filing_halted_read()
+            with open(f + ".tmp", "w") as o:
+                json.dump({"t": t, "halted": hv, "why": why}, o)
+            os.replace(f + ".tmp", f)
+            return hv, why
+    except Exception as e:
+        return True, "halt state error (fail closed): " + repr(e)[:100]
+
+
+def _filing_halted_read():
+    """Lead 05:10 HALT ON ONE REJECTION, rule 16.1 (haltrule.py): (halted, why) from the toolkit filing/stop/<n> and
+    filing/go/<n> refs; unreadable = halted. FILING_FIXTURE = ls-remote text."""
     if os.environ.get("FILING_FIXTURE") is not None:
         txt, rc = os.environ["FILING_FIXTURE"], 0
     else:
@@ -858,13 +1421,7 @@ def filing_halted():
             if rc == 0:
                 break
             time.sleep(2)
-    if rc:
-        return True, "filing refs unreadable (fail closed)"
-    ep = lambda k: max([int(x) for x in re.findall(r"/filing/%s/(\d+)$" % k, txt, re.M)] or [0])
-    st, go = ep("stop"), ep("go")
-    if st > go:
-        return True, f"filing halted: filing/stop/{st} newer than filing/go/{go or '-'}"
-    return False, ""
+    return haltrule.verdict(txt, rc)
 
 
 T_START = time.time()
@@ -891,7 +1448,15 @@ def main():
     if url and DRY:
         log("dry run: our PR is already open, testing the rest anyway:", url)
     elif url:
-        finish("exists", "our PR for this branch is already open (PC watcher or an earlier run)", url)
+        old = None
+        try:
+            old = dg().lease_of(ID) if PR_TOKEN else None
+        except Exception:
+            pass
+        if old:                          # W6: the earlier run died before its release; the PR is open, so release now
+            release(old, "submitted")
+        finish("exists", "our PR for this branch is already open (PC watcher or an earlier run)"
+               + (f"; lease {old} released" if old else ""), url)
     # 1. guards (= formatscan on the PC)
     env = dict(os.environ, NODE=subprocess.run(["sh", "-c", "command -v node"], capture_output=True, text=True).stdout.strip())
     if MOD != ID.replace("-", "_"):
@@ -901,7 +1466,8 @@ def main():
     # the file's own imports), then keep the branch; ready-wait.yml dispatches this job again at listing.
     unlisted = False
     try:
-        gj0 = curl_json(GAPS, 60)
+        gj0 = gaps_json()
+        env["GAPS_FILE"] = os.path.join(os.environ.get("RIVAL_SNAP_DIR") or os.environ.get("PR_GATE_DIR") or W, "gaps.json")
         unlisted = not any(x.get("id") == ID for x in gj0.get("gaps") or []) and ID not in (gj0.get("withdrawn") or {}) \
             and not any((x.get("id") if isinstance(x, dict) else x) == ID for x in gj0.get("checked") or [])
         # Lead 14:22 SAFETY: no new PR on a step another agent holds (holders_now above 0) unless we hold its lease
@@ -988,8 +1554,40 @@ def main():
         finish("race", why2)
     if not url and why2.startswith("STOP"):
         finish("stopped", why2 + " (branch kept)")
+    if not url and why2.startswith("stall-giveup: "):
+        finish("stall-giveup", why2[14:] + " (branch kept, unit unseen)")
+    if not url and why2.startswith("site-closed: "):
+        finish("site-closed", why2[13:] + " (branch kept)")
+    if not url and why2.startswith("halted: "):
+        finish("halted", why2[8:] + (f"; lease {LEASE[0]} kept on claim/{ID}" if LEASE[0] else ""))
     finish("submitted" if url else "submitfail", f"{why2}; {time.time() - t0:.0f}s after start", url)
 
 
+REFRESH_S = float(os.environ.get("REFRESH_S", "0.8"))
+
+
+def refresher():
+    """RC-b 1 (Lead 06:22): `submit.py --refresh` (started by drain.py, one per drain): re-reads the halt switch and
+    rebuilds the rival snapshot every REFRESH_S, so a worker holding a PR slot only reads files (no GitHub read inside
+    the slot). It stops when its parent drain is gone or SNAP_DIR/refresh.stop exists. Each pass writes
+    SNAP_DIR/refresh.hb; a dead refresher is harmless: the workers then read inline (never a stale check)."""
+    ppid = os.getppid()
+    n = 0
+    while os.getppid() == ppid and not os.path.exists(os.path.join(SNAP_DIR, "refresh.stop")):
+        t = time.time()
+        try:
+            filing_halted(0)
+        except Exception as e:
+            log("refresher: halt read failed", repr(e)[:100])
+        try:
+            rival_snapshot(0)
+        except Exception as e:
+            log("refresher: snapshot failed (workers read inline)", str(e)[:120])
+        n += 1
+        with open(os.path.join(SNAP_DIR, "refresh.hb"), "w") as o:
+            o.write(f"{time.time():.1f} {n} {ghcond.STATS['counted']} {ghcond.STATS['not_modified']} {ghcond.STATS['remaining']}\n")
+        time.sleep(max(0.05, REFRESH_S - (time.time() - t)))
+
+
 if __name__ == "__main__":
-    main()
+    refresher() if sys.argv[1:2] == ["--refresh"] else main()
