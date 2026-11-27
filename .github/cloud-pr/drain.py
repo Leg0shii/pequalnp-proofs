@@ -238,15 +238,156 @@ def pending():
 
 T_ONE = {}
 
+# w12 speed fix 2 (Lead 06:30): every unit fetched its ready commit alone under FETCH (0.5-2 s each), so with 28
+# workers the fetches queued one behind the other. Now group commit: a unit queues its refspec; whoever finds no
+# fetch running takes the whole queue and fetches it in ONE `git fetch` (at most FETCH_BATCH refs); the others wait
+# for that result. A ref deleted between the listing and the fetch fails the whole batch in git, so on a failure the
+# refs are listed again (one ls-remote) and the ones still there are fetched again: only the missing ref ends "gone".
+FETCH_BATCH = int(os.environ.get("DRAIN_FETCH_BATCH", "50"))
+_FQ = []                                  # waiting entries {"spec", "ref", "ok"}
+_FQC = threading.Condition()
+_FBUSY = [False]
+FSTATS = {"fetches": 0, "refs": 0, "fallbacks": 0}
+
+
+def _fetch_specs(specs):
+    FSTATS["fetches"] += 1
+    return sh("git", "-C", SRC, "fetch", "-q", "--depth", "1", URL, *specs, timeout=120 + 2 * len(specs)).returncode == 0
+
+
+def _fetch_batch(batch, prefix):
+    """True/False per entry: fetched, or the ref is gone (or unreadable: fail closed, the unit runs in a later drain)"""
+    FSTATS["refs"] += len(batch)
+    if _fetch_specs([m["spec"] for m in batch]):
+        return [True] * len(batch)
+    FSTATS["fallbacks"] += 1
+    r = sh("git", "ls-remote", URL, f"refs/heads/{prefix}/*", timeout=60)
+    if r.returncode:
+        log("ready fetch: batch of", len(batch), "failed and the listing failed too: none fetched")
+        return [False] * len(batch)
+    live = {l.split()[1] for l in r.stdout.splitlines() if len(l.split()) == 2}
+    keep = [m for m in batch if m["ref"] in live]
+    log("ready fetch: batch of", len(batch), "failed;", len(batch) - len(keep), "ref(s) gone, fetching", len(keep), "again")
+    ok = {}
+    if keep and _fetch_specs([m["spec"] for m in keep]):
+        ok = {id(m): True for m in keep}
+    elif keep:                                           # still failing: one ref at a time (rare; bounded by the batch)
+        ok = {id(m): _fetch_specs([m["spec"]]) for m in keep}
+    return [ok.get(id(m), False) for m in batch]
+
+
+atexit.register(lambda: FSTATS["refs"] and log("ready fetches:", FSTATS))
+
+
+def fetch_ready(sid, prefix, lref):
+    me = {"spec": f"+refs/heads/{prefix}/{sid}:{lref}", "ref": f"refs/heads/{prefix}/{sid}", "ok": None}
+    with _FQC:
+        _FQ.append(me)
+        while me["ok"] is None and _FBUSY[0]:
+            _FQC.wait()
+        if me["ok"] is not None:
+            return me["ok"]
+        _FBUSY[0] = True                                  # leader: take the queue (my entry included)
+        _FQ.remove(me)
+        batch = [me] + _FQ[:FETCH_BATCH - 1]; del _FQ[:FETCH_BATCH - 1]
+    res = [False] * len(batch)
+    try:
+        with FETCH:                                       # the shared checkout: still one fetch at a time
+            res = _fetch_batch(batch, prefix)
+    except Exception as e:
+        log("ready fetch error", repr(e)[:120])
+    finally:
+        with _FQC:
+            for m, o in zip(batch, res):
+                m["ok"] = o
+            _FBUSY[0] = False
+            _FQC.notify_all()
+    return me["ok"]
+
+
+# w12 speed fix 3 (Lead 06:30): every unit cloned upstream main and checked out the sparse tree (about 13 MB, 1-6 s,
+# 28 at once on the runner). Now ONE shared checkout per drain (W/upstream-base) at the live main sha: one
+# `ls-remote main` shared by all workers for MAIN_CHECK_S; when main moved, or the base is older than BASE_MAX_S, it is
+# cloned again under BASE_LOCK before any unit copies it (workers wait, nobody copies a base behind live main). Each
+# unit gets its own copy (cp -a) and adds its Outside imports to the copy's sparse set. Fail closed: main unreadable,
+# or the base cannot be brought to the live sha = no tree, the unit is "error" (retried by the drain).
+# Guards: submit.py's checks (cat-file -e HEAD:<file>, the commit's parent, checkcore.sh) read the copy, i.e. main as
+# of at most MAIN_CHECK_S before the copy, the same as a fresh clone was (its clone ran 1-6 s before the copy point).
+BASE_MAX_S = float(os.environ.get("DRAIN_BASE_MAX_S", "60"))
+MAIN_CHECK_S = float(os.environ.get("DRAIN_MAIN_CHECK_S", "5"))
+SPARSE = ["/.github/", "/STOP", "/CONTRIBUTING.md", "/lean/PEqualNP/", "!/lean/PEqualNP/Outside/"]
+BASE_LOCK = threading.Lock(); _MAIN_LOCK = threading.Lock()
+_BASE = {"dir": None, "t": 0.0, "sha": None, "main_t": 0.0, "main": None, "clones": 0, "copies": 0}
+
+
+def _clone_upstream(tree, outs=()):
+    for att in range(3):
+        ok = (sh("git", "clone", "-q", "--depth", "1", "--filter=blob:none", "--no-checkout", "--single-branch",
+                 "--branch", "main", UPSTREAM, tree, timeout=180).returncode == 0
+              and sh("git", "-C", tree, "sparse-checkout", "set", "--no-cone", *SPARSE,
+                     *[f"/lean/{o}.lean" for o in outs]).returncode == 0
+              and sh("git", "-C", tree, "checkout", "-q", "main", timeout=180).returncode == 0)
+        if ok:
+            return True
+        sh("rm", "-rf", tree); time.sleep(5 * (att + 1))
+    return False
+
+
+def main_sha():
+    """the live upstream main sha, read at most every MAIN_CHECK_S for all workers; None when unreadable"""
+    with _MAIN_LOCK:
+        if _BASE["main"] and time.time() - _BASE["main_t"] < MAIN_CHECK_S:
+            return _BASE["main"]
+        t = time.time()
+        r = sh("git", "ls-remote", UPSTREAM, "refs/heads/main", timeout=60)
+        o = r.stdout.split() if r.returncode == 0 else []
+        _BASE["main"], _BASE["main_t"] = (o[0], t) if o else (None, 0.0)
+        return _BASE["main"]
+
+
+def upstream_tree(tree, outs):
+    """copy of the shared checkout at the live main into `tree`; '' when done, else why not (fail closed)"""
+    live = main_sha()
+    if not live:
+        return "upstream main unreadable (no tree, fail closed)"
+    with BASE_LOCK:
+        b = _BASE["dir"]
+        if b is None or _BASE["sha"] != live or time.time() - _BASE["t"] > BASE_MAX_S:
+            nb = os.path.join(W, "upstream-base-%d" % (_BASE["clones"] + 1))
+            t = time.time()
+            if not _clone_upstream(nb):
+                return "upstream checkout failed (shared base)"
+            got = sh("git", "-C", nb, "rev-parse", "HEAD").stdout.strip()
+            if got != live:                               # main moved during the clone: accept only the live sha
+                with _MAIN_LOCK:
+                    _BASE["main_t"] = 0.0
+                live = main_sha()
+                if got != live:
+                    log("upstream base", got[:12], "is not live main", (live or "?")[:12], "(no tree, fail closed)")
+                    sh("rm", "-rf", nb)
+                    return "upstream base behind live main"
+            _BASE.update(dir=nb, t=t, sha=got, clones=_BASE["clones"] + 1)
+            if b:
+                sh("rm", "-rf", b)                        # no copy is made from the old one any more
+            b = nb
+        r = sh("cp", "-a", b, tree, timeout=120)
+        _BASE["copies"] += 1
+    if r.returncode:
+        return "copy of the upstream base failed"
+    if outs and sh("git", "-C", tree, "sparse-checkout", "add", *[f"/lean/{o}.lean" for o in outs], timeout=180).returncode:
+        return "sparse-checkout add of the Outside imports failed"
+    return ""
+
+
+atexit.register(lambda: _BASE["copies"] and log("upstream base:", _BASE["clones"], "clones for", _BASE["copies"], "units"))
+
 
 def one(sid, sha, prefix=None, extra=None):
     prefix = prefix or PREFIX
     T_ONE[sid] = time.time()
     d = tempfile.mkdtemp(prefix=sid + "-", dir=W)
     lref = f"refs/drain/{sid}"
-    with FETCH:                                           # one shallow fetch at a time in the shared checkout
-        f = sh("git", "-C", SRC, "fetch", "-q", "--depth", "1", URL, f"+refs/heads/{prefix}/{sid}:{lref}", timeout=120)
-    if f.returncode:
+    if not fetch_ready(sid, prefix, lref):                # w12 fix 2: one batched fetch for every waiting unit
         return "gone", "branch gone before the fetch"
     got = sh("git", "-C", SRC, "rev-parse", lref).stdout.strip()
     files = [x for x in sh("git", "-C", SRC, "ls-tree", "-r", "--name-only", lref, "ready/").stdout.split()
@@ -259,15 +400,9 @@ def one(sid, sha, prefix=None, extra=None):
     msg = sh("git", "-C", SRC, "log", "-1", "--format=%B", lref).stdout
     outs = [re.sub(r"\.", "/", m) for m in re.findall(r"(?m)^import (PEqualNP\.Outside\.[A-Za-z0-9_.]+)", open(proof).read())]
     tree = os.path.join(d, "tree")
-    for att in range(3):
-        ok = (sh("git", "clone", "-q", "--depth", "1", "--filter=blob:none", "--no-checkout", "--single-branch",
-                 "--branch", "main", UPSTREAM, tree, timeout=180).returncode == 0
-              and sh("git", "-C", tree, "sparse-checkout", "set", "--no-cone", "/.github/", "/STOP", "/CONTRIBUTING.md",
-                     "/lean/PEqualNP/", "!/lean/PEqualNP/Outside/", *[f"/lean/{o}.lean" for o in outs]).returncode == 0
-              and sh("git", "-C", tree, "checkout", "-q", "main", timeout=180).returncode == 0)
-        if ok:
-            break
-        sh("rm", "-rf", tree); time.sleep(5 * (att + 1))
+    why = upstream_tree(tree, outs)                       # w12 fix 3: a copy of the shared checkout at live main
+    if why:
+        return "error", why
     if not os.path.isdir(os.path.join(tree, ".github", "scripts")):
         return "error", "upstream checkout failed"
     os.makedirs(os.path.join(tree, "lean", "PEqualNP", "Outside"), exist_ok=True)
