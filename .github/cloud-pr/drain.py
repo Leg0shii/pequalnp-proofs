@@ -15,6 +15,7 @@ SRC = os.environ["SRC"]; W = os.environ.get("W") or tempfile.mkdtemp()
 FORK = os.environ.get("GITHUB_REPOSITORY", "Leg0shii/pequalnp-proofs-fork")
 URL = f"https://github.com/{FORK}.git"
 PR_TOKEN = os.environ.get("PR_TOKEN", "")
+PR_SLOTS = int(os.environ.get("DRAIN_PR_SLOTS", "2"))   # Lead 06:12: PR creations in flight (w12 load drill: 6)
 WORKERS = int(os.environ.get("DRAIN_WORKERS", "14"))   # Lead 17:17: 14 workers = about 10 leased + 10 unleased a minute with the gate open
 MAX_S = float(os.environ.get("DRAIN_MAX_S", "1200")); LINGER = float(os.environ.get("DRAIN_LINGER", "30"))
 UPSTREAM = os.environ.get("DRAIN_UPSTREAM", "https://github.com/open-goat/pequalnp-proofs.git")
@@ -138,7 +139,7 @@ def one(sid, sha, prefix="ready", extra=None):
     os.makedirs(os.path.join(tree, "lean", "PEqualNP", "Outside"), exist_ok=True)
     outp = os.path.join(d, "out")
     env = dict(os.environ, ID=sid, MOD=mod, PROOF=proof, TREE=tree, W=d, DRY="0", GITHUB_REF_NAME=f"{prefix}/{sid}",
-               GITHUB_OUTPUT=outp, PR_GATE_DIR=W, PR_GATE_N="2", READY_MSG=msg, RIVAL_SNAP_DIR=W)
+               GITHUB_OUTPUT=outp, PR_GATE_DIR=W, PR_GATE_N=str(PR_SLOTS), READY_MSG=msg, RIVAL_SNAP_DIR=W)
     env.update(extra or {})
     if DRY:
         return "dry", f"would run submit.py for {sid} {mod} ({os.path.getsize(proof)} bytes, sha {got[:8]})"

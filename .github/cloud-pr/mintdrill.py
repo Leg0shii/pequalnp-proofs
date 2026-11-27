@@ -829,6 +829,15 @@ def main():
     m4 = [f for f in fails if f.startswith("budget/M400-")]
     if m4:
         print(f"FAIL budget/M400 {len(m4)} of 400 units not filed")
+    bt = os.path.join(src, ".github", "cloud-pr", "selftest_bucket.py")
+    if os.path.exists(bt):
+        rb = subprocess.run([sys.executable, "-I", bt, os.path.dirname(bt)], capture_output=True, text=True, timeout=120)
+        line = (rb.stdout.strip().splitlines() or ["BUCKET SELFTEST crashed " + rb.stderr.strip()[-120:]])[-1]
+    else:
+        line = "BUCKET SELFTEST FAIL: no selftest_bucket.py in this checkout"
+    print(("ok   " if " OK " in line else "FAIL ") + "rate/" + line)
+    if " OK " not in line:
+        fails.append("rate/bucket")
     print("SKIP hostile/X11 mirror export order (team/mirror/mirror.py) and gate stop refs: gate v1.2.1 (T11), not fork code")
     f3 = [f for f in fails if f.startswith("recorded/F3-")]
     short = [f for f in fails if not f.startswith(("recorded/F3-", "budget/M400-"))] + \

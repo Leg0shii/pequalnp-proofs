@@ -882,9 +882,52 @@ def push_branch(c, gid):
     return r.stderr.strip()[:300]
 
 
+PR_PER_MIN = int(os.environ.get("PR_PER_MIN", "70"))       # Lead 06:12: GitHub documents 80/min and 500/hour per token
+PR_PER_HOUR = int(os.environ.get("PR_PER_HOUR", "480"))
+
+
+def bucket_wait(d, now):
+    """PR-create budget shared by every worker of a drain (file PR_GATE_DIR/creates.log under flock): 0 = take a
+    create now (recorded), else the seconds to wait. A stall (PR_GATE_DIR/stall: epoch until) after a 403/429 blocks
+    every worker until it ends."""
+    with open(os.path.join(d, "creates.lock"), "w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        try:
+            until = float(open(os.path.join(d, "stall")).read())
+        except Exception:
+            until = 0.0
+        if now < until:
+            return until - now
+        f = os.path.join(d, "creates.log")
+        try:
+            ts = [float(x) for x in open(f).read().split() if now - float(x) < 3600]
+        except Exception:
+            ts = []
+        last_min = [t for t in ts if now - t < 60]
+        if len(last_min) >= PR_PER_MIN:
+            return 60 - (now - min(last_min)) + 0.05
+        if len(ts) >= PR_PER_HOUR:
+            return 3600 - (now - min(ts)) + 0.05
+        ts.append(now)
+        with open(f + ".tmp", "w") as o:
+            o.write("\n".join(f"{t:.3f}" for t in ts))
+        os.replace(f + ".tmp", f)
+        return 0.0
+
+
+def bucket_stall(d, seconds, why):
+    """after a 403/429 on a create: no worker creates for `seconds` (the retry-after, else 60 s)"""
+    with open(os.path.join(d, "creates.lock"), "w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        with open(os.path.join(d, "stall"), "w") as o:
+            o.write(str(time.time() + seconds))
+    log(f"PR-STALL {seconds:.0f}s: every worker stops creating PRs ({why[:100]})")
+
+
 class pr_gate:
-    """Drain mode (drain.py, many submit.py at once on one runner): at most PR_GATE_N (2) PR creations in flight,
-    by flock on PR_GATE_DIR/slot<k> (GitHub refuses PR-creation bursts). No PR_GATE_DIR (one run per branch): no gate."""
+    """Drain mode (drain.py, many submit.py at once on one runner): at most PR_GATE_N PR creations in flight (flock on
+    PR_GATE_DIR/slot<k>; drain.py sets it from DRAIN_PR_SLOTS), and at most PR_PER_MIN creates a minute and
+    PR_PER_HOUR an hour for the whole drain (bucket_wait). No PR_GATE_DIR (one run per branch): no gate."""
     def __enter__(self):
         self.f = None
         d = os.environ.get("PR_GATE_DIR")
@@ -892,10 +935,21 @@ class pr_gate:
             for k in range(int(os.environ.get("PR_GATE_N", "2"))):
                 f = open(os.path.join(d, f"slot{k}"), "w")
                 try:
-                    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB); self.f = f; return self
+                    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB); self.f = f
+                    break
                 except OSError:
                     f.close()
+            if self.f:
+                break
             time.sleep(0.2)
+        t0 = time.time()
+        while d:
+            w = bucket_wait(d, time.time())
+            if w <= 0:
+                break
+            time.sleep(min(w, 5))
+        if d and time.time() - t0 > 0.5:
+            STG["bucket_wait"] = round(time.time() - t0, 1)
         return self
 
     def __exit__(self, *a):
@@ -948,6 +1002,10 @@ def submit(gid, lease):
                      "--title", gid, "--body", body], timeout=120, env=dict(os.environ, GH_TOKEN=PR_TOKEN))
         if re.search(r"https://\S+", r.stdout) or "already exists" in r.stderr:
             break                                   # an existing PR for our branch is a success
+        m403 = re.search(r"HTTP (403|429)|secondary rate limit|submitted too quickly", r.stderr + r.stdout)
+        if m403 and os.environ.get("PR_GATE_DIR"):
+            ra = re.search(r"(?i)retry-after:?\s*(\d+)", r.stderr + r.stdout)
+            bucket_stall(os.environ["PR_GATE_DIR"], float(ra.group(1)) if ra else 60.0, (r.stderr + r.stdout).strip())
         if not TRANSIENT.search(r.stderr + r.stdout) or att == 4:
             break
         log("PR retry in", 30 * 2 ** att, "s:", r.stderr.strip()[:150])
