@@ -608,7 +608,8 @@ def pr_files(n):
     return _FILES[n]
 
 
-SNAP_MAX_AGE_S = 5       # A19: one snapshot shared by every drain worker (and the second check before the PR)
+SNAP_MAX_AGE_S = 5       # A19: one snapshot shared by every drain worker
+SNAP_CREATE_AGE_S = float(os.environ.get("SNAP_CREATE_AGE_S", "2"))   # Lead 06:12: at gh pr create at most 2 s old
 SNAP_DIR = os.environ.get("RIVAL_SNAP_DIR") or os.environ.get("PR_GATE_DIR") or W
 FILE_UNIT_RX = re.compile(r"lean/PEqualNP/Outside/(L_[a-z0-9]+(?:_[a-z0-9]+)*_\d+|V_[a-z0-9]+(?:_[a-z0-9]+)*_\d+__k\d+)\.lean")
 
@@ -658,8 +659,9 @@ def _build_snapshot(files):
     raise RuntimeError(f"more than {RIVAL_MAX_PAGES} pages of open PRs since the taken list (fail closed)")
 
 
-def rival_snapshot():
-    """the shared snapshot, at most SNAP_MAX_AGE_S old (flock in SNAP_DIR; one builder at a time)"""
+def rival_snapshot(max_age=None):
+    """the shared snapshot, at most max_age (default SNAP_MAX_AGE_S) old (flock in SNAP_DIR; one builder at a time)"""
+    max_age = SNAP_MAX_AGE_S if max_age is None else max_age
     os.makedirs(SNAP_DIR, exist_ok=True)
     f = os.path.join(SNAP_DIR, "rival_snap.json")
     with open(os.path.join(SNAP_DIR, "rival_snap.lock"), "w") as lk:
@@ -667,7 +669,7 @@ def rival_snapshot():
         old = {}
         try:
             old = json.load(open(f))
-            if 0 <= time.time() - old["t"] <= SNAP_MAX_AGE_S:
+            if 0 <= time.time() - old["t"] <= max_age:
                 return old
         except Exception:
             pass
@@ -680,15 +682,16 @@ def rival_snapshot():
         return snap
 
 
-def rival_now(gid):
+def rival_now(gid, max_age=None):
     """Another author's PR on the unit, right before we decide and again right before gh pr create (A19 design, Lead
     05:40): the taken list is the authority for every PR created before its header (REST publisher, units by title,
     branch AND changed files of every open PR); open PRs created after the header minus 30 s are read here, with their
     file paths, once per snapshot shared by all drain workers. Any failed read = rival (no PR)."""
     try:
-        snap = rival_snapshot()
+        snap = rival_snapshot(max_age)
     except Exception as e:
         return "rival check failed: " + str(e)[:120]
+    STG["snap_age"] = round(time.time() - snap["t"], 1)
     who = snap["taken"].get(gid)
     if who not in (None, HANDLE):
         return f"taken list: first PR by {who}"
@@ -926,7 +929,7 @@ def submit(gid, lease):
     r = None
     t_pr = time.time()
     if not lease:
-        rv = rival_now(gid)               # Lead 18:53: no unleased PR next to a rival's (2-108 s behind them today)
+        rv = rival_now(gid, SNAP_CREATE_AGE_S)   # Lead 18:53 / 06:12: right before the create, snapshot at most 2 s old
         if rv:
             log("SKIP", gid, "unleased PR not opened, rival", rv)
             return None, "rival PR open: " + rv
