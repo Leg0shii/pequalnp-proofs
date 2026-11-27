@@ -20,7 +20,11 @@ DRY = os.environ.get("DRY", "0") == "1"
 END = time.time() + float(os.environ.get("MINUTES", "58")) * 60
 W = os.environ.get("W") or tempfile.mkdtemp()
 CLOSED = set()
-CMT = {}          # PR number -> comments (read once)
+CMT = {}          # PR number -> (final, comments); re-read until the PR has been closed for CMT_FINAL_S (Y3)
+CMT_FINAL_S = 120
+CLOSER = {}       # PR number -> login that closed it (issues API closed_by; never changes)
+REJ_MAX_PAGES = 10
+REJ_FAIL_MAX = 3   # failed closed-PR reads in a row before the detector counts itself blind (halt)
 FIRST = []
 REJ = {"t": 0.0, "alerted": 0.0}
 REJ_EVERY, REJ_WIN, REJ_MIN = 60, 600, 3      # Lead 18:42: REJ-BURST n at 3 or more in 10 min, once per 10 min
@@ -264,6 +268,65 @@ def filing_stop(msg):
     return sh("git", *auth(), "-C", g, "push", "-q", TK, f"{c}:refs/heads/filing/stop/{int(time.time())}").returncode == 0
 
 
+BLIND_TAG = "filing stop: BLIND"
+
+
+def all_refs(pattern):
+    """[(epoch, sha)] of the toolkit refs refs/heads/<pattern>/<epoch>, newest first; None if unreadable."""
+    r = sh("git", *auth(), "ls-remote", TK, f"refs/heads/{pattern}/*", timeout=60)
+    if r.returncode:
+        return None
+    return sorted(((int(e), h) for h, e in re.findall(r"^(\S+)\s+refs/heads/" + re.escape(pattern) + r"/(\d+)$", r.stdout, re.M)),
+                  reverse=True)
+
+
+def halted_now():
+    """True if the newest filing/stop is newer than every filing/go, False if not, None if unreadable."""
+    st, go = all_refs("filing/stop"), all_refs("filing/go")
+    if st is None or go is None:
+        return None
+    return bool(st) and st[0][0] > (go[0][0] if go else 0)
+
+
+def ref_message(sha, ref):
+    """commit message of a toolkit ref, fetched from the remote (None if it cannot be read)."""
+    g = os.path.join(W, "taken.git")
+    if not os.path.isdir(g):
+        sh("git", "init", "-q", "--bare", g)
+    if sh("git", *auth(), "-C", g, "fetch", "-q", TK, ref, timeout=60).returncode:
+        return None
+    r = sh("git", "-C", g, "log", "-1", "--format=%B", sha, timeout=30)
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def blind_lift():
+    """push filing/go/<epoch> + alert BLIND-LIFT if the newest filing/stop is our blind stop and newer than every go."""
+    sts, gos = all_refs("filing/stop"), all_refs("filing/go")
+    if sts is None or gos is None:
+        return False                                  # unreadable
+    g0 = gos[0][0] if gos else 0
+    live = [(e, h) for e, h in sts if e > g0]         # every stop the newest go has not lifted
+    if not live:
+        return False                                  # no stop, or already lifted
+    for e, h in live:                                 # Lead 05:58: lift only if EVERY live stop is a blind one of ours
+        msg = ref_message(h, f"refs/heads/filing/stop/{e}")
+        if not msg or not msg.startswith(BLIND_TAG):
+            return False                              # a rejection halt, a foreign stop, or unreadable: only the Lead lifts
+    st = live[0]
+    g = os.path.join(W, "taken.git")
+    tree = subprocess.run(["git", "-C", g, "mktree"], input="", capture_output=True, text=True).stdout.strip()
+    env = dict(os.environ, GIT_AUTHOR_NAME="dupclose", GIT_AUTHOR_EMAIL="dupclose@localhost",
+               GIT_COMMITTER_NAME="dupclose", GIT_COMMITTER_EMAIL="dupclose@localhost")
+    c = subprocess.run(["git", "-C", g, "commit-tree", tree, "-m", f"filing go: BLIND-LIFT of stop {st[0]} (two full scans, no rejection)"],
+                       capture_output=True, text=True, env=env).stdout.strip()
+    ok = sh("git", *auth(), "-C", g, "push", "-q", TK, f"{c}:refs/heads/filing/go/{max(int(time.time()), st[0] + 1)}").returncode == 0
+    if ok:
+        alert_ref(f"BLIND-LIFT stop {st[0]}", "blindlift")
+        REJ["clean"] = 0
+    log("BLIND-LIFT", st[0], "go pushed" if ok else "go PUSH FAILED, retry next pass")
+    return ok
+
+
 def alert_ref(msg, kind):
     g = os.path.join(W, "taken.git")
     if not os.path.isdir(g):
@@ -312,11 +375,39 @@ def rej_burst():
     if os.environ.get("FIXTURE_CLOSED"):
         prs = json.load(open(os.environ["FIXTURE_CLOSED"]))
     else:
-        # REST, no search API (Lead 19:30): the 100 most recently updated closed PRs, ours closed unmerged in the
-        # window, then the comments of those only
-        r = sh("gh", "api", f"repos/{UP}/pulls?state=closed&sort=updated&direction=desc&per_page=100", env=rdenv(), timeout=60)
+        # REST, no search API (Lead 19:30): closed PRs by update time, newest first, every page back to the window
+        # (Y4: a mint can close or merge over 100 PRs in 10 min), ours closed unmerged in the window, then for those
+        # only: who closed it (Y5: our own close is never a rejection, whichever job or box closed it) and the
+        # comments, re-read while the close is younger than CMT_FINAL_S (Y3: the checker comments seconds later)
+        rows, scan = [], "ok"
+        for k in range(1, REJ_MAX_PAGES + 1):
+            r = sh("gh", "api", f"repos/{UP}/pulls?state=closed&sort=updated&direction=desc&per_page=100&page={k}",
+                   env=rdenv(), timeout=60)
+            if r.returncode:
+                scan = "closed-PR read failed"
+                break
+            pg = json.loads(r.stdout or "[]")
+            rows += pg
+            try:
+                oldest = min(time.mktime(time.strptime((x.get("updated_at") or x.get("closed_at") or "")[:19],
+                                                       "%Y-%m-%dT%H:%M:%S")) - time.timezone for x in pg) if pg else 0
+            except ValueError:
+                oldest = 0
+            if len(pg) < 100 or time.time() - oldest > REJ_WIN:
+                break
+        else:
+            scan = f"over {REJ_MAX_PAGES} pages of closed PRs in {REJ_WIN} s"
+        # a failed read is retried next pass; REJ_FAIL_MAX failed passes in a row (or over REJ_MAX_PAGES pages) = blind
+        REJ["full"] = scan == "ok"                    # this pass saw every close in the window (blind-lift input)
+        REJ["fails"] = REJ.get("fails", 0) + 1 if scan == "closed-PR read failed" else 0
+        if scan == "closed-PR read failed" and REJ["fails"] < REJ_FAIL_MAX:
+            REJ["t"] = 0
+            scan = "ok"
+        elif scan == "closed-PR read failed":
+            scan = f"closed-PR read failed {REJ['fails']} passes in a row"
+        REJ["scan"] = scan
         prs = []
-        for x in (json.loads(r.stdout or "[]") if r.returncode == 0 else []):
+        for x in rows:
             if x.get("merged_at") and (x.get("user") or {}).get("login") != HANDLE:
                 t = title_unit(x.get("title"))         # v2.1 + Lead 22:55: unit id as a whole token in the title
                 if t:                                  # (not R-L-meta-582-317)
@@ -332,12 +423,23 @@ def rej_burst():
                 continue
             if x["number"] in CLOSED:
                 continue                              # closed by us (dupclose), not a checker rejection
-            if x["number"] not in CMT:                # 19:50: each PR's comments read once (was every minute per PR)
-                c = sh("gh", "api", f"repos/{UP}/issues/{x['number']}/comments?per_page=30", env=rdenv(), timeout=60)
-                if c.returncode:
-                    continue
-                CMT[x["number"]] = json.loads(c.stdout or "[]")
-            prs.append({"number": x["number"], "closedAt": ca, "mergedAt": None, "comments": CMT[x["number"]]})
+            n_ = x["number"]
+            if n_ not in CLOSER:
+                c = sh("gh", "api", f"repos/{UP}/issues/{n_}", "--jq", ".closed_by.login // empty", env=rdenv(), timeout=60)
+                if c.returncode == 0 and c.stdout.strip():
+                    CLOSER[n_] = c.stdout.strip()
+            if CLOSER.get(n_) == HANDLE:
+                continue                              # our own close (this job, an earlier job, or the PC)
+            if not (CMT.get(n_) or (False,))[0]:
+                c = sh("gh", "api", f"repos/{UP}/issues/{n_}/comments?per_page=30", env=rdenv(), timeout=60)
+                if c.returncode == 0:
+                    try:
+                        closed_s = time.time() - (time.mktime(time.strptime(ca[:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone)
+                    except ValueError:
+                        closed_s = 0
+                    CMT[n_] = (closed_s > CMT_FINAL_S, json.loads(c.stdout or "[]"))
+            prs.append({"number": n_, "closedAt": ca, "mergedAt": None, "comments": (CMT.get(n_) or (False, []))[1],
+                        "closedBy": CLOSER.get(n_)})
     now = time.time()
 
     def t(x):
@@ -350,18 +452,45 @@ def rej_burst():
     # Lead 05:10 HALT ON ONE REJECTION: one of our PRs closed unmerged (not by dupclose) with a "proved first" comment
     # or any comment by another login, closed after the newest filing/go ref -> filing/stop/<epoch> + REJ-HALT, once
     go = filing_go()
+    # closed by another login (closedBy known) = a maker's close = a rejection, comment or not (Y3)
     hit = [p["number"] for p in prs if not p.get("mergedAt") and p.get("closedAt") and now - t(p["closedAt"]) <= REJ_WIN
            and t(p["closedAt"]) > go and p["number"] not in HALTED
-           and any("proved first" in (c.get("body") or "").lower() or ((c.get("user") or {}).get("login") or HANDLE) != HANDLE
-                   for c in p.get("comments") or [])]
+           and ((p.get("closedBy") not in (None, HANDLE))
+                or any("proved first" in (c.get("body") or "").lower() or ((c.get("user") or {}).get("login") or HANDLE) != HANDLE
+                       for c in p.get("comments") or []))]
+    scan = REJ.get("scan", "ok")
+    blind = False
+    if scan != "ok" and not hit and f"scan@{go}" not in HALTED:
+        if not DRY and halted_now():                  # Lead 05:58: filing already halted -> no blind stop on top of it
+            HALTED.add(f"scan@{go}")                  # (unreadable refs -> None -> push the blind stop: fail closed)
+            log("blind scan while already halted, no stop pushed:", scan)
+        else:
+            hit = [f"scan@{go}"]                      # cannot see every close in the window: fail closed (once per go)
+            blind = True
     if hit:
-        HALTED.update(hit)
         if not DRY:
-            ok = filing_stop(f"filing stop: REJ-HALT {len(hit)} {' '.join(map(str, hit[:20]))}")
-            alert_ref(f"REJ-HALT {len(hit)} {' '.join(map(str, hit[:10]))}", "rejhalt")
-            log("REJ-HALT", hit, "stop ref", "pushed" if ok else "PUSH FAILED")
+            why = " ".join(map(str, hit[:20])) + ("" if scan == "ok" else f" ({scan})")
+            # BLIND_TAG marks a stop pushed only because the detector could not see; blind_lift() may lift only those
+            ok = filing_stop(f"{BLIND_TAG} {scan} go={go}" if blind else f"filing stop: REJ-HALT {len(hit)} {why}")
+            if ok:                                    # Y6: marked done only once the stop ref exists
+                HALTED.update(hit)
+                alert_ref(f"REJ-HALT {len(hit)} {' '.join(map(str, hit[:10]))}", "rejhalt")
+                log("REJ-HALT", hit, "stop ref pushed")
+            else:
+                REJ["t"] = 0                          # retry on the next pass
+                log("REJ-HALT", hit, "stop ref PUSH FAILED, retry next pass")
         else:
             log("REJ-HALT (dry)", hit)
+    # Lead 05:50 BLIND HALTS LIFT THEMSELVES: two full scans in a row with no rejection of ours anywhere in the window
+    # (HALTED and filing/go ignored) -> if the newest filing/stop ref is a blind stop of ours (its commit message read
+    # from the remote, so a chain restart changes nothing) and newer than every filing/go: push filing/go + BLIND-LIFT
+    rej_any = [p["number"] for p in prs if not p.get("mergedAt") and p.get("closedAt") and now - t(p["closedAt"]) <= REJ_WIN
+               and ((p.get("closedBy") not in (None, HANDLE))
+                    or any("proved first" in (c.get("body") or "").lower() or ((c.get("user") or {}).get("login") or HANDLE) != HANDLE
+                           for c in p.get("comments") or []))]
+    REJ["clean"] = REJ.get("clean", 0) + 1 if (REJ.get("full") and not rej_any and not hit) else 0
+    if REJ["clean"] >= 2 and not DRY:
+        blind_lift()
     REJ["n"] = n                                      # 20:10: rej10=<n> in the heartbeat (late-lease loop tripwire)
     if n >= REJ_MIN and now - REJ["alerted"] >= REJ_WIN:
         REJ["alerted"] = now
