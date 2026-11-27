@@ -160,12 +160,18 @@ def child_submit(src, w):
                 if g.get("statement") and g["statement"] != ps:
                     return cp("FAIL: statement differs from gaps.json\n", 1)
             return cp("guards ok\n")
+        if "taken_text" in w and cmd[0] == "git":            # the real _taken_list: init, fetch, show of status/taken
+            if "init" in cmd or "fetch" in cmd:
+                return cp()
+            if "show" in cmd and cmd[-1].endswith(":taken.txt"):
+                return cp(w["taken_text"].replace("{T}", str(int(T0) - 20)))
         out["unexpected"].append("run " + " ".join(cmd[:3]))
         return cp(rc=1, err="unexpected")
     S.run = run
 
     tl = w.get("taken", {})
-    S._taken_list = lambda: (None if tl is None else dict(tl))
+    if "taken_text" not in w:
+        S._taken_list = lambda: (None if tl is None else dict(tl))
     S._TL.clear()
 
     class DG:
@@ -344,7 +350,7 @@ def judge_submit(name, w, r, expect):
     got = "PR" if r["prs"] else "no PR"
     bad = []
     rv = rival_on(w, w["gid"])
-    if r["prs"] and rv:
+    if r["prs"] and rv and expect != "no PR or closed":
         bad.append(f"I2 PR next to {rv}")
     if (w.get("paused") or w.get("halted")) and r["desk"]:
         bad.append(f"I7 desk requests while paused/halted: {r['desk']}")
@@ -463,6 +469,8 @@ def cases():
             w["gaps_seq"] = [gl, gl, []]
         if k == "X8":
             w["proof_statement"] = x["proof_statement"]
+        if k == "X3b":                               # Lead 05:32 A20: "steps 0" is legitimate; the closer half decides
+            w.pop("taken"); w["taken_text"] = "# updated {T} 05:00:00 steps 0\n"
         out.append(("hostile/" + k, "submit", w, "no PR" if k != "X3b" else "no PR or closed"))
     # X3b second half: if the opener filed, the closer must close within 60 s (title "Prove L-meta-90001", merged T-120s)
     x = hx["X3b"]
@@ -492,6 +500,13 @@ def cases():
     for g in hx["X10"]["gaps"]:
         out.append(("hostile/X10-" + g["id"], "submit", {"gid": g["id"], "gaps": [unit_rec(g)], "taken": {"L-meta-1": "someone"},
                                                         "gate_answers": {"*": "held"}}, "PR"))
+    # A20: the real taken-list parser. Header count differs from the rows (truncated) = no PR; "steps 0" fresh = files
+    out.append(("hostile/A20-truncated", "submit", {"gid": "L-meta-92001", "gaps": [unit("L-meta-92001")],
+                                                    "taken_text": "# updated {T} 05:00:00 steps 3\nL-meta-5 1 someone 04:00:00\n"}, "no PR"))
+    out.append(("hostile/A20-steps0", "submit", {"gid": "L-meta-92002", "gaps": [unit("L-meta-92002")],
+                                                 "taken_text": "# updated {T} 05:00:00 steps 0\n"}, "PR"))
+    out.append(("hostile/A20-rival", "submit", {"gid": "L-meta-92003", "gaps": [unit("L-meta-92003")],
+                                                "taken_text": "# updated {T} 05:00:00 steps 1\nL-meta-92003 40000 rival1 05:00:00\n"}, "no PR"))
     # credit line (fork secret PNP_LINKEDIN): with and without the secret, leased and bare, malformed values ignored
     li_cases = [("none-bare", {}, None), ("set-bare", {"PNP_LINKEDIN": B_LI}, None),
                 ("none-lease", {"CLAIM_FIRST": "tl6c-not-search"}, "lease-x1"),

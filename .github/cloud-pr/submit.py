@@ -256,11 +256,22 @@ def _taken_list():
         return None
     t = run(["git", "-C", g, "show", f"{TAKEN_REF}:taken.txt"]).stdout.splitlines()
     try:
-        if not t or time.time() - int(t[0].split()[2]) > 180:
+        age = time.time() - int(t[0].split()[2])
+        if not t or age > 180:
+            log("taken list: stale or missing header (fail closed)")
             return None
     except (IndexError, ValueError):
+        log("taken list: unreadable header (fail closed)")
         return None
-    return {l.split()[0]: l.split()[2] for l in t[1:] if len(l.split()) >= 3}
+    rows = {l.split()[0]: l.split()[2] for l in t[1:] if len(l.split()) >= 3}
+    # Lead 05:32 A20: a fresh list whose header says "steps 0" is a legitimate empty list; reject only a list whose row
+    # count differs from its header (truncated) or a header without the count
+    m = re.search(r"\bsteps (\d+)\b", t[0])
+    if not m or int(m.group(1)) != len(rows):
+        log(f"taken list: header says {m.group(1) if m else 'no count'}, {len(rows)} rows (truncated, fail closed)")
+        return None
+    log(f"taken list: fresh, steps {len(rows)}, {age:.0f} s old")
+    return rows
 
 
 def race_check(step_id):
@@ -525,9 +536,7 @@ def rival_now(gid):
     tl = None if os.environ.get("RIVAL_FIXTURE") else taken_list()
     if not os.environ.get("RIVAL_FIXTURE"):
         if tl is None:
-            return "taken list missing or older than 180 s (fail closed)"
-        if not tl:
-            return "taken list empty (fail closed)"
+            return "taken list missing, older than 180 s or truncated (fail closed)"
         if tl.get(gid) not in (None, HANDLE):
             return f"taken list: first PR by {tl.get(gid)}"
     rel = f"lean/PEqualNP/Outside/{gid.replace('-', '_')}.lean"
@@ -630,7 +639,20 @@ def race_ok(gid):
         if b:
             return False, f"blocking PRs {b}", None
         if DRY:
-            return True, "clear (dry run: no gate request)", None
+            # Lead 05:32 canary A: the dry run makes the same live reads as the bare path (taken list, open pulls,
+            # files, fresh export) so a read that fails only inside the Action shows here, with no claim and no PR
+            rv = rival_now(gid)
+            log("dry run: rival_now:", rv or "clear")
+            if rv:
+                return False, "dry run: rival: " + rv, None
+            try:
+                g2 = next((x for x in curl_json(GAPS, 60)["gaps"] if x["id"] == gid), None)
+            except Exception as e:
+                return False, "dry run: fresh gaps read failed " + repr(e)[:80], None
+            if g2 is None or g2.get("held_now") or (g2.get("holders_now") or 0) > 0:
+                return False, "dry run: " + ("unit missing from the fresh gaps export" if g2 is None else "held in the mirror"), None
+            log("dry run: fresh export lists", gid, "unheld")
+            return True, "clear (dry run: no gate request; rival_now clear; fresh export unheld)", None
         # GATEWAY v1 section 4 (Lead 16:50 UTC 26 Nov), in code: finished proof -> ask deskgate for the lease. Lease ok
         # within 60 s -> PR with the lease. Else, if GitHub shows no rival PR now and the mirror shows no holder -> PR
         # without a lease. Else skip (no backup PRs). Gate closed or paused -> the unleased branch.
