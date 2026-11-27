@@ -34,7 +34,7 @@ permissions:
   actions: read
   pull-requests: read
 # Canary slot (Lead 09:29): loadcanary.yml's step "Canary slot" runs ONE canary at a time in the whole fork (oldest run
-# first) and none while the run token has under 1,000 left; the LANE-CI line prints reads used, left and reset.
+# first) and none while the run token has under 2,500 left; the LANE-CI line prints reads used, left and reset.
 # Merge gate: job "line" FAILS unless the LANE-CI verdict is ok and every suite passed.
 # Read budget (Lead 08:49): while the fork ref wave/on exists (the Lead sets and deletes it) job "wave" fails and NOTHING
 # else runs (no suite, no canary): the wave's opener owns the read pool. The check is a git ls-remote (no REST read).
@@ -47,9 +47,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
-      - name: Refuse while the wave is on (fork ref wave/on)
+      - name: Refuse while the wave is on (fork ref wave/on) or the run token is under the floor
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          # Lead 09:41: a run that finds the run token under 2,500 exits before any read; every run prints RL start/end
+          read left reset < <(gh api rate_limit --jq '.resources.core|"\(.remaining) \(.reset)"' 2>/dev/null || echo "0 0")
+          echo "RL start ${left} left, reset $(date -u -d @${reset:-0} +%H:%M) UTC"
+          [ "${left:-0}" -ge 2500 ] || { echo "::error::run token left ${left} < 2500 (Lead floor): exit before any read"; exit 1; }
           o=$(git ls-remote "https://github.com/${{ github.repository }}.git" 'refs/heads/wave/*') || { echo "::error::ls-remote failed: not starting"; exit 1; }
           # create-only switch (infra 08:59, no ref deletes): wave/on-<epoch> and wave/off-<epoch>; ON while the newest on is newer
           # than the newest off (same rule as 16.1 stop/go); a bare wave/on also counts as ON
@@ -96,6 +102,7 @@ jobs:
     steps:
       - name: One line for the board file
         env:
+          GH_TOKEN: ${{ github.token }}
           LINE: ${{ needs.canary.outputs.line }}
           R_MD: ${{ needs.mintdrill.result }}
           R_ND: ${{ needs.nodesk.result }}
@@ -104,6 +111,7 @@ jobs:
           R_WAVE: ${{ needs.wave.result }}
         shell: bash
         run: |
+          echo "RL end $(gh api rate_limit --jq '.resources.core|"\(.remaining) left, reset \(.reset | strftime("%H:%M")) UTC"' 2>/dev/null || echo '?')"
           l="${LINE:-LANE-CI ? verdict=BAD (no canary line, canary job $R_LC)} suites mintdrill=$R_MD nodesk=$R_ND preflight-live=$R_PL canary=$R_LC"
           echo "$l"; echo "$l" > line.txt
           { echo '### LANE-CI (paste into team/board/<lane>.md)'; echo '```'; echo "$l"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
