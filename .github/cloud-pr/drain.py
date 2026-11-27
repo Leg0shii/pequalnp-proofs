@@ -614,6 +614,15 @@ def stall_tick(n_inflight):
         su = float(open(os.path.join(W, "stall")).read())
     except (OSError, ValueError):
         su = 0.0
+    try:                                   # 16.14: the refresher's heartbeat went stale, workers read inline
+        rd = open(os.path.join(W, "refdead")).read().split()
+        if time.time() - ALERTED.get("refdead", 0) >= 300 and time.time() - float(rd[0]) < 300:
+            ALERTED["refdead"] = time.time()
+            m = "REFRESHER-DEAD " + " ".join(rd[1:])[:120] + ": workers read inline (one reader per check)"
+            ok = DRY or alert_ref(m, "refdead")
+            log(m, "(alert ref pushed)" if ok else "(alert ref push FAILED)")
+    except (OSError, ValueError, IndexError):
+        pass
     try:                                   # 16.13: four create refusals ended this drain's creates
         gv = open(os.path.join(W, "giveup")).read().strip()
         if not ALERTED.get("prstall-giveup"):
