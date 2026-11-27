@@ -151,6 +151,32 @@ def curl_json(url, timeout=60):
 GAPS_MAX_AGE_S = float(os.environ.get("GAPS_MAX_AGE_S", "10"))
 
 
+# REHEARSAL (Lead 08:33): in a -drill run the drill driver force-pushes the fork ref DRILL_GAPS_REF (a commit whose
+# tree holds gaps.json, same record shape as the desk's, drill units only) at each of its exports. Every pull of the
+# real gaps.json (same 7 MB, same GAPS_MAX_AGE_S cache, so the listing lag stays real) appends those records, so an
+# L-drill unit is LISTED and runs guards, race, halt, commit build and WOULD-CREATE like a real one. Never set in
+# cloud-pr.yml (only loadcanary.yml sets it, and only with DRY on).
+DRILL_GAPS_REF = os.environ.get("DRILL_GAPS_REF", "")
+DRILL_NOTE = [0]
+
+
+def drill_merge(gj):
+    try:
+        r = gh(["api", "-H", "Accept: application/vnd.github.raw",
+                f"repos/{FORK}/contents/gaps.json?ref={DRILL_GAPS_REF}"], timeout=30)
+        dg_ = json.loads(r.stdout)
+        drill = [x for x in (dg_.get("gaps") or []) if str(x.get("id", "")).startswith("L-drill-")]
+    except Exception as e:
+        if DRILL_NOTE[0] < 3:
+            DRILL_NOTE[0] += 1
+            log(f"drill gaps {DRILL_GAPS_REF}: not read ({str(e)[:100]}), drill units unlisted this pull")
+        return gj
+    have = {x.get("id") for x in drill}
+    gj = dict(gj)
+    gj["gaps"] = [x for x in (gj.get("gaps") or []) if x.get("id") not in have] + drill
+    return gj
+
+
 def gaps_json():
     """B2 (27 Nov): one gaps.json copy per drain, shared by every worker and read again only when older than
     GAPS_MAX_AGE_S (7 MB a pull; it was 3 to 4 pulls per unit). The copy is also what the guards read (GAPS_FILE)."""
@@ -177,6 +203,8 @@ def gaps_json():
         if not fresh:
             t = time.time()
             gj = curl_json(GAPS, 60)
+            if DRILL_GAPS_REF:
+                gj = drill_merge(gj)
             with open(f + ".tmp", "w") as o:
                 json.dump(gj, o)
             os.replace(f + ".tmp", f)
