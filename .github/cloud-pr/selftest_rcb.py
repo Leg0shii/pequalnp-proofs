@@ -114,16 +114,45 @@ add_pr(70001, CLK[0] - 5, "Prove L-meta-70001")
 orig = S.gh
 def slow_gh(args, write=False, timeout=120):
     if "/pulls?" in args[1]:
-        CLK[0] += 3
+        CLK[0] += 1.5
     return orig(args, write, timeout)
 S.gh = slow_gh
 t_start = CLK[0]
 try:
     snap = S.rival_snapshot(0)
-    case("R3-stamp-at-start", abs(snap["t"] - t_start) < 0.01, f"(t - start = {snap['t'] - t_start:.1f} s, read took 3 s)")
+    case("R3-stamp-at-start", abs(snap["t"] - t_start) < 0.01, f"(t - start of the page read = {snap['t'] - t_start:.1f} s, read took 1.5 s)")
 except Exception as e:
     case("R3-stamp-at-start", False, repr(e)[:100])
 S.gh = orig
+
+# ---- FRESH-AT-CREATE (Lead 06:52, w12 mintload: 124 of 237 creates on a snapshot over 2 s): reads take time (taken
+# list 1.5 s, each page 1.5 s, each files read 1.0 s); the snapshot rival_now hands to the create must be at most 2 s
+# old counted from the start of its first open-pulls page request
+reset_snap(); PULLS.clear()
+for k in range(3):
+    add_pr(71000 + k, CLK[0] - 2 - k, "Batch of proofs", files=["lean/PEqualNP/Outside/L_meta_%d.lean" % (71000 + k)])
+REQ = []
+def lat_gh(args, write=False, timeout=120):
+    if "/pulls?" in args[1]:
+        if "page=1" in args[1].split("&")[-1] or args[1].endswith("page=1"):
+            REQ.append(CLK[0])
+        CLK[0] += 1.5
+    elif "/files" in args[1]:
+        CLK[0] += 1.0
+    return orig(args, write, timeout)
+def lat_taken():
+    CLK[0] += 1.5
+    return fake_taken()
+S.gh = lat_gh; S._taken_list = lat_taken
+try:
+    r = S.rival_now("L-meta-71999", 2)
+    sa = S.STG.get("snap_age")
+    honest = CLK[0] - max([t for t in REQ if t <= CLK[0] - (sa or 0) + 1e-6] or [0])
+    case("FRESH-AT-CREATE-2s", r is None and sa is not None and sa <= 2.0 and abs(honest - sa) < 0.01,
+         f"(snap_age {sa}, since its page-1 request {honest:.1f} s, page-1 requests {len(REQ)}, rival={r})")
+except Exception as e:
+    case("FRESH-AT-CREATE-2s", False, repr(e)[:100])
+S.gh = orig; S._taken_list = fake_taken
 
 # ---- 16.1 through the real filing_halted (inline: no drain dir for these)
 del os.environ["RIVAL_SNAP_DIR"]

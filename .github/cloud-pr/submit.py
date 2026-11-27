@@ -662,7 +662,8 @@ def _build_snapshot(files):
     """taken list (fresh fetch) + every open PR created after its header minus 30 s, with its units by title, branch
     and changed files. Older PRs are in the taken list (takenpub.py maps every open PR by file path). Raises on any
     failed read (fail closed)."""
-    t_build = time.time()                   # R3 (red team): the snapshot is as old as its OLDEST read, so stamp it here
+    t_build = None    # R3 + Lead 06:52: stamped right before the FIRST open-pulls page request (the read that sees new
+    # PRs); the taken list is reused up to 10 s and is covered by the header-30 s window, so it does not age the snapshot
     if time.time() - TL_T[0] > 10:          # canary A2: a list fetched in the last 10 s is reused (1 s a fetch)
         _TL.clear()
     tl = taken_list()
@@ -673,6 +674,8 @@ def _build_snapshot(files):
     size, maxp = (100, 60) if full else (SNAP_PAGE, SNAP_MAX_PAGES)
     recent = []
     for k in range(1, maxp + 1):
+        if k == 1:
+            t_build = time.time()
         # 16.7: small pages (only PRs since the header are needed) read with If-None-Match: an unchanged page is a
         # 304 and costs nothing of the run token's hourly limit; any failed read raises (fail closed)
         try:
@@ -725,6 +728,14 @@ def rival_snapshot(max_age=None):
         except Exception:
             pass
         snap = _build_snapshot(dict(old.get("files") or {}))
+        bound = max_age if max_age > 0 else SNAP_CREATE_AGE_S     # 0 = forced rebuild (refresher): the create bound
+        for _ in range(3):     # Lead 06:52: slow reads (new PRs' files) made it older than the bound: again, files cached
+            if time.time() - snap["t"] <= bound:
+                break
+            snap = _build_snapshot(dict(snap.get("files") or {}))
+        else:
+            if time.time() - snap["t"] > bound:
+                raise RuntimeError(f"snapshot {time.time() - snap['t']:.1f} s old after 4 builds (over {bound} s)")
         with open(f + ".tmp", "w") as o:
             json.dump(snap, o)
         os.replace(f + ".tmp", f)
@@ -1090,6 +1101,9 @@ def create_pr(gid, lease):
                 return None, "halted: " + hwhy
             if not lease:
                 rv = rival_now(gid, SNAP_CREATE_AGE_S)
+                if rv and rv.startswith("rival check failed"):     # a failed or late read: no PR now, the drain
+                    log("SKIP", gid, f"no PR (attempt {att + 1}):", rv)  # retries (submitfail), the branch is kept
+                    return None, rv
                 if rv:
                     log("SKIP", gid, f"unleased PR not opened (attempt {att + 1}), rival", rv)
                     return None, "rival PR open: " + rv
