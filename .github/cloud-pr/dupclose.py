@@ -114,11 +114,12 @@ def title_unit(t):
 
 
 MAINF = {"t": 0.0}
+MAIN_EVERY = 40          # mintdrill A8 / I3: settled-to-closed within 60 s (was 300 s)
 
 
 def main_settled():
-    """Lead 22:55: units whose file is on upstream main (shallow git fetch every 300 s, no API) are settled."""
-    if time.time() - MAINF["t"] < 300 or os.environ.get("FIXTURE_MERGED"):
+    """Lead 22:55: units whose file is on upstream main (shallow git fetch every MAIN_EVERY s, no API) are settled."""
+    if time.time() - MAINF["t"] < MAIN_EVERY or os.environ.get("FIXTURE_MERGED"):
         return
     MAINF["t"] = time.time()
     g = os.path.join(W, "up.git")
@@ -438,6 +439,15 @@ def one_pass():
                         and age({"createdAt": p["createdAt"]}) >= 20):
                     dups.append((p["n"], p["gid"], int(age({"createdAt": p["createdAt"]}))))
                     log("MERGED-RIVAL", p["n"], p["gid"], "settled by", *MERGED[p["gid"]])
+        own = {}                                     # mintdrill A9: two open PRs of OUR OWN on one unit
+        for p in allp.values():
+            if p["author"] == HANDLE and p["gid"] and p["n"] not in CLOSED:
+                own.setdefault(p["gid"], []).append(p)
+        for gid, ps in own.items():
+            for p in sorted(ps, key=lambda q: q["n"])[1:]:      # keep the lowest number (first in line), close younger
+                if not any(x[0] == p["n"] for x in dups) and age({"createdAt": p["createdAt"]}) >= 20:
+                    dups.append((p["n"], gid, int(age({"createdAt": p["createdAt"]}))))
+                    log("OWN-DUP", p["n"], gid, "younger than", sorted(ps, key=lambda q: q["n"])[0]["n"])
         if v2:                                       # rule v2: rival lower number OR rival with a Lease line
             for n, gid, ra, rn, rl in close2:
                 if any(x[0] == n for x in dups):

@@ -52,9 +52,12 @@ if UNLEASED_TEST:
 # Lead 21:59 UTC 26 Nov FILE_FIRST: units whose mirror template contains this word (kind search: tl6c-not-search,
 # rect46-andor-search, ...) skip the claim and take the bare path (rival_now and the mirror holder check stay).
 # Empty or 0 = off.
-FILE_FIRST = os.environ.get("FILE_FIRST", "search").strip()
+# mintdrill B1 (red team 27 Nov): keying on the word "search" repeats F3 for any new or empty template name. Default
+# now "*" = every unit files first; CLAIM_FIRST = comma list of templates that still claim first (allow-list, empty).
+FILE_FIRST = os.environ.get("FILE_FIRST", "*").strip()
 if FILE_FIRST == "0":
     FILE_FIRST = ""
+CLAIM_FIRST = {x.strip() for x in os.environ.get("CLAIM_FIRST", "").split(",") if x.strip()}
 LATE_LEASE = False     # GATEWAY v1: no late lease (claims only for finished proofs, before the PR)   # unheld: open the PR, then claim
 # Lead 14:36: LEASE-FIRST (the ready commit message holds the word lease-first): claim BEFORE any PR (a claim after our
 # own PR paid 31 with race: true instead of 110); a grant opens the PR with the Lease line, a refusal or a held step
@@ -491,25 +494,60 @@ def lf_case(why):
     return "bare"
 
 
+RIVAL_WINDOW_S = 180     # the taken list (authority for older PRs) is accepted up to 180 s old: scan newer open PRs
+RIVAL_MAX_PAGES = 10
+UNIT_TOKEN = re.compile(r"(?<![A-Za-z0-9_-])L-[a-z0-9]+(?:-[a-z0-9]+)*-\d+(?![A-Za-z0-9_-])")
+_FILES = {}
+
+
+def pr_files(n):
+    """changed file paths of an upstream PR (cached per run)"""
+    if n not in _FILES:
+        _FILES[n] = [f.get("filename") for f in json.loads(gh(["api", f"repos/{UP}/pulls/{n}/files?per_page=100"]).stdout or "[]")]
+    return _FILES[n]
+
+
 def rival_now(gid):
-    """Lead 18:53: right before gh pr create on the unleased branch. One REST call (no search index lag): the newest 100
-    open upstream PRs; a PR of another author whose title or head branch names the unit -> its number. Then the fresh
-    taken list (first PR of another author). Fixture for tests: RIVAL_FIXTURE (the pulls JSON). Error -> rival (skip)."""
+    """Another author's open PR on the unit, right before we decide and again right before gh pr create.
+    Mintdrill gaps (red team 27 Nov): A1 a title or branch that names NO unit id is checked by its changed file path
+    (lean/PEqualNP/Outside/<unit>.lean); A2 every open PR newer than RIVAL_WINDOW_S is read (all pages, not the newest
+    100; older ones are on the taken list); A3/A4 a missing, stale or empty taken list = rival (fail closed).
+    Any error = rival (no PR). RIVAL_FIXTURE: the pulls JSON (tests)."""
+    tl = None if os.environ.get("RIVAL_FIXTURE") else taken_list()
+    if not os.environ.get("RIVAL_FIXTURE"):
+        if tl is None:
+            return "taken list missing or older than 180 s (fail closed)"
+        if not tl:
+            return "taken list empty (fail closed)"
+        if tl.get(gid) not in (None, HANDLE):
+            return f"taken list: first PR by {tl.get(gid)}"
+    rel = f"lean/PEqualNP/Outside/{gid.replace('-', '_')}.lean"
+    pat = re.compile(r"(?<![A-Za-z0-9])(%s|%s)(?![0-9])" % (re.escape(gid), re.escape(gid.replace("-", "_"))))
     try:
-        if os.environ.get("RIVAL_FIXTURE"):
-            pulls = json.load(open(os.environ["RIVAL_FIXTURE"]))
-        else:
-            pulls = json.loads(gh(["api", f"repos/{UP}/pulls?state=open&sort=created&direction=desc&per_page=100"]).stdout)
-        pat = re.compile(r"(?<![A-Za-z0-9])(%s|%s)(?![0-9])" % (re.escape(gid), re.escape(gid.replace("-", "_"))))
-        for p in pulls:
-            if (p.get("user") or {}).get("login") != HANDLE and (pat.search(p.get("title") or "") or pat.search((p.get("head") or {}).get("ref") or "")):
-                return f"#{p.get('number')} by {(p.get('user') or {}).get('login')}"
+        for k in range(1, RIVAL_MAX_PAGES + 1):
+            if os.environ.get("RIVAL_FIXTURE"):
+                pulls = json.load(open(os.environ["RIVAL_FIXTURE"]))[(k - 1) * 100:k * 100]
+            else:
+                pulls = json.loads(gh(["api", f"repos/{UP}/pulls?state=open&sort=created&direction=desc&per_page=100&page={k}"]).stdout)
+            old = False
+            for p in pulls:
+                who = (p.get("user") or {}).get("login")
+                t, ref = p.get("title") or "", (p.get("head") or {}).get("ref") or ""
+                if who != HANDLE and (pat.search(t) or pat.search(ref)):
+                    return f"#{p.get('number')} by {who}"
+                if who != HANDLE and not UNIT_TOKEN.search(t) and not UNIT_TOKEN.search(ref.replace("_", "-")) \
+                        and rel in pr_files(p["number"]):
+                    return f"#{p.get('number')} by {who} (file path)"
+                try:
+                    if time.time() - (time.mktime(time.strptime(p["created_at"][:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone) > RIVAL_WINDOW_S:
+                        old = True
+                except (KeyError, ValueError):
+                    pass
+            if len(pulls) < 100 or old:
+                return None
+        return f"more than {RIVAL_MAX_PAGES} pages of open PRs in {RIVAL_WINDOW_S} s (fail closed)"
     except Exception as e:
         return "rival check failed: " + repr(e)[:80]
-    tl = None if os.environ.get("RIVAL_FIXTURE") else taken_list()
-    if tl is not None and tl.get(gid) not in (None, HANDLE):
-        return f"taken list: first PR by {tl.get(gid)}"
-    return None
 
 
 def rival_open(gid):
@@ -591,11 +629,11 @@ def race_ok(gid):
         if old:
             return True, "clear (our recorded lease reused)", old
         tpl = str((g.get("faithful_by_template") or {}).get("template") or "")
-        if FILE_FIRST and FILE_FIRST in tpl:
+        if FILE_FIRST and tpl not in CLAIM_FIRST and (FILE_FIRST == "*" or FILE_FIRST in tpl):
             # Lead 21:59 FILE_FIRST: no claim (open-gate claims on a fresh slice all came back held = no PR); the bare
             # path below decides: PR without a lease when no rival PR and no holder in the mirror. Late lease later.
             why = f"no lease: file first ({tpl})"
-            log("gate:", gid, "skipped: file first", tpl)
+            log("gate:", gid, "skipped: file first", tpl or "(no template)")
         else:
             global SLOT_WAIT_S
             SLOT_WAIT_S = LF_WAIT_S
@@ -606,11 +644,17 @@ def race_ok(gid):
         if case == "bare" and rival_open(gid):
             case = "rival PR"
         if case == "bare":
+            rv = rival_now(gid)                  # mintdrill A1/A2/A3/A4: file path, all recent pages, taken list usable
+            if rv:
+                case = "rival: " + rv
+        if case == "bare":
             try:
                 g2 = next((x for x in curl_json(GAPS, 60)["gaps"] if x["id"] == gid), None)
             except Exception:
                 g2 = {"held_now": True}          # cannot tell: treat as held (fail closed)
-            if g2 and (g2.get("held_now") or (g2.get("holders_now") or 0) > 0):
+            if g2 is None:
+                case = "unit missing from the fresh gaps export"     # mintdrill A5: settled or withdrawn = no PR
+            elif g2.get("held_now") or (g2.get("holders_now") or 0) > 0:
                 case = "held in the mirror"
         if case != "bare":
             return False, f"lease-first: {case} (" + why[:120] + "), no PR", None

@@ -101,6 +101,10 @@ def child_submit(src, w):
             src_l = pulls_open if q.get("state") == "open" else pulls_closed
             pp, pg = int(q.get("per_page", 30)), int(q.get("page", 1))
             return cp(json.dumps(src_l[(pg - 1) * pp:pg * pp]))
+        m = re.search(r"/pulls/(\d+)/files", a[1]) if a[0] == "api" else None
+        if m:
+            p = next((x for x in pulls_open + pulls_closed if x["number"] == int(m.group(1))), {})
+            return cp(json.dumps([{"filename": f} for f in p.get("files") or []]))
         if a[:2] == ["pr", "list"]:
             n = a[a.index("--search") + 1]
             res = []
@@ -179,6 +183,7 @@ def child_submit(src, w):
     S.pr_gate = contextlib.nullcontext
     S.release = lambda lid, why: out["desk"].append("release " + str(lid)) if lid else None
     S.time.sleep = lambda s: None
+    S.time.time = lambda: T0                # the fixtures' clock (created_at of the pulls is relative to T0)
 
     def gate_open_now():
         gj = S.LAST_GJ[0] or {}
