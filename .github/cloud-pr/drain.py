@@ -8,7 +8,7 @@ gated to 2 in flight (submit.py pr_gate, PR_GATE_DIR). Each (branch, commit) is 
 branch drain-state (seen.txt "step sha result epoch", one writer because one run works at a time); a ready-wait
 re-push is a new commit and runs again. A run stops after DRAIN_MAX_S (1200) or when nothing is pending for 30 s.
 Env: SRC (fork main checkout), W, PR_TOKEN, READ_TOKEN, GITHUB_REPOSITORY."""
-import base64, os, re, subprocess, sys, tempfile, threading, time
+import base64, json, os, re, subprocess, sys, tempfile, threading, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import haltrule                                        # rule 16.1 (w9's haltrule.py): the same rule as submit.py and the closer
 from concurrent.futures import ThreadPoolExecutor
@@ -71,6 +71,8 @@ def linkedin_file():
 
 
 def load_seen():
+    if PREFIX != "ready":          # load canary: every run drains every loadtest/ ref again (its state is write-only)
+        return
     if sh("git", "-C", SRC, "fetch", "-q", "--depth", "1", URL, f"+refs/heads/{STATE_REF}:refs/drain/state").returncode:
         return
     for l in sh("git", "-C", SRC, "show", "refs/drain/state:seen.txt").stdout.splitlines():
@@ -301,7 +303,7 @@ def work(sid, sha):
     except Exception as e:
         res, why = "error", repr(e)[:200]
     with LOCK:
-        if res not in ("paused", "halted") and not (res == "unleased" and "desk off or paused" in why):
+        if res not in ("paused", "halted", "site-closed") and not (res == "unleased" and "desk off or paused" in why):
             if res in RETRYABLE:                           # W6: retried up to RETRY_MAX times (submit.py is idempotent:
                 n = attempts(SEEN.get((sid, sha)))[1] + 1  # create-only head, our PR found, lease recovered)
                 SEEN[(sid, sha)] = (f"{res}#{n}", time.time())
@@ -459,6 +461,83 @@ def stall_tick(n_inflight):
         log(msg.split(":")[0] if kind == "prstall-bucket" else "PR-STALL", msg, "(alert ref pushed)" if ok else "(alert ref push FAILED)")
 
 
+# HARDENING 16.11 (Lead 07:03): the site's own status (pequalnp.com/status.json), fetched by the PC gate once a minute
+# and published on toolkit ref status/site (status.json as received, fetched.json {"epoch", "http"}). We never contact
+# the site. Read here at most every SITE_EVERY_S, shared by all workers through W/site.json (submit.py checks it before
+# every create). Any submissions.<cause>.accepting false in a copy at most SITE_MAX_AGE_S old = hold (no new unit,
+# result "site-closed", not marked seen, retried when it reopens). A stale, unparseable or http-failed copy is IGNORED
+# (filing goes on) with one SITE-STATUS-STALE alert per 5 min; no ref at all = dark (nothing, no alert).
+SITE_REF = "refs/heads/status/site"
+SITE_EVERY_S = float(os.environ.get("SITE_EVERY_S", "30"))
+SITE_MAX_AGE_S = float(os.environ.get("SITE_MAX_AGE_S", "180"))
+_SITE = {"t": 0.0, "closed": False, "why": ""}
+
+
+def site_verdict(status_txt, fetched_txt, now):
+    """(closed, why, alert) from the two files of status/site; None texts = no ref (dark). Pure."""
+    if status_txt is None and fetched_txt is None:
+        return False, "no status/site ref (dark)", None
+    try:
+        f = json.loads(fetched_txt or "")
+        ep = float(f["epoch"])
+        code = int(f.get("http", f.get("http_code", f.get("code", 0))))
+    except (ValueError, KeyError, TypeError):
+        return False, "fetched.json unreadable", "SITE-STATUS-STALE fetched.json unreadable: filing as usual"
+    if not 0 <= now - ep <= SITE_MAX_AGE_S:
+        return False, f"copy {now - ep:.0f} s old", f"SITE-STATUS-STALE copy {now - ep:.0f} s old (over {SITE_MAX_AGE_S:.0f} s): filing as usual"
+    if code != 200:
+        return False, f"site answered http {code}", f"SITE-STATUS-STALE last fetch http {code}: filing as usual"
+    try:
+        st = json.loads(status_txt or "")
+        subs = st["submissions"]
+        if not isinstance(subs, dict):
+            raise TypeError("submissions is not an object")
+        closed = sorted(k for k, v in subs.items() if isinstance(v, dict) and v.get("accepting") is False)
+    except (ValueError, KeyError, TypeError) as e:
+        return False, "status.json unparseable", f"SITE-STATUS-STALE status.json unparseable ({str(e)[:60]}): filing as usual"
+    if closed:
+        ra = max([int(subs[k].get("retry_after_s") or 0) for k in closed if str(subs[k].get("retry_after_s") or 0).isdigit()] or [0])
+        return True, f"site not accepting {','.join(closed)[:80]} (retry_after_s {ra})", None
+    return False, "site accepting", None
+
+
+def _site_read():
+    """(status.json text, fetched.json text), (None, None) when the ref does not exist; raises on a failed fetch"""
+    g = os.path.join(W, "site.git")
+    if not os.path.isdir(g):
+        sh("git", "init", "-q", "--bare", g)
+    ls = sh("git", *auth(), "ls-remote", TK, SITE_REF, timeout=60)
+    if ls.returncode:
+        raise RuntimeError("ls-remote status/site failed")
+    if not ls.stdout.strip():
+        return None, None
+    if sh("git", *auth(), "-C", g, "fetch", "-q", "--depth=1", TK, f"+{SITE_REF}:{SITE_REF}", timeout=60).returncode:
+        raise RuntimeError("fetch status/site failed")
+    show = lambda n: (lambda r: r.stdout if r.returncode == 0 else "")(sh("git", "-C", g, "show", f"{SITE_REF}:{n}"))
+    return show("status.json"), show("fetched.json")
+
+
+def site_closed():
+    if time.time() - _SITE["t"] >= SITE_EVERY_S:
+        try:
+            stx, ftx = _site_read()
+            closed, why, alert = site_verdict(stx, ftx, time.time())
+        except Exception as e:
+            closed, why, alert = False, "status/site unreadable", f"SITE-STATUS-STALE status/site unreadable ({str(e)[:60]}): filing as usual"
+        _SITE.update(t=time.time(), closed=closed, why=why)
+        try:
+            with open(os.path.join(W, "site.json.tmp"), "w") as o:
+                json.dump({"t": time.time(), "closed": closed, "why": why}, o)
+            os.replace(os.path.join(W, "site.json.tmp"), os.path.join(W, "site.json"))
+        except OSError:
+            pass
+        if alert and time.time() - ALERTED.get("sitestale", 0) >= 300:
+            ALERTED["sitestale"] = time.time()
+            ok = DRY or alert_ref(alert, "sitestale")
+            log(alert, "(alert ref pushed)" if ok else "(alert ref push FAILED)")
+    return _SITE["closed"]
+
+
 def _loop(inflight, idle):
     with ThreadPoolExecutor(WORKERS) as ex:
         while time.time() - T0 < MAX_S:
@@ -474,7 +553,12 @@ def _loop(inflight, idle):
                 log("shared desk pause started: no new branch, in-flight ones finish"); todo = []
                 if not inflight:
                     break
+            elif site_closed():                 # 16.11: hold, never end the drain on it (it reopens)
+                if not _SITE.get("logged"):
+                    log("site-closed: no new branch,", _SITE["why"]); _SITE["logged"] = True
+                todo = []
             else:
+                _SITE["logged"] = False
                 todo = [x for x in pending() if x not in inflight] if len(inflight) < WORKERS else []
             for x in todo[:WORKERS - len(inflight)]:
                 inflight[x] = ex.submit(work, *x)

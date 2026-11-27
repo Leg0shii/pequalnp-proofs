@@ -1107,6 +1107,10 @@ def create_pr(gid, lease):
     for att in range(5):
         if stopped():                    # STOP may appear while this PR waited for a retry
             return None, "STOP file on upstream main"
+        sc = site_closed_now()
+        if sc:
+            log("site-closed:", gid, sc, f"(before create attempt {att + 1}): held, retried when it reopens")
+            return None, "site-closed: " + sc
         body = pr_body(lease)
         with pr_gate():
             # Lead 06:12 a0 (w12 stall drill): before EVERY attempt, after any slot, bucket or backoff wait: the halt
@@ -1163,6 +1167,18 @@ def finish(result, why, url=None):
 
 
 HALT_MAX_AGE_S = float(os.environ.get("HALT_MAX_AGE_S", "2"))
+
+
+def site_closed_now():
+    """16.11: the drain's shared copy W/site.json (drain.py site_closed, at most 30 s old): why, or None. Missing or
+    older than 120 s = None (a dead reader never stops filing)."""
+    try:
+        d = json.load(open(os.path.join(SNAP_DIR, "site.json")))
+        if d.get("closed") and 0 <= time.time() - float(d["t"]) <= 120:
+            return d.get("why") or "site not accepting"
+    except Exception:
+        pass
+    return None
 
 
 def filing_halted(max_age=None):
@@ -1351,6 +1367,8 @@ def main():
         finish("race", why2)
     if not url and why2.startswith("STOP"):
         finish("stopped", why2 + " (branch kept)")
+    if not url and why2.startswith("site-closed: "):
+        finish("site-closed", why2[13:] + " (branch kept)")
     if not url and why2.startswith("halted: "):
         finish("halted", why2[8:] + (f"; lease {LEASE[0]} kept on claim/{ID}" if LEASE[0] else ""))
     finish("submitted" if url else "submitfail", f"{why2}; {time.time() - t0:.0f}s after start", url)

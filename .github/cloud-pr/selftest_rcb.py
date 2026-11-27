@@ -305,6 +305,44 @@ if have:
 else:
     case("6-PR-STALL-alerts", False, "(no stall_alerts in this drain.py)")
 
+# ---- 16.11 site status (drain.site_verdict, drain.site_closed, submit.site_closed_now)
+if D is not None and hasattr(D, "site_verdict"):
+    now = 2_000_000_000.0
+    F = lambda age, code=200: json.dumps({"epoch": now - age, "http": code})
+    ST = lambda acc: json.dumps({"submissions": {"proof": {"accepting": acc, "retry_after_s": 120}, "lease": {"accepting": True}}})
+    v = D.site_verdict(ST(False), F(30), now)
+    case("16.11-not-accepting-holds", v[0] is True and v[2] is None, f"({v[1]})")
+    v = D.site_verdict(ST(True), F(30), now)
+    case("16.11-accepting-files", v[0] is False and v[2] is None, f"({v[1]})")
+    v = D.site_verdict(ST(False), F(200), now)
+    case("16.11-stale-copy-files-with-alert", v[0] is False and (v[2] or "").startswith("SITE-STATUS-STALE"), f"({v[1]})")
+    v = D.site_verdict("{not json", F(30), now)
+    case("16.11-malformed-json-files-with-alert", v[0] is False and (v[2] or "").startswith("SITE-STATUS-STALE"), f"({v[1]})")
+    v = D.site_verdict(ST(False), "garbage", now)
+    case("16.11-malformed-fetched-files-with-alert", v[0] is False and (v[2] or "").startswith("SITE-STATUS-STALE"), f"({v[1]})")
+    v = D.site_verdict(ST(False), F(30, 503), now)
+    case("16.11-http-failure-files-with-alert", v[0] is False and v[2], f"({v[1]})")
+    v = D.site_verdict(None, None, now)
+    case("16.11-no-ref-dark", v[0] is False and v[2] is None, f"({v[1]})")
+    # hold and resume through site_closed() with the shared copy, and one alert per 5 min when stale
+    seq = [(ST(False), F(10)), (ST(True), F(10)), (ST(False), F(500)), (ST(False), F(500))]
+    D._site_read = lambda: (lambda x: (x[0], x[1].replace(str(2_000_000_000.0 - 10), str(time.time() - 10)).replace(str(2_000_000_000.0 - 500), str(time.time() - 500))))(seq.pop(0))
+    sent.clear(); D.ALERTED.clear(); D._SITE["t"] = 0
+    D.SITE_EVERY_S = 0
+    a = D.site_closed(); w1 = json.load(open(os.path.join(D.W, "site.json")))
+    os.environ["RIVAL_SNAP_DIR"] = D.W; S.SNAP_DIR = D.W
+    sc = S.site_closed_now()
+    b = D.site_closed()
+    sc2 = S.site_closed_now()
+    c = D.site_closed(); d = D.site_closed()
+    case("16.11-hold-then-resume", a is True and bool(sc) and b is False and sc2 is None and w1["closed"] is True, f"(closed {a} -> {b}, opener saw {sc!r} then {sc2!r})")
+    case("16.11-stale-one-alert", c is False and d is False and [k for k, m in sent] == ["sitestale"], f"(alerts {sent})")
+    os.environ["RIVAL_SNAP_DIR"] = SNAPD; S.SNAP_DIR = SNAPD
+    dr = open(os.path.join(os.path.dirname(D.__file__), "drain.py")).read()
+    case("16.11-site-closed-not-marked-seen", '"paused", "halted", "site-closed"' in dr, "")
+else:
+    case("16.11-site-status", False, "(no site_verdict in this drain.py)")
+
 bad = [n for n, ok in res if not ok]
 print(f"RCB SELFTEST OK {len(res)}" if not bad else "RCB SELFTEST FAIL " + " ".join(bad))
 sys.exit(1 if bad else 0)
