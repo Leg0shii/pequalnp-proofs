@@ -26,6 +26,7 @@ REAL_SLEEP = time.sleep      # 16.14 refresher heartbeat thread (tests patch tim
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # drain runs submit.py with -I (no script dir on the path)
 import ghcond, haltrule                                              # RC-b: 16.7 conditional reads, 16.1 halt rule
 import treebuild                                                     # lane tree (W7): the unit's tree along one path
+import claimallow                                                    # lane leases L1: the live claim list (toolkit claimallow/<n>)
 
 UP = "open-goat/pequalnp-proofs"
 GAPS = "https://data.pequalnp.com/data/desk/gaps.json"
@@ -107,16 +108,13 @@ FILE_FIRST = os.environ.get("FILE_FIRST", "*").strip()
 if FILE_FIRST == "0":
     FILE_FIRST = ""
 CLAIM_FIRST = {x.strip() for x in os.environ.get("CLAIM_FIRST", "").split(",") if x.strip()}
-# lane leases C1 (red team CLAIMS-ON, Lead 09:48 narrow mode; Lead 10:17 L1: no Actions variable): the live claim list
-# is read from the toolkit at claim time (claim_ids(), refs claim/allow-<epoch>, written by the PC on the Lead's signed
-# order). Code default: no ref = empty = no claim through the list. When the list is non-empty, race_ok claims ONLY for
+# lane leases C1 (red team CLAIMS-ON, Lead 09:48 narrow mode; Lead 10:17/10:33 L1, N1-N4: no Actions variable): the
+# live claim list is toolkit refs claimallow/<n> (claimallow.py), read by ONE reader per drain (drain.py) into
+# SNAP_DIR/claim-allow.json; claim_list() only reads that file. Code default: no ref = no list = no claim through it. When the list is non-empty, race_ok claims ONLY for
 # listed ids (lease first, then the PR) and every other unit files first at once, whatever FILE_FIRST, CLAIM_FIRST or a
 # "lease-first" word in the ready commit say. C4: a listed id never gets a bare PR: a gate timeout, closed gate, no
 # budget or any other answer without a lease ends as "error" (no PR, branch kept, the drain retries; the retry finds
 # the earlier claim's lease through lease_of / gate_answer_lease).
-CLAIM_ALLOW_GLOB = "refs/heads/claim/allow-*"
-CLAIM_ALLOW_MAX_AGE_S = float(os.environ.get("CLAIM_ALLOW_MAX_AGE_S", "10"))   # shared copy SNAP_DIR/claim-allow.json
-CLAIM_ALLOW_MAX_IDS = 2000
 LATE_LEASE = False     # GATEWAY v1: no late lease (claims only for finished proofs, before the PR)   # unheld: open the PR, then claim
 # Lead 14:36: LEASE-FIRST (the ready commit message holds the word lease-first): claim BEFORE any PR (a claim after our
 # own PR paid 31 with race: true instead of 110); a grant opens the PR with the Lease line, a refusal or a held step
@@ -256,77 +254,10 @@ def _gate(req, gid, wait):
     return None
 
 
-def claim_allow_newest(ls_text):
-    """(sha, epoch) of the newest refs/heads/claim/allow-<epoch> in ls-remote output, or None. Pure."""
-    best = None
-    for m in re.finditer(r"^([0-9a-f]{40})\trefs/heads/claim/allow-(\d+)$", ls_text or "", re.M):
-        if best is None or int(m.group(2)) > best[1]:
-            best = (m.group(1), int(m.group(2)))
-    return best
-
-
-def claim_allow_parse(msg):
-    """(ids, why) from the commit message of the newest claim/allow ref. Pure. Format (W5 gate side, red team):
-    first line "CLAIM-ALLOW v1 off" = off, or "CLAIM-ALLOW v1" and then the unit ids (comma or whitespace separated,
-    same line or the lines below). Anything odd (other header, a token that is not a unit id, no ids, more than
-    CLAIM_ALLOW_MAX_IDS) = empty set (fail closed: no claim)."""
-    lines = (msg or "").strip().split("\n")
-    head = lines[0].split() if lines else []
-    if head[:2] != ["CLAIM-ALLOW", "v1"]:
-        return set(), "odd claim/allow message (no CLAIM-ALLOW v1 header): no claim"
-    if head[2:] == ["off"] and not "".join(lines[1:]).strip():
-        return set(), "claim list off"
-    toks = [t for t in re.split(r"[\s,]+", " ".join(head[2:] + lines[1:])) if t]
-    bad = [t for t in toks if not UNIT_TOKEN.fullmatch(t)]
-    if bad or not toks or len(toks) > CLAIM_ALLOW_MAX_IDS:
-        return set(), f"odd claim/allow list ({len(toks)} ids, bad {bad[:3]}): no claim"
-    return set(toks), f"claim list {len(toks)} ids"
-
-
-def _claim_allow_read():
-    """(ids, why, sha) read live from the toolkit (git only, no REST). Any failure = empty set (fail closed)."""
-    try:
-        g = dg().REPO
-        r = run(["git", "-C", g, "ls-remote", "origin", CLAIM_ALLOW_GLOB], timeout=30)
-        if r.returncode:
-            return set(), "claim/allow refs unreadable: no claim", None
-        nb = claim_allow_newest(r.stdout)
-        if nb is None:
-            return set(), "no claim/allow ref (default: no claim)", None
-        if run(["git", "-C", g, "fetch", "-q", "--depth=1", "origin",
-                f"+refs/heads/claim/allow-{nb[1]}:refs/claim-allow"], timeout=60).returncode:
-            return set(), "claim/allow fetch failed: no claim", nb[0]
-        lg = run(["git", "-C", g, "log", "-1", "--format=%H%n%B", "refs/claim-allow"], timeout=30)
-        sha, _, msg = lg.stdout.partition("\n")
-        if lg.returncode or sha.strip() != nb[0]:
-            return set(), "claim/allow ref moved or unreadable: no claim", nb[0]
-        ids, why = claim_allow_parse(msg)
-        return ids, f"{why} (claim/allow-{nb[1]})", nb[0]
-    except Exception as e:
-        return set(), f"claim/allow read error {repr(e)[:60]}: no claim", None
-
-
-def claim_ids():
-    """lane leases L1: the live claim list (set of unit ids). One shared copy per drain in SNAP_DIR/claim-allow.json,
-    at most CLAIM_ALLOW_MAX_AGE_S old (so 28 workers make about one read per 10 s); a stale or missing copy = one live
-    read. Unreadable, odd or no ref = empty set = no claim through the list."""
-    f = os.path.join(SNAP_DIR, "claim-allow.json")
-    try:
-        c = json.load(open(f))
-        if 0 <= time.time() - float(c["t"]) <= CLAIM_ALLOW_MAX_AGE_S and isinstance(c["ids"], list):
-            return set(c["ids"])
-    except Exception:
-        pass
-    ids, why, sha = _claim_allow_read()
-    log("claim list:", why)
-    try:
-        os.makedirs(SNAP_DIR, exist_ok=True)
-        with open(f + ".tmp%d" % os.getpid(), "w") as o:
-            json.dump({"t": time.time(), "ids": sorted(ids), "why": why, "sha": sha}, o)
-        os.replace(f + ".tmp%d" % os.getpid(), f)
-    except OSError:
-        pass
-    return ids
+def claim_list():
+    """lane leases L1/N1/N2: (ids, ok, why) from the drain reader's shared copy (claimallow.read_copy); a local file
+    read, no network, no wait. ok false = the list is not confirmed now; ids are then the last good list."""
+    return claimallow.read_copy(SNAP_DIR)
 
 
 def gate_answer_lease(gid):
@@ -1242,8 +1173,10 @@ def race_ok(gid):
         if old:
             return True, "clear (our recorded lease reused)", old
         tpl = str((g.get("faithful_by_template") or {}).get("template") or "")
-        cids = claim_ids()                       # lane leases C1/L1: the live list (toolkit claim/allow ref)
+        cids, cok, cwhy = claim_list()           # lane leases C1/L1: the live list (drain reader's copy)
         listed = gid in cids
+        if listed and not cok:                   # N1: a listed id while the list is not confirmed: no claim, no PR
+            return False, f"claim id without a lease (claim list not confirmed: {cwhy[:80]}): no PR, branch kept, retry", None
         if cids:                                 # only the listed ids claim; everyone else files first at once
             file_first = not listed
         else:
@@ -1963,6 +1896,8 @@ def site_closed_now(strict=False):
             return d.get("why") or "site not accepting"
         if strict and not fresh:
             return "site.json older than 120 s (fail closed for claims)"
+        if strict and not 0 <= time.time() - float(d.get("ep") or 0) <= 150:     # red team N6: the status itself
+            return f"site status fetched {time.time() - float(d.get('ep') or 0):.0f} s ago (over 150 s, fail closed for claims)"
         if strict and d.get("why") != "site accepting":
             return f"site status not confirmed: {str(d.get('why'))[:80]} (fail closed for claims)"
     except Exception:

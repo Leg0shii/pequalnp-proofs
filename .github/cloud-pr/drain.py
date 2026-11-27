@@ -10,6 +10,7 @@ re-push is a new commit and runs again. A run stops after DRAIN_MAX_S (1200) or 
 Env: SRC (fork main checkout), W, PR_TOKEN, READ_TOKEN, GITHUB_REPOSITORY."""
 import base64, json, os, re, subprocess, sys, tempfile, threading, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import claimallow                                      # lane leases L1: the live claim list, ONE reader per drain
 import haltrule                                        # rule 16.1 (w9's haltrule.py): the same rule as submit.py and the closer
 import warm as wd                                      # RC-c always-warm drain in the wave window (warm.py)
 from concurrent.futures import ThreadPoolExecutor
@@ -529,6 +530,7 @@ def main():
     except Exception as e:
         log("RUN-TOKEN rate_limit unreadable:", repr(e)[:80])
     inflight = {}; idle = None
+    claimlist_start()                      # lane leases L1: one reader per drain, first copy before any unit
     rf = wd.track(refresher_start(), refresher_start, refresher_stop, log)
     warm = float(os.environ.get("DRAIN_WARM_S", "0") or 0)
     if rf and warm > 0:                    # Lead 08:12 (b): units are released only after the refresher's first copies
@@ -545,6 +547,7 @@ def main():
     try:
         _loop(inflight, idle)
     finally:
+        CL["stop"].set()
         wd.stop_refresher()
     try:                                   # 16.12: live newest-page read duration of this drain
         ds = sorted(float(l.split()[1]) for l in open(os.path.join(W, "snapd.log")) if len(l.split()) == 2)
@@ -765,6 +768,7 @@ def _site_read():
 
 def site_closed():
     if time.time() - _SITE["t"] >= SITE_EVERY_S:
+        stx = ftx = None
         try:
             stx, ftx = _site_read()
             closed, why, alert = site_verdict(stx, ftx, time.time())
@@ -772,8 +776,12 @@ def site_closed():
             closed, why, alert = False, "status/site unreadable", f"SITE-STATUS-STALE status/site unreadable ({str(e)[:60]}): filing as usual"
         _SITE.update(t=time.time(), closed=closed, why=why)
         try:
-            with open(os.path.join(W, "site.json.tmp"), "w") as o:
-                json.dump({"t": time.time(), "closed": closed, "why": why}, o)
+            ep = float(json.loads(ftx or "")["epoch"]) if closed is False and why == "site accepting" else 0
+        except Exception:
+            ep = 0
+        try:
+            with open(os.path.join(W, "site.json.tmp"), "w") as o:     # ep (red team N6): when the PC fetched it
+                json.dump({"t": time.time(), "closed": closed, "why": why, "ep": ep}, o)
             os.replace(os.path.join(W, "site.json.tmp"), os.path.join(W, "site.json"))
         except OSError:
             pass
@@ -782,6 +790,61 @@ def site_closed():
             ok = DRY or alert_ref(alert, "sitestale")
             log(alert, "(alert ref pushed)" if ok else "(alert ref push FAILED)")
     return _SITE["closed"]
+
+
+# lane leases L1/N2 (Lead 10:33 UTC 27 Nov): ONE claim-list reader per drain (the 16.14 pattern). It reads toolkit
+# refs claimallow/<n> every claimallow.EVERY_S (one git ls-remote; a fetch only for a new list ref) into
+# W/claim-allow.json; submit.py only reads that file, so a unit makes no read and waits for nothing. No PR_TOKEN (no
+# toolkit access) = no reader = no file = no list (claims through the list off).
+CL = {"stop": threading.Event(), "thread": None}
+
+
+def claimlist_reader():
+    g = os.path.join(W, "claimallow.git")
+    if not os.path.isdir(g):
+        sh("git", "init", "-q", "--bare", g, timeout=10)
+
+    def ls():
+        r = sh("git", *auth(), "ls-remote", TK, claimallow.PREFIX + "*", timeout=20)
+        return r.stdout if r.returncode == 0 else None
+
+    def fetch(n):
+        return sh("git", *auth(), "-C", g, "fetch", "-q", "--depth=1", TK, f"+{claimallow.PREFIX}{n}:refs/claim-allow",
+                  timeout=30).returncode == 0
+
+    def show():
+        r = sh("git", "-C", g, "log", "-1", "--format=%H%n%ct%n%B", "refs/claim-allow", timeout=10)
+        if r.returncode:
+            raise RuntimeError("log failed")
+        sha, ct, msg = r.stdout.split("\n", 2)
+        return sha.strip(), int(ct), msg
+
+    return claimallow.Reader(W, ls, fetch, show)
+
+
+def claimlist_start():
+    if not PR_TOKEN or os.environ.get("CLAIM_LIST_READER", "1") != "1":
+        log("CLAIM-LIST no reader (no toolkit token): no list")
+        return None
+    rd = claimlist_reader()
+    try:
+        c = rd.refresh()                   # the first copy exists before any unit starts
+    except Exception as e:
+        c = {"why": "first read crashed " + repr(e)[:60], "ok": False, "ids": []}
+    log("CLAIM-LIST", c["why"], "ok" if c.get("ok") else "NOT CONFIRMED", len(c.get("ids") or []), "ids")
+
+    def loop(last):
+        while not CL["stop"].wait(claimallow.EVERY_S):
+            try:
+                c2 = rd.refresh()
+                if (c2["why"], c2["ok"]) != last:
+                    log("CLAIM-LIST", c2["why"], "ok" if c2["ok"] else "NOT CONFIRMED", len(c2["ids"]), "ids")
+                    last = (c2["why"], c2["ok"])
+            except Exception as e:         # the copy then goes stale: submit treats listed ids as not confirmed
+                log("CLAIM-LIST reader error", repr(e)[:80])
+    CL["thread"] = threading.Thread(target=loop, args=((c["why"], c.get("ok")),), name="claim-list", daemon=True)
+    CL["thread"].start()
+    return rd
 
 
 _CW = [0.0]

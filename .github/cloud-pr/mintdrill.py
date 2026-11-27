@@ -220,7 +220,7 @@ def child_submit(src, w):
         def _marker(self, m): return "marker0"
     S.dg = lambda: DG()
     S.claim_lock = lambda g: not w.get("claim_locked")    # lane leases C4: an earlier run used the one claim
-    S.claim_ids = lambda: set(w.get("claim_allow") or [])  # lane leases L1: the live list (toolkit ref), faked
+    S.claim_list = lambda: (set(w.get("claim_allow") or []), not w.get("claim_list_bad"), "drill list")  # L1/N1, faked
     S.take_slot = lambda g: True
     S.free_slot = lambda: None
     S.stopped = lambda: False
@@ -239,9 +239,9 @@ def child_submit(src, w):
         if os.path.exists(sjf):
             os.remove(sjf)
         if w["site_json"] != "missing":
-            json.dump(dict(w["site_json"], t=CLK[0] + w["site_json"].get("t", 0)), open(sjf, "w"))
+            json.dump(dict(w["site_json"], t=CLK[0] + w["site_json"].get("t", 0), ep=CLK[0] + w["site_json"].get("ep", 0)), open(sjf, "w"))
     else:                                    # default: a fresh copy that says accepting (as the drain writes it)
-        json.dump({"closed": False, "t": CLK[0], "why": "site accepting"}, open(sjf, "w"))
+        json.dump({"closed": False, "t": CLK[0], "why": "site accepting", "ep": CLK[0]}, open(sjf, "w"))
 
     def fake_li():                          # config/linkedin.txt in the toolkit (Lead 05:50): None = unreadable
         out["li_reads"] += 1
@@ -1050,7 +1050,7 @@ def cases():
                                                "gate_answers": {"*": "ok"},
                                                "body_expect": {"li": "PNP_LINKEDIN" in env and not k.startswith("bad"), "lease": lease}},
                     "PR"))
-    # lane leases (red team CLAIMS-ON section 0, Lead 09:48): the claim list (toolkit claim/allow ref) scopes claims to listed ids (C1), no claim while
+    # lane leases (red team CLAIMS-ON section 0, Lead 09:48): the claim list (toolkit claimallow ref) scopes claims to listed ids (C1), no claim while
     # status.json says not accepting (C3), a listed id never files bare (C4) and its retry recovers the late lease
     tk = {"L-meta-1": "someone"}
     out.append(("leases/C1-listed-claims", "submit", {"gid": "L-meta-93001", "gaps": [unit("L-meta-93001")], "taken": tk,
@@ -1069,7 +1069,8 @@ def cases():
                     "claim_allow": [g], "expect_result": "error"}, **extra), "no PR"))
     # red team L2 (10:14): claims fail closed on the site copy: missing, stale (over 120 s) or dark = no claim, no PR
     for i, (k, sj) in enumerate((("missing", "missing"), ("stale", {"closed": False, "why": "site accepting", "t": -200}),
-                                 ("dark", {"closed": False, "why": "no status/site ref (dark)"}))):
+                                 ("dark", {"closed": False, "why": "no status/site ref (dark)"}),
+                                 ("status-old", {"closed": False, "why": "site accepting", "ep": -170}))):   # N6
         g = "L-meta-%d" % (93030 + i)
         out.append(("leases/L2-site-%s-no-claim" % k, "submit", {"gid": g, "gaps": [unit(g)], "taken": tk,
                     "claim_allow": [g], "gate_answers": {"*": "ok"}, "site_json": sj,
@@ -1081,6 +1082,14 @@ def cases():
         out.append(("leases/L1-lease-first-word-unlisted-%s" % k, "submit", {"gid": g, "gaps": [unit(g)], "taken": tk,
                     "claim_allow": al, "env": {"READY_MSG": "ready %s: checker pending lease-first" % g},
                     "gate_answers": {"*": "ok"}, "expect_claim": False, "body_expect": {"li": False, "lease": None}}, "PR"))
+    # red team N1 (10:32): the list is not confirmed (reader failed or its copy is stale) and the id was on the last good
+    # list: no claim AND no bare PR (error, retried); an id not on it files first as usual
+    out.append(("leases/N1-unconfirmed-listed-no-PR", "submit", {"gid": "L-meta-93050", "gaps": [unit("L-meta-93050")], "taken": tk,
+                "claim_allow": ["L-meta-93050"], "claim_list_bad": True, "gate_answers": {"*": "ok"},
+                "expect_claim": False, "expect_result": "error"}, "no PR"))
+    out.append(("leases/N1-unconfirmed-unlisted-files-first", "submit", {"gid": "L-meta-93051", "gaps": [unit("L-meta-93051")], "taken": tk,
+                "claim_allow": ["L-meta-93999"], "claim_list_bad": True, "gate_answers": {"*": "ok"},
+                "expect_claim": False, "body_expect": {"li": False, "lease": None}}, "PR"))
     out.append(("leases/C4-retry-recovers-lease", "submit", {"gid": "L-meta-93020", "gaps": [unit("L-meta-93020")], "taken": tk,
                 "claim_allow": ["L-meta-93020"], "claim_locked": True, "gate_answers_ref": {"L-meta-93020": "lease-late"},
                 "expect_claim": False, "body_expect": {"li": False, "lease": "lease-late"}}, "PR"))
@@ -1183,7 +1192,7 @@ def main():
                                  ("ghcond.py", ["selftest"], "GHCOND SELFTEST OK", "16.7"),
                                  ("pushtest.py", [], "PUSH SELFTEST OK", "push"),           # Lead 09:08 push refusal
                                  ("rttest.py", [], "RT SELFTEST OK", "runtoken"),           # Lead 09:38 closer RUN-TOKEN-EMPTY
-                                 ("claimtest.py", [], "CLAIMLIST SELFTEST OK", "leases")):  # Lead 10:17 L1 claim/allow ref
+                                 ("claimtest.py", [], "CLAIMLIST SELFTEST OK", "leases")):  # Lead 10:17 L1 claimallow ref
         tp = os.path.join(src, ".github", "cloud-pr", tool)
         if os.path.exists(tp):
             rr = subprocess.run([sys.executable, "-I", tp] + (args or [os.path.dirname(tp)]), capture_output=True, text=True, timeout=600)
