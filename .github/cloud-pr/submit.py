@@ -107,6 +107,12 @@ FILE_FIRST = os.environ.get("FILE_FIRST", "*").strip()
 if FILE_FIRST == "0":
     FILE_FIRST = ""
 CLAIM_FIRST = {x.strip() for x in os.environ.get("CLAIM_FIRST", "").split(",") if x.strip()}
+# lane leases C1 (red team CLAIMS-ON, Lead 09:48 narrow mode): CLAIM_IDS = comma list of unit ids. When set, race_ok
+# claims ONLY for those ids (lease first, then the PR) and every other unit files first, whatever FILE_FIRST and
+# CLAIM_FIRST say. C4: a listed id never gets a bare PR: a gate timeout, closed gate, no budget or any other
+# answer without a lease ends as "error" (no PR, branch kept, the drain retries; the retry finds the earlier claim's
+# lease through lease_of / gate_answer_lease). Empty (the default) = no change.
+CLAIM_IDS = {x.strip() for x in os.environ.get("CLAIM_IDS", "").split(",") if x.strip()}
 LATE_LEASE = False     # GATEWAY v1: no late lease (claims only for finished proofs, before the PR)   # unheld: open the PR, then claim
 # Lead 14:36: LEASE-FIRST (the ready commit message holds the word lease-first): claim BEFORE any PR (a claim after our
 # own PR paid 31 with race: true instead of 110); a grant opens the PR with the Lease line, a refusal or a held step
@@ -703,6 +709,10 @@ def claim(gid, prio=1):
     old = dg().lease_of(gid)
     if old:
         return old, "reused the lease recorded on claim/" + gid
+    sc = site_closed_now()                 # lane leases C3: status.json says not accepting = no claim at all
+    if sc:
+        log("gate:", gid, "no claim: site not accepting:", sc)
+        return None, f"no lease: site not accepting ({sc})"
     t = time.time()
     op, owhy = gate_open_now()
     STG["gatecheck"] = round(time.time() - t, 1)
@@ -1129,7 +1139,11 @@ def race_ok(gid):
         if old:
             return True, "clear (our recorded lease reused)", old
         tpl = str((g.get("faithful_by_template") or {}).get("template") or "")
-        if FILE_FIRST and tpl not in CLAIM_FIRST and (FILE_FIRST == "*" or FILE_FIRST in tpl):
+        if CLAIM_IDS:                            # lane leases C1: only the listed ids claim
+            file_first = gid not in CLAIM_IDS
+        else:
+            file_first = bool(FILE_FIRST and tpl not in CLAIM_FIRST and (FILE_FIRST == "*" or FILE_FIRST in tpl))
+        if file_first:
             # Lead 21:59 FILE_FIRST: no claim (open-gate claims on a fresh slice all came back held = no PR); the bare
             # path below decides: PR without a lease when no rival PR and no holder in the mirror. Late lease later.
             why = f"no lease: file first ({tpl})"
@@ -1141,6 +1155,8 @@ def race_ok(gid):
             if lid:
                 return True, "clear, " + why, lid
         case = lf_case(why)
+        if case == "bare" and gid in CLAIM_IDS:  # lane leases C4: a listed id never files bare
+            return False, f"claim id without a lease ({why[:120]}): no PR, branch kept, retry", None
         if case == "bare" and rival_open(gid):
             case = "rival PR"
         if case == "bare":
@@ -1854,7 +1870,8 @@ def main():
         if why.startswith("lease-first"):
             free_slot()
             finish("unleased", why)       # Lead 14:36: no PR, branch kept, the id goes to team/lead/wave8/unleased.txt
-        finish("error" if why.startswith("race check error") or "most one handle may hold" in why or "paused" in why
+        finish("error" if why.startswith("race check error") or why.startswith("claim id without a lease")
+               or "most one handle may hold" in why or "paused" in why
                else "race", why)          # a 410 or an earlier claim of this step ends here as a lost race
     if NO_LEASE_NO_PR and not lease and not DRY:
         free_slot()

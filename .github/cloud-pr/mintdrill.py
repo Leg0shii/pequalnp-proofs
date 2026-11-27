@@ -219,7 +219,7 @@ def child_submit(src, w):
         def record_lease(self, *a, **k): return None
         def _marker(self, m): return "marker0"
     S.dg = lambda: DG()
-    S.claim_lock = lambda g: True
+    S.claim_lock = lambda g: not w.get("claim_locked")    # lane leases C4: an earlier run used the one claim
     S.take_slot = lambda g: True
     S.free_slot = lambda: None
     S.stopped = lambda: False
@@ -231,6 +231,9 @@ def child_submit(src, w):
     if hasattr(S, "gate_answer_lease"):
         S.gate_answer_lease = lambda g: (w.get("gate_answers_ref") or {}).get(g)
     out["li_reads"] = 0
+    if w.get("site_closed"):                 # lane leases C3: the drain's status.json copy says not accepting
+        json.dump({"closed": True, "t": CLK[0], "why": "drill: submissions not accepting"},
+                  open(os.path.join(getattr(S, "SNAP_DIR", w.get("snap") or "."), "site.json"), "w"))
 
     def fake_li():                          # config/linkedin.txt in the toolkit (Lead 05:50): None = unreadable
         out["li_reads"] += 1
@@ -510,7 +513,7 @@ def spawn(kind, src, w):
                TREE=d, W=d, GITHUB_OUTPUT=os.path.join(d, "out"), PR_TOKEN="drill", READ_TOKEN="drill", DRY="0",
                GITHUB_REF_NAME="drill", READY_MSG="", MD_KIND=kind, MD_SRC=src)
     env.pop("GITHUB_ACTIONS", None)
-    for k in ("PNP_LINKEDIN", "CLAIM_FIRST", "FILE_FIRST"):
+    for k in ("PNP_LINKEDIN", "CLAIM_FIRST", "FILE_FIRST", "CLAIM_IDS"):
         env.pop(k, None)
     env.update(w.get("env") or {})
     if w.get("snap"):                                # one drain: every worker shares the rival snapshot directory
@@ -568,6 +571,8 @@ def judge_submit(name, w, r, expect):
         bad += body_bad(r["prs"], w["body_expect"])
     if w.get("expect_claim") is not None and any(x.startswith("claim") for x in r["desk"]) != w["expect_claim"]:
         bad.append(f"Y2 desk claims {r['desk']} (want {'a claim' if w['expect_claim'] else 'none'})")
+    if w.get("expect_result") is not None and r["result"] != w["expect_result"]:
+        bad.append(f"result {r['result']} (want {w['expect_result']})")
     if w.get("li_reads") is not None and r.get("li_reads") != w["li_reads"]:
         bad.append(f"credit file read {r.get('li_reads')} times (want {w['li_reads']})")
     return (not bad), "; ".join(bad) or f"{got} ({r['result']}: {r['why'][:70]})"
@@ -1037,6 +1042,26 @@ def cases():
                                                "gate_answers": {"*": "ok"},
                                                "body_expect": {"li": "PNP_LINKEDIN" in env and not k.startswith("bad"), "lease": lease}},
                     "PR"))
+    # lane leases (red team CLAIMS-ON section 0, Lead 09:48): CLAIM_IDS scopes claims to listed ids (C1), no claim while
+    # status.json says not accepting (C3), a listed id never files bare (C4) and its retry recovers the late lease
+    tk = {"L-meta-1": "someone"}
+    out.append(("leases/C1-listed-claims", "submit", {"gid": "L-meta-93001", "gaps": [unit("L-meta-93001")], "taken": tk,
+                "env": {"CLAIM_IDS": "L-meta-93001"}, "gate_answers": {"*": "ok"}, "expect_claim": True,
+                "body_expect": {"li": False, "lease": "lease-x1"}}, "PR"))
+    out.append(("leases/C1-unlisted-files-first", "submit", {"gid": "L-meta-93002", "gaps": [unit("L-meta-93002")], "taken": tk,
+                "env": {"CLAIM_IDS": "L-meta-93999", "CLAIM_FIRST": "tl6c-not-search"}, "gate_answers": {"*": "ok"},
+                "expect_claim": False, "body_expect": {"li": False, "lease": None}}, "PR"))
+    out.append(("leases/C3-site-closed-no-claim", "submit", {"gid": "L-meta-93003", "gaps": [unit("L-meta-93003")], "taken": tk,
+                "env": {"CLAIM_FIRST": "tl6c-not-search"}, "gate_answers": {"*": "ok"}, "site_closed": True,
+                "expect_claim": False}, "no PR"))
+    for k, extra in (("timeout", {"gate_answers": {"*": "timeout"}}), ("nobudget", {"gate_answers": {"*": "nobudget"}}),
+                     ("closed", {"gate_open": False})):
+        g = "L-meta-%d" % (93010 + len(k))
+        out.append(("leases/C4-%s-no-bare-PR" % k, "submit", dict({"gid": g, "gaps": [unit(g)], "taken": tk,
+                    "env": {"CLAIM_IDS": g}, "expect_result": "error"}, **extra), "no PR"))
+    out.append(("leases/C4-retry-recovers-lease", "submit", {"gid": "L-meta-93020", "gaps": [unit("L-meta-93020")], "taken": tk,
+                "env": {"CLAIM_IDS": "L-meta-93020"}, "claim_locked": True, "gate_answers_ref": {"L-meta-93020": "lease-late"},
+                "expect_claim": False, "body_expect": {"li": False, "lease": "lease-late"}}, "PR"))
     return out, hx
 
 
