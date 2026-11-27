@@ -1,0 +1,20 @@
+# mintdrill (HARDENING T1): the replay suite of the opener, drain halt and closer against recorded and hostile data.
+# Offline: every GitHub, mirror, gate and toolkit call is faked inside the run. Prints PREFLIGHT PASS <sha> or FAIL.
+name: mintdrill
+on:
+  workflow_dispatch:
+  push:
+    branches: ['gateway-*']
+permissions:
+  contents: read
+jobs:
+  drill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Replay suite
+        run: python3 -I .github/cloud-pr/mintdrill.py "$GITHUB_WORKSPACE" | tee drill.txt; grep -q '^PREFLIGHT PASS' drill.txt
+      - name: Summary
+        if: always()
+        run: { echo '### mintdrill'; echo '```'; grep -v '^ok' drill.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

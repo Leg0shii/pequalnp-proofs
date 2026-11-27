@@ -1,0 +1,1885 @@
+[
+ {
+  "id": "X1",
+  "row": "A1",
+  "what": "rival title names no unit id; only its file path does",
+  "gaps": [
+   {
+    "id": "L-meta-90001",
+    "faithful_by_template": {
+     "template": "tl6c-not-search"
+    },
+    "held_now": false,
+    "holders_now": 0,
+    "offerable_now": true,
+    "pr_open": 0,
+    "pr_numbers": []
+   }
+  ],
+  "open_pulls": [
+   {
+    "number": 50001,
+    "title": "Prove step 90001 (six-point)",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": [
+     "lean/PEqualNP/Outside/L_meta_90001.lean"
+    ]
+   }
+  ],
+  "taken": {},
+  "expect": "no PR"
+ },
+ {
+  "id": "X2",
+  "row": "A2",
+  "what": "rival PR is number 101 in created-desc order (page 2); 100 newer rival PRs on other units",
+  "gaps": [
+   {
+    "id": "L-meta-90001",
+    "faithful_by_template": {
+     "template": "tl6c-not-search"
+    },
+    "held_now": false,
+    "holders_now": 0,
+    "offerable_now": true,
+    "pr_open": 0,
+    "pr_numbers": []
+   }
+  ],
+  "open_pulls": [
+   {
+    "number": 50100,
+    "title": "L-meta-91000",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50101,
+    "title": "L-meta-91001",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50102,
+    "title": "L-meta-91002",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50103,
+    "title": "L-meta-91003",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50104,
+    "title": "L-meta-91004",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50105,
+    "title": "L-meta-91005",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50106,
+    "title": "L-meta-91006",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50107,
+    "title": "L-meta-91007",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50108,
+    "title": "L-meta-91008",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50109,
+    "title": "L-meta-91009",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50110,
+    "title": "L-meta-91010",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50111,
+    "title": "L-meta-91011",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50112,
+    "title": "L-meta-91012",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50113,
+    "title": "L-meta-91013",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50114,
+    "title": "L-meta-91014",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50115,
+    "title": "L-meta-91015",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50116,
+    "title": "L-meta-91016",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50117,
+    "title": "L-meta-91017",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50118,
+    "title": "L-meta-91018",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50119,
+    "title": "L-meta-91019",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50120,
+    "title": "L-meta-91020",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50121,
+    "title": "L-meta-91021",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50122,
+    "title": "L-meta-91022",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50123,
+    "title": "L-meta-91023",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50124,
+    "title": "L-meta-91024",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50125,
+    "title": "L-meta-91025",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50126,
+    "title": "L-meta-91026",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50127,
+    "title": "L-meta-91027",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50128,
+    "title": "L-meta-91028",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50129,
+    "title": "L-meta-91029",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50130,
+    "title": "L-meta-91030",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50131,
+    "title": "L-meta-91031",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50132,
+    "title": "L-meta-91032",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50133,
+    "title": "L-meta-91033",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50134,
+    "title": "L-meta-91034",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50135,
+    "title": "L-meta-91035",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50136,
+    "title": "L-meta-91036",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50137,
+    "title": "L-meta-91037",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50138,
+    "title": "L-meta-91038",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50139,
+    "title": "L-meta-91039",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50140,
+    "title": "L-meta-91040",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50141,
+    "title": "L-meta-91041",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50142,
+    "title": "L-meta-91042",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50143,
+    "title": "L-meta-91043",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50144,
+    "title": "L-meta-91044",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50145,
+    "title": "L-meta-91045",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50146,
+    "title": "L-meta-91046",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50147,
+    "title": "L-meta-91047",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50148,
+    "title": "L-meta-91048",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50149,
+    "title": "L-meta-91049",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50150,
+    "title": "L-meta-91050",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50151,
+    "title": "L-meta-91051",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50152,
+    "title": "L-meta-91052",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50153,
+    "title": "L-meta-91053",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50154,
+    "title": "L-meta-91054",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50155,
+    "title": "L-meta-91055",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50156,
+    "title": "L-meta-91056",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50157,
+    "title": "L-meta-91057",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50158,
+    "title": "L-meta-91058",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50159,
+    "title": "L-meta-91059",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50160,
+    "title": "L-meta-91060",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50161,
+    "title": "L-meta-91061",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50162,
+    "title": "L-meta-91062",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50163,
+    "title": "L-meta-91063",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50164,
+    "title": "L-meta-91064",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50165,
+    "title": "L-meta-91065",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50166,
+    "title": "L-meta-91066",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50167,
+    "title": "L-meta-91067",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50168,
+    "title": "L-meta-91068",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50169,
+    "title": "L-meta-91069",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50170,
+    "title": "L-meta-91070",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50171,
+    "title": "L-meta-91071",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50172,
+    "title": "L-meta-91072",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50173,
+    "title": "L-meta-91073",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50174,
+    "title": "L-meta-91074",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50175,
+    "title": "L-meta-91075",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50176,
+    "title": "L-meta-91076",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50177,
+    "title": "L-meta-91077",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50178,
+    "title": "L-meta-91078",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50179,
+    "title": "L-meta-91079",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50180,
+    "title": "L-meta-91080",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50181,
+    "title": "L-meta-91081",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50182,
+    "title": "L-meta-91082",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50183,
+    "title": "L-meta-91083",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50184,
+    "title": "L-meta-91084",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50185,
+    "title": "L-meta-91085",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50186,
+    "title": "L-meta-91086",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50187,
+    "title": "L-meta-91087",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50188,
+    "title": "L-meta-91088",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50189,
+    "title": "L-meta-91089",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50190,
+    "title": "L-meta-91090",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50191,
+    "title": "L-meta-91091",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50192,
+    "title": "L-meta-91092",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50193,
+    "title": "L-meta-91093",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50194,
+    "title": "L-meta-91094",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50195,
+    "title": "L-meta-91095",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50196,
+    "title": "L-meta-91096",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50197,
+    "title": "L-meta-91097",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50198,
+    "title": "L-meta-91098",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50199,
+    "title": "L-meta-91099",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   },
+   {
+    "number": 50000,
+    "title": "L-meta-90001",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": null,
+    "closed_at": null,
+    "state": "open",
+    "files": []
+   }
+  ],
+  "taken": {},
+  "expect": "no PR"
+ },
+ {
+  "id": "X3",
+  "row": "A3",
+  "what": "taken list fetch fails (None); rival PR exists only in the taken list (merged, so not in open pulls)",
+  "gaps": [
+   {
+    "id": "L-meta-90001",
+    "faithful_by_template": {
+     "template": "tl6c-not-search"
+    },
+    "held_now": false,
+    "holders_now": 0,
+    "offerable_now": true,
+    "pr_open": 0,
+    "pr_numbers": []
+   }
+  ],
+  "open_pulls": [],
+  "taken": null,
+  "closed_pulls": [
+   {
+    "number": 50002,
+    "title": "L-meta-90001",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": "T-60s",
+    "closed_at": "T-60s",
+    "state": "closed",
+    "files": []
+   }
+  ],
+  "expect": "no PR"
+ },
+ {
+  "id": "X3b",
+  "row": "A4",
+  "what": "taken list fresh header but zero rows (publisher restart); rival merged 2 min ago",
+  "gaps": [
+   {
+    "id": "L-meta-90001",
+    "faithful_by_template": {
+     "template": "tl6c-not-search"
+    },
+    "held_now": false,
+    "holders_now": 0,
+    "offerable_now": true,
+    "pr_open": 0,
+    "pr_numbers": []
+   }
+  ],
+  "open_pulls": [],
+  "taken": {},
+  "taken_header_age_s": 5,
+  "closed_pulls": [
+   {
+    "number": 50003,
+    "title": "Prove L-meta-90001",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": "T-120s",
+    "closed_at": "T-120s",
+    "state": "closed",
+    "files": []
+   }
+  ],
+  "expect": "no PR (or PR closed <=60 s)"
+ },
+ {
+  "id": "X4",
+  "row": "A5",
+  "what": "unit absent from the fresh gaps.json (withdrawn or settled) at the holder check",
+  "gaps": [
+   {
+    "id": "L-meta-90002",
+    "faithful_by_template": {
+     "template": "tl6c-not-search"
+    },
+    "held_now": false,
+    "holders_now": 0,
+    "offerable_now": true,
+    "pr_open": 0,
+    "pr_numbers": []
+   }
+  ],
+  "open_pulls": [],
+  "taken": {},
+  "expect": "no PR"
+ },
+ {
+  "id": "X5",
+  "row": "A6",
+  "what": "rival PR opens and merges in the seconds between rival_now and gh pr create",
+  "gaps": [
+   {
+    "id": "L-meta-90001",
+    "faithful_by_template": {
+     "template": "tl6c-not-search"
+    },
+    "held_now": false,
+    "holders_now": 0,
+    "offerable_now": true,
+    "pr_open": 0,
+    "pr_numbers": []
+   }
+  ],
+  "timeline": [
+   [
+    "t0",
+    "rival_now sees nothing"
+   ],
+   [
+    "t0+2s",
+    "rival #50004 'L-meta-90001' opened"
+   ],
+   [
+    "t0+3s",
+    "#50004 merged"
+   ],
+   [
+    "t0+5s",
+    "our PR created"
+   ]
+  ],
+  "expect": "our PR closed within 60 s, before any makers' sweep; rej10 stays 0"
+ },
+ {
+  "id": "X6",
+  "row": "A8",
+  "what": "unit file lands on upstream main with no PR title match (makers' own commit / rival title 'Batch of 40 proofs')",
+  "gaps": [
+   {
+    "id": "L-meta-90001",
+    "faithful_by_template": {
+     "template": "tl6c-not-search"
+    },
+    "held_now": false,
+    "holders_now": 0,
+    "offerable_now": true,
+    "pr_open": 0,
+    "pr_numbers": []
+   }
+  ],
+  "ours_open": [
+   {
+    "number": 50010,
+    "gid": "L-meta-90001",
+    "lease": false
+   }
+  ],
+  "upstream_main_add": [
+   "lean/PEqualNP/Outside/L_meta_90001.lean"
+  ],
+  "closed_pulls": [
+   {
+    "number": 50005,
+    "title": "Batch of 40 proofs",
+    "user": {
+     "login": "rival1"
+    },
+    "head": {
+     "ref": "patch-1"
+    },
+    "body": "",
+    "merged_at": "T",
+    "closed_at": "T",
+    "state": "closed",
+    "files": [
+     "lean/PEqualNP/Outside/L_meta_90001.lean"
+    ]
+   }
+  ],
+  "expect": "PR closed within 60 s of the merge"
+ },
+ {
+  "id": "X7",
+  "row": "A9",
+  "what": "two open PRs of OUR OWN on one unit (cloud opener + PC fallback 30 s later)",
+  "gaps": [
+   {
+    "id": "L-meta-90001",
+    "faithful_by_template": {
+     "template": "tl6c-not-search"
+    },
+    "held_now": false,
+    "holders_now": 0,
+    "offerable_now": true,
+    "pr_open": 0,
+    "pr_numbers": []
+   }
+  ],
+  "ours_open": [
+   {
+    "number": 50011,
+    "gid": "L-meta-90001",
+    "lease": false
+   },
+   {
+    "number": 50012,
+    "gid": "L-meta-90001",
+    "lease": false,
+    "title": "Prove L-meta-90001"
+   }
+  ],
+  "expect": "the higher-numbered one is never created (opener lock) or closed within 60 s"
+ },
+ {
+  "id": "X8",
+  "row": "A12",
+  "what": "statement in fresh gaps.json differs from the statement the proof was built from (makers edited it)",
+  "gaps": [
+   {
+    "id": "L-meta-90001",
+    "faithful_by_template": {
+     "template": "tl6c-not-search"
+    },
+    "held_now": false,
+    "holders_now": 0,
+    "offerable_now": true,
+    "pr_open": 0,
+    "pr_numbers": [],
+    "statement": "... C.size \u2264 11 ..."
+   }
+  ],
+  "proof_statement": "... C.size \u2264 12 ...",
+  "expect": "no PR (guard refuses on statement mismatch)"
+ },
+ {
+  "id": "X9",
+  "row": "A17/B4",
+  "what": "makers close one of our PRs with a text that is not 'proved first' (e.g. 'statement is false', 'compile failed', unknown wording)",
+  "ours_closed": [
+   {
+    "number": 50013,
+    "gid": "L-meta-90001",
+    "by": "makers-bot",
+    "comment": "REJECTED: this statement does not hold (its negation was checked)"
+   }
+  ],
+  "expect": "counts as a rejection: halt set, alert, no further PR until lifted"
+ },
+ {
+  "id": "X10",
+  "row": "B1",
+  "what": "new mint whose template lacks the word 'search' (e.g. 'tl7c-not-ladder') or has no template; desk answers every claim 'held' within 1 s",
+  "gaps": [
+   {
+    "id": "L-meta-90020",
+    "faithful_by_template": {
+     "template": "tl7c-not-ladder"
+    },
+    "held_now": false,
+    "holders_now": 0,
+    "offerable_now": true,
+    "pr_open": 0,
+    "pr_numbers": []
+   },
+   {
+    "id": "L-meta-90021",
+    "faithful_by_template": {
+     "template": ""
+    },
+    "held_now": false,
+    "holders_now": 0,
+    "offerable_now": true,
+    "pr_open": 0,
+    "pr_numbers": []
+   }
+  ],
+  "gate_answers": {
+   "*": "held"
+  },
+  "expect": "file-first: PRs for both within 60 s of the export (I1), no claim sent"
+ },
+ {
+  "id": "X11",
+  "row": "B8/C6",
+  "what": "exports arrive out of order: updated_at 10:00:40 (we paused), then a cached 10:00:10 copy (not paused), then 10:01:40 (paused)",
+  "exports": [
+   {
+    "updated_at": "10:00:40",
+    "paused": [
+     "Leg0shii"
+    ]
+   },
+   {
+    "updated_at": "10:00:10",
+    "paused": []
+   },
+   {
+    "updated_at": "10:01:40",
+    "paused": [
+     "Leg0shii"
+    ]
+   }
+  ],
+  "expect": "mirror drops the older copy (updated_at must rise); gate stays closed; zero desk requests"
+ }
+]

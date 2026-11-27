@@ -1,0 +1,1270 @@
+{
+"source": "team/lead/tl6c_units.tsv (infra slice meter, mirror exports 21:52:40 and 21:53:41 UTC 26 Nov, unit state at first sight) and team/infra ll/latelease.log + done.txt (F4: our leased PRs on the 19:21 slice, rejected 22:51 behind yifgu's later 'Prove L-meta-N' merges 20:24-20:40)",
+"f3_units": [
+{
+"id": "L-meta-25032",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25033",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25034",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25035",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25036",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25037",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25038",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "edisonhello"
+},
+{
+"id": "L-meta-25039",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25040",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25041",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "foudress"
+},
+{
+"id": "L-meta-25042",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "abelianTarski"
+},
+{
+"id": "L-meta-25043",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "odinfree"
+},
+{
+"id": "L-meta-25044",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25045",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "foudress"
+},
+{
+"id": "L-meta-25046",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "foudress"
+},
+{
+"id": "L-meta-25047",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "abelianTarski"
+},
+{
+"id": "L-meta-25048",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25049",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25050",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25051",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25052",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25053",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "yifgu"
+},
+{
+"id": "L-meta-25054",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25055",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25056",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25057",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25058",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25059",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "yifgu"
+},
+{
+"id": "L-meta-25060",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25061",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25063",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "yifgu"
+},
+{
+"id": "L-meta-25064",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "yifgu"
+},
+{
+"id": "L-meta-25065",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "yifgu"
+},
+{
+"id": "L-meta-25066",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "yifgu"
+},
+{
+"id": "L-meta-25067",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25068",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25069",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "yifgu"
+},
+{
+"id": "L-meta-25070",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25071",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25072",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "yifgu"
+},
+{
+"id": "L-meta-25073",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25074",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25075",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25076",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25077",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25078",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25079",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25080",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25081",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25082",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25083",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25084",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25085",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25086",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "odinfree"
+},
+{
+"id": "L-meta-25087",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25088",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25089",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25090",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25091",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "odinfree"
+},
+{
+"id": "L-meta-25092",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "abelianTarski"
+},
+{
+"id": "L-meta-25093",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "edisonhello"
+},
+{
+"id": "L-meta-25094",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "odinfree"
+},
+{
+"id": "L-meta-25095",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "odinfree"
+},
+{
+"id": "L-meta-25096",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25097",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "adammcarter"
+},
+{
+"id": "L-meta-25098",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25099",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "edisonhello"
+},
+{
+"id": "L-meta-25100",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "adammcarter"
+},
+{
+"id": "L-meta-25101",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "edisonhello"
+},
+{
+"id": "L-meta-25102",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25103",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25104",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25105",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "foudress"
+},
+{
+"id": "L-meta-25106",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "adammcarter"
+},
+{
+"id": "L-meta-25107",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25108",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "foudress"
+},
+{
+"id": "L-meta-25109",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "abelianTarski"
+},
+{
+"id": "L-meta-25110",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25111",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25112",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25113",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25114",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "odinfree"
+},
+{
+"id": "L-meta-25115",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "foudress"
+},
+{
+"id": "L-meta-25116",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "yifgu"
+},
+{
+"id": "L-meta-25117",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "yifgu"
+},
+{
+"id": "L-meta-25118",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "foudress"
+},
+{
+"id": "L-meta-25119",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25120",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25121",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25122",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25123",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25124",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "yifgu"
+},
+{
+"id": "L-meta-25125",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "odinfree"
+},
+{
+"id": "L-meta-25126",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25127",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25128",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25129",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25130",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "abelianTarski"
+},
+{
+"id": "L-meta-25131",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "foudress"
+},
+{
+"id": "L-meta-25132",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25133",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25134",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25135",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25136",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25137",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "nickdwhite"
+},
+{
+"id": "L-meta-25138",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "yifgu"
+},
+{
+"id": "L-meta-25139",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "yifgu"
+},
+{
+"id": "L-meta-25140",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "yifgu"
+},
+{
+"id": "L-meta-25141",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "yifgu"
+},
+{
+"id": "L-meta-25142",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "yifgu"
+},
+{
+"id": "L-meta-25143",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "abelianTarski"
+},
+{
+"id": "L-meta-25144",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "yifgu"
+},
+{
+"id": "L-meta-25145",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "yifgu"
+},
+{
+"id": "L-meta-25146",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25147",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25148",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "yifgu"
+},
+{
+"id": "L-meta-25149",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25150",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "yifgu"
+},
+{
+"id": "L-meta-25151",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "yifgu"
+},
+{
+"id": "L-meta-25152",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25153",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25154",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "yifgu"
+},
+{
+"id": "L-meta-25155",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "yifgu"
+},
+{
+"id": "L-meta-25156",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "odinfree"
+},
+{
+"id": "L-meta-25157",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "foudress"
+},
+{
+"id": "L-meta-25158",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "odinfree"
+},
+{
+"id": "L-meta-25159",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "odinfree"
+},
+{
+"id": "L-meta-25160",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "edisonhello"
+},
+{
+"id": "L-meta-25161",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "edisonhello"
+},
+{
+"id": "L-meta-25162",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "adammcarter"
+},
+{
+"id": "L-meta-25163",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "foudress"
+},
+{
+"id": "L-meta-25164",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "ArtSabintsev"
+},
+{
+"id": "L-meta-25165",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "edisonhello"
+},
+{
+"id": "L-meta-25166",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "ponythewhite"
+},
+{
+"id": "L-meta-25167",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "aezizhu"
+},
+{
+"id": "L-meta-25168",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "foudress"
+},
+{
+"id": "L-meta-25169",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "foudress"
+},
+{
+"id": "L-meta-25170",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "edisonhello"
+},
+{
+"id": "L-meta-25171",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "MedicV2"
+},
+{
+"id": "L-meta-25172",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "edisonhello"
+},
+{
+"id": "L-meta-25173",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "foudress"
+},
+{
+"id": "L-meta-25174",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "foudress"
+},
+{
+"id": "L-meta-25175",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "nickdwhite"
+},
+{
+"id": "L-meta-25176",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "xyzzyy"
+},
+{
+"id": "L-meta-25177",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "abelianTarski"
+},
+{
+"id": "L-meta-25178",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "edisonhello"
+},
+{
+"id": "L-meta-25179",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "edisonhello"
+},
+{
+"id": "L-meta-25180",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "edisonhello"
+},
+{
+"id": "L-meta-25181",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "foudress"
+},
+{
+"id": "L-meta-25182",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "nickdwhite"
+},
+{
+"id": "L-meta-25183",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "foudress"
+},
+{
+"id": "L-meta-25184",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "foudress"
+},
+{
+"id": "L-meta-25185",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "danielchin"
+},
+{
+"id": "L-meta-25186",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "foudress"
+},
+{
+"id": "L-meta-25187",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "foudress"
+},
+{
+"id": "L-meta-25188",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "foudress"
+},
+{
+"id": "L-meta-25189",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "aezizhu"
+},
+{
+"id": "L-meta-25190",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "foudress"
+},
+{
+"id": "L-meta-25191",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "foudress"
+},
+{
+"id": "L-meta-25192",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "foudress"
+},
+{
+"id": "L-meta-25193",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "edisonhello"
+},
+{
+"id": "L-meta-25194",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "nickdwhite"
+},
+{
+"id": "L-meta-25195",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "edisonhello"
+},
+{
+"id": "L-meta-25196",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "quekdylan"
+},
+{
+"id": "L-meta-25197",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "nickdwhite"
+},
+{
+"id": "L-meta-25198",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "edisonhello"
+},
+{
+"id": "L-meta-25199",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "foudress"
+},
+{
+"id": "L-meta-25200",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "foudress"
+},
+{
+"id": "L-meta-25201",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "foudress"
+},
+{
+"id": "L-meta-25202",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25204",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "maahirjain"
+},
+{
+"id": "L-meta-25205",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "maahirjain"
+},
+{
+"id": "L-meta-25206",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "danielchin"
+},
+{
+"id": "L-meta-25207",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "edisonhello"
+},
+{
+"id": "L-meta-25208",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "edisonhello"
+},
+{
+"id": "L-meta-25209",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "edisonhello"
+},
+{
+"id": "L-meta-25210",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "foudress"
+},
+{
+"id": "L-meta-25211",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "foudress"
+},
+{
+"id": "L-meta-25212",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "landonhugh"
+},
+{
+"id": "L-meta-25213",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "foudress"
+},
+{
+"id": "L-meta-25214",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "AlaskaBoomJudge"
+},
+{
+"id": "L-meta-25215",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "abelianTarski"
+},
+{
+"id": "L-meta-25216",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "aezizhu"
+},
+{
+"id": "L-meta-25217",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "Leg0shii"
+},
+{
+"id": "L-meta-25218",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "foudress"
+},
+{
+"id": "L-meta-25219",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "maahirjain"
+},
+{
+"id": "L-meta-25220",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "foudress"
+},
+{
+"id": "L-meta-25221",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "1bladesilver"
+},
+{
+"id": "L-meta-25222",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "ArtSabintsev"
+},
+{
+"id": "L-meta-25223",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "ArtSabintsev"
+},
+{
+"id": "L-meta-25224",
+"template": "tl6c-not-search",
+"meet": false,
+"first_3min": "-"
+},
+{
+"id": "L-meta-25225",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "danielchin"
+},
+{
+"id": "L-meta-25226",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "danielchin"
+},
+{
+"id": "L-meta-25227",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "ArtSabintsev"
+},
+{
+"id": "L-meta-25228",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "danielchin"
+},
+{
+"id": "L-meta-25229",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "danielchin"
+},
+{
+"id": "L-meta-25230",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "foudress"
+},
+{
+"id": "L-meta-25231",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "foudress"
+},
+{
+"id": "L-meta-25232",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "foudress"
+},
+{
+"id": "L-meta-25233",
+"template": "tl6c-not-search",
+"meet": true,
+"first_3min": "Leg0shii"
+}
+],
+"f3_gate_answer": "held",
+"f4_ours": [
+[
+36576,
+"L-meta-24990",
+true
+],
+[
+36572,
+"L-meta-24980",
+true
+],
+[
+36566,
+"L-meta-24971",
+true
+],
+[
+36573,
+"L-meta-24964",
+true
+],
+[
+36565,
+"L-meta-24976",
+true
+],
+[
+36564,
+"L-meta-24960",
+true
+],
+[
+36562,
+"L-meta-24975",
+true
+],
+[
+36561,
+"L-meta-24966",
+true
+],
+[
+36559,
+"L-meta-24983",
+true
+],
+[
+36558,
+"L-meta-24979",
+true
+],
+[
+36555,
+"L-meta-24961",
+true
+],
+[
+36537,
+"L-meta-24902",
+true
+]
+],
+"f4_rival": "yifgu",
+"f4_title": "Prove {gid}"
+}
