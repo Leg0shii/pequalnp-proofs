@@ -365,6 +365,8 @@ def child_close(src, w):
                     GHOST["left"] -= 1
                     return subprocess.CompletedProcess(a, 1, "", "unexpected disconnect")
             return subprocess.CompletedProcess(a, 0, "", "")
+        if a[0] == "git" and "ls-remote" in a and PASS[0] in w.get("tk_lsremote_fail_passes", []):
+            return subprocess.CompletedProcess(a, 128, "", "fatal: unable to access")   # 16.8 S1: toolkit refs unreadable
         if a[0] == "git" and "ls-remote" in a:                  # fixture refs ("ref" or {"ref", "msg"}) + what was pushed
             pats = [x.split("*")[0] for x in a if x.startswith("refs/")]
             born = lambda r: FIXBORN[r] if r in FIXBORN else (int(re.search(r"/(\d+)$", r).group(1)) if re.search(r"/(\d{9,})$", r) else 0)
@@ -515,7 +517,7 @@ def body_bad(prs, ex):
     return bad
 
 
-def judge_close(name, w, r, must_close, must_keep=(), must_push=None, no_push=False, max_reads=None, go_count=None, last_stop=None, halted=None, stop_count=None, cache_max=None, self_halted=None, must_delete=None, keep_branch=()):
+def judge_close(name, w, r, must_close, must_keep=(), must_push=None, no_push=False, max_reads=None, go_count=None, last_stop=None, halted=None, stop_count=None, cache_max=None, self_halted=None, must_delete=None, keep_branch=(), push_count=None):
     if r.get("crash"):
         return False, "crash " + " | ".join(r["crash"])
     bad = []
@@ -541,6 +543,10 @@ def judge_close(name, w, r, must_close, must_keep=(), must_push=None, no_push=Fa
             bad.append(f"caches over cap {big}")
     if halted is not None and r.get("halted") != halted:
         bad.append("filing " + ("NOT halted" if halted else "still halted") + " at the end")
+    for pre, want in (push_count or {}).items():
+        got = sum(1 for p in r["pushes"] if p.startswith(pre))
+        if got != want:
+            bad.append(f"{got} pushes of {pre} (want {want})")
     if must_delete is not None and sorted(r.get("deleted") or []) != sorted(must_delete):
         bad.append(f"deleted branches {r.get('deleted')} (want {must_delete})")
     kb = [b for b in keep_branch if b in (r.get("deleted") or [])]
@@ -764,6 +770,17 @@ def cases():
     r5, o5 = rival_pr(50406, "L-meta-93406", created=-400), our_pr(50407, "L-meta-93406", created=-300)
     out.append(("hostile/D5", "close", {"open_pulls": [r5, o5], "taken_map": {"L-meta-93406": (50406, "rival1")}, "passes": [0, 60, 120, 180]},
                 {"must_close": [50407], "no_push": True, "must_delete": ["L-meta-93406"]}))
+    # 16.8 S1: toolkit refs unreadable at a rejection, a far-future go exists -> the stop gets a NON-DIGIT name (halted)
+    out.append(("hostile/S1", "close", {"closed_pulls": five + [rj7(50501, -20)], "passes": [0, 60, 120], "restart_at": [1],
+                                        "tk_lsremote_fail_passes": [0],
+                                        "toolkit_refs": [{"ref": "refs/heads/filing/go/%d" % (T0 + 10 ** 6), "msg": "filing go: far future", "born": -50}]},
+                {"must_close": [], "stop_count": 1, "halted": True, "self_halted": True, "must_push": "refs/heads/filing/stop/rej-50501",
+                 "last_stop": "REJ-HALT 1 50501"}))
+    # 16.8 S4: a stop ref with a bad name -> HALT-BADREF alert by name, once per 5 min
+    out.append(("hostile/S4", "close", {"closed_pulls": five, "passes": [0, 60, 120, 180, 240, 320],
+                                        "toolkit_refs": [{"ref": "refs/heads/filing/stop/now", "msg": "filing stop: by hand", "born": -50}]},
+                {"must_close": [], "no_push": True, "halted": True, "self_halted": True,
+                 "push_count": {"refs/heads/alert/haltbadref-": 2}, "go_count": 0}))
     # B9 partial failures. B9a: gh pr close times out AFTER the close happened (our own duplicate, CI comment) -> no halt
     d1, d2 = our_pr(50300, "L-meta-93300", created=-200), our_pr(50301, "L-meta-93300", created=-100)
     d2["comments"] = [{"body": "CI: build started", "user": {"login": "ci-bot"}, "created_at": iso(T0 - 50)}]

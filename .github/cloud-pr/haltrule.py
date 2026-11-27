@@ -35,15 +35,16 @@ def _num(name, prefix):
 
 
 def family_state(ls_remote_text, family="filing"):
-    """dict: stops [(n, sha)] newest first, odd [names under the stop prefix that are not plain digits],
+    """dict: stops [(n, sha)] newest first, odd [names under the stop prefix that are not plain digits] (odd_rows:
+    [(name, sha)]),
     lift = newest lifter number (0 if none), live [(n, sha)] = stops with n >= lift (newest first)."""
     sp, lps = FAMILIES[family]
-    stops, odd, lift = [], [], 0
+    stops, odd, odd_rows, lift = [], [], [], 0
     for h, name in rows(ls_remote_text):
         if _under(name, sp):
             n = _num(name, sp)
             if n is None:
-                odd.append(name)
+                odd.append(name); odd_rows.append((name, h))
             else:
                 stops.append((n, h))
         for lp in lps:
@@ -51,7 +52,8 @@ def family_state(ls_remote_text, family="filing"):
             if n is not None:
                 lift = max(lift, n)
     stops.sort(reverse=True)
-    return {"stops": stops, "odd": sorted(odd), "lift": lift, "live": [s for s in stops if s[0] >= lift]}
+    return {"stops": stops, "odd": sorted(odd), "odd_rows": sorted(odd_rows), "lift": lift,
+            "live": [s for s in stops if s[0] >= lift]}
 
 
 def verdict(ls_remote_text, rc=0, families=("filing",)):

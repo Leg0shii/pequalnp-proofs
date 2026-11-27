@@ -9,7 +9,7 @@ duplicates open pushes toolkit ref alert/dupopen-<epoch> with message `DUP-OPEN 
 bus alert channel). Taken list stale (over 180 s): per-PR file search for PRs under 10 min old, else skip.
 Env: PR_TOKEN (close, toolkit push), MINUTES (58), DRY=1 (no close, no push), FIXTURE (json list of our PRs, tests).
 """
-import base64, json, os, re, subprocess, sys, tempfile, time
+import base64, hashlib, json, os, re, subprocess, sys, tempfile, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import haltrule                                    # Lead 16.1: the one stop/go rule (shared with submit, drain, gate)
 
@@ -265,8 +265,11 @@ def filing_stop(msg):
     """push toolkit ref filing/stop/<n> (the opener files nothing while it is newer than every filing/go); n by
     next_ref_epoch over the refs read right before the push; refs unreadable -> n = now (a stop is still pushed)."""
     sts, gos = all_refs("filing/stop"), all_refs("filing/go")
-    n = next_ref_epoch(time.time(), [e for e, _ in sts or []], [e for e, _ in gos or []]) if sts is not None and gos is not None \
-        else int(time.time())
+    if sts is not None and gos is not None:
+        n = next_ref_epoch(time.time(), [e for e, _ in sts], [e for e, _ in gos])
+    else:                                             # 16.8 S1: refs unreadable -> a NON-DIGIT name, never a clock number
+        m = re.match(r"filing stop: REJ-HALT \d+ (\d+)", msg)  # (halted until deleted under 16.1, whatever go exists)
+        n = f"rej-{m.group(1)}" if m else "rej-blind-" + hashlib.sha1(msg.encode()).hexdigest()[:8]
     g = os.path.join(W, "taken.git")
     if not os.path.isdir(g):
         sh("git", "init", "-q", "--bare", g)
@@ -321,13 +324,14 @@ MSGS = {}          # stop ref sha -> commit message (immutable, so cached; bound
 def stop_listed():
     """PR numbers named by our REJ-HALT stop refs (any age): a rejection already halted for, lifted or not. Clock-free
     replacement of 'closed after the newest filing/go' (V5). None if the stop refs cannot be read."""
-    sts = all_refs("filing/stop")
-    if sts is None:
+    txt, rc = filing_snapshot()                       # 16.8 S1: rej-<n> stops (non-digit names) count too
+    if rc:
         return None
+    fs = haltrule.family_state(txt, "filing")
     got = set()
-    for e, h in sts:
+    for ref, h in [(f"filing/stop/{e}", h) for e, h in fs["stops"]] + fs["odd_rows"]:
         if h not in MSGS:
-            m = ref_message(h, f"refs/heads/filing/stop/{e}")
+            m = ref_message(h, f"refs/heads/{ref}")
             if m is None:
                 continue                              # unreadable: its PRs count as not halted for (fail closed)
             MSGS[h] = m
@@ -335,6 +339,27 @@ def stop_listed():
         if m:
             got.update(int(x) for x in m.group(1).split())
     return got
+
+
+BADREF = {"t": 0.0, "alerted": 0.0}
+
+
+def badref_alert():
+    """16.8 S4: a halting stop ref whose name is not plain digits (halted until deleted, 16.1) -> alert ref
+    HALT-BADREF <ref> by name, once per 5 min while it stands. Refs read at most every 60 s."""
+    if DRY or time.time() - BADREF["t"] < 60:
+        return None
+    BADREF["t"] = time.time()
+    txt, rc = filing_snapshot()
+    if rc:
+        return None
+    odd = haltrule.family_state(txt, "filing")["odd"]
+    BADREF["n"] = len(odd)
+    if odd and time.time() - BADREF["alerted"] >= 300:
+        BADREF["alerted"] = time.time()
+        alert_ref("HALT-BADREF " + " ".join(odd[:5]) + (f" (+{len(odd) - 5})" if len(odd) > 5 else ""), "haltbadref")
+        log("HALT-BADREF", odd[:5])
+    return odd
 
 
 def blind_lift():
@@ -401,7 +426,7 @@ def heartbeat(n, d, fresh):
     # 19:50: PR_TOKEN (Leg0shii, shared with PR creation and the PC) hit 0; rate_limit calls are free
     rlp = sh("gh", "api", "rate_limit", "--jq", r'"\(.resources.core.remaining)/\(.resources.core.reset)"', env=ghenv(), timeout=30).stdout.strip() or "?"
     msg = (f"dupclose {int(time.time())} open={n} dups={d} closed={len(CLOSED)} taken={'fresh' if fresh else 'stale'} "
-           f"{SPLIT['txt']} br={BR['deleted']}/{len(BR['cand'])}/{BR['kept']} pages={OPEN.get('pages', '-')} rej10={REJ.get('n', '-')} rl={rl} rl_pr={rlp} tok={'read' if os.environ.get('READ_TOKEN') else 'pr'} "
+           f"{SPLIT['txt']} br={BR['deleted']}/{len(BR['cand'])}/{BR['kept']} badref={BADREF.get('n', '-')} pages={OPEN.get('pages', '-')} rej10={REJ.get('n', '-')} rl={rl} rl_pr={rlp} tok={'read' if os.environ.get('READ_TOKEN') else 'pr'} "
            f"run={os.environ.get('GITHUB_RUN_ID', '-')}")
     c = subprocess.run(["git", "-C", g, "commit-tree", tree, "-m", msg], capture_output=True, text=True, env=env).stdout.strip()
     sh("git", *auth(), "-C", g, "push", "-q", "-f", TK, f"{c}:refs/heads/status/dupclose", timeout=60)
@@ -743,6 +768,10 @@ def one_pass():
         prune_branches()
     except Exception as e:
         log("branch prune failed:", repr(e)[:120])
+    try:
+        badref_alert()
+    except Exception as e:
+        log("badref check failed:", repr(e)[:120])
     if rb:
         log("rejections of ours in the last 10 min:", rb)
     return len(prs), len(dups), tk is not None
