@@ -1180,6 +1180,9 @@ def upbase_ref(base):
     return None
 
 
+PUSH_REFUSED = re.compile(r"\b(429|403)\b|Too Many Requests|rate limit|secondary rate", re.I)
+
+
 def push_branch(c, gid):
     url = f"https://github.com/{FORK}.git"
     t = time.time()
@@ -1197,8 +1200,24 @@ def push_branch(c, gid):
         # create-only (Lead 06:12): the ref must not exist yet; an existing head is never rewritten
         r = run(["git"] + auth_cfg() + ["-C", TREE, "push", "-q", f"--force-with-lease=refs/heads/{gid}:", url,
                                         f"{c}:refs/heads/{gid}"], timeout=600)
-        if r.returncode == 0 or not TRANSIENT.search(r.stderr):
-            return r.stderr.strip()[:300] if r.returncode else None
+        if r.returncode == 0:
+            return None
+        d = os.environ.get("PR_GATE_DIR")
+        if d and PUSH_REFUSED.search(r.stderr):
+            # Lead 09:10 (W5 PUSH-429 at 08:49:57; GitHub's repository limit: about 6 pushes a minute): a refused head
+            # push is a refusal under 16.13 like a refused create: every worker stops for refusal_wait(), rate halved,
+            # the 4th ends the drain's creates; this unit waits out the stall, then pushes again
+            k, wait, rate = bucket_refusal(d, {}, "push: " + r.stderr.strip()[:200])
+            if os.path.exists(os.path.join(d, "giveup")):
+                return "push refused, creates given up: " + r.stderr.strip()[:200]
+            try:
+                until = float(open(os.path.join(d, "stall")).read())
+            except (OSError, ValueError):
+                until = time.time() + wait
+            time.sleep(max(0.0, until - time.time()))
+            continue
+        if not TRANSIENT.search(r.stderr):
+            return r.stderr.strip()[:300]
         log("push retry", r.stderr.strip()[:150].replace("\n", " | "))
         time.sleep(5 * (att + 1))
     return r.stderr.strip()[:300]

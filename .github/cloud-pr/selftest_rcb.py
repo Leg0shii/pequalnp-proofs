@@ -553,6 +553,35 @@ if hasattr(S, "sight_line"):
 else:
     case("07:31-sight-to-create-logged", False, "(no sight_line)")
 
+# ---- Lead 09:10: a refused head push (429/403) is a 16.13 refusal (stall for every worker, alert), then pushed again
+if hasattr(S, "push_branch"):
+    PD = tempfile.mkdtemp(); svd = os.environ.get("PR_GATE_DIR"); os.environ["PR_GATE_DIR"] = PD
+    sv = (S.run, S.git, getattr(S, "upbase_ref", None))
+    calls = []
+    def prun(a, **k):
+        if "push" in a:
+            calls.append(1)
+            if len(calls) == 1:
+                return subprocess.CompletedProcess(a, 1, "", "remote: error: Too Many Requests (429)\nfatal: unable to access")
+        return subprocess.CompletedProcess(a, 0, "", "")
+    S.run = prun; S.git = lambda *a, **k: subprocess.CompletedProcess(a, 0, "abc\n", "")
+    if sv[2]:
+        S.upbase_ref = lambda b: "upbase/x"
+    t0c = CLK[0]
+    e = S.push_branch("c" * 40, "L-meta-1")
+    k = int(open(os.path.join(PD, "refusals")).read()) if os.path.exists(os.path.join(PD, "refusals")) else 0
+    case("09:10-push-429-is-a-refusal", e is None and len(calls) == 2 and k == 1 and CLK[0] - t0c >= 59,
+         f"(err {e}, pushes {len(calls)}, refusals {k}, waited {CLK[0] - t0c:.0f} s)")
+    S.run, S.git = sv[0], sv[1]
+    if sv[2]:
+        S.upbase_ref = sv[2]
+    if svd is None:
+        os.environ.pop("PR_GATE_DIR", None)
+    else:
+        os.environ["PR_GATE_DIR"] = svd
+else:
+    case("09:10-push-429-is-a-refusal", False, "(no push_branch)")
+
 bad = [n for n, ok in res if not ok]
 print(f"RCB SELFTEST OK {len(res)}" if not bad else "RCB SELFTEST FAIL " + " ".join(bad))
 sys.exit(1 if bad else 0)
