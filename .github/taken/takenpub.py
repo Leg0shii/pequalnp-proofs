@@ -35,11 +35,13 @@ UP = "open-goat/pequalnp-proofs"
 OUT = os.environ.get("TAKEN_OUT", "/mnt/project-files/team/lead/taken.txt")
 OPEN_OUT = os.environ.get("TAKEN_OPEN_OUT") or os.path.join(os.path.dirname(OUT) or ".", "open.json")
 SEED = os.environ.get("TAKEN_SEED", "")
+SEED_LIST = os.environ.get("TAKEN_SEED_LIST") or os.path.join(os.path.dirname(SEED) or ".", "taken.txt")
 TOKEN = os.environ.get("GH_SEARCH_TOKEN", "")
 END = time.time() + float(os.environ.get("TAKEN_MINUTES", "0") or 0) * 60   # 0 = forever
 PASS_S = 18
 SWEEP_S = float(os.environ.get("TAKEN_SWEEP_S", "300"))
 MAX_PAGES, CATCHUP_PAGES, OPEN_PAGES, UPD_PAGES, MARGIN = 30, 10, 150, 30, 120
+LEASE_RX = re.compile(r"^Lease:\s*\S", re.M)
 TOKEN_RX = re.compile(r"(?<![A-Za-z0-9_-])(L-[a-z0-9]+(?:-[a-z0-9]+)*-\d+)(?![A-Za-z0-9_-])")
 FILE_RX = re.compile(r"lean/PEqualNP/Outside/(L_[a-z0-9]+(?:_[a-z0-9]+)*_\d+|V_[a-z0-9]+(?:_[a-z0-9]+)*_\d+__k\d+)\.lean")
 READS = {"n": 0, "req": 0}          # n: counted reads (a 304 is free), req: all requests
@@ -199,6 +201,10 @@ class State:
         self.seen = {}          # number -> {"n", "who", "sha", "created", "units" (title/branch)}
         self.open = {}          # number -> units by file path (open PRs only)
         self.bad = {}           # number -> why its data is incomplete (named in the header)
+        self.closed_files = {}  # number -> file units of a PR that was open and then closed or merged (A1)
+        self.seeded = {}        # number -> units from the previous list (A3)
+        self.floor = self.since # the by-creation backfill reads back to here (later after a seeded restart, A3)
+        self.partial_t = None   # GitHub time the list became partial (header field 7)
         self.backfilled = False
         self.mark = None        # GitHub time of the last by-update scan (the next one reads back to mark - MARGIN)
         self.cpg = None         # next by-creation page to catch up (R2), None when complete
@@ -211,17 +217,49 @@ class State:
         """file units of open PRs from the last open.json (TAKEN_SEED): a restart re-reads only the heads that moved"""
         if not SEED:
             return
+        self.seed_list(SEED_LIST)
         try:
             d = json.load(open(SEED))
             bad = set(d.get("skipped") or [])
             k = 0
-            for n, who, sha, created, units in d.get("prs") or []:
+            for r in d.get("prs") or []:
+                n, who, sha, created, units = r[:5]
                 if isinstance(n, int) and sha and n not in bad and isinstance(units, list):
                     FILES[(n, sha)] = sorted(u for u in units if isinstance(u, str))
                     k += 1
             log("seeded", k, "heads from", SEED)
         except (OSError, ValueError, TypeError) as e:
             log("seed ignored:", str(e)[:80])
+
+    def seed_list(self, path):
+        """A3: rows of the previous taken.txt (a complete list): units of PRs created before its header"""
+        try:
+            lines = open(path).read().splitlines()
+            h = lines[0].split()
+            e = int(h[2])
+            m = re.search(r"\bsteps (\d+)\b", lines[0])
+            if not m or int(m.group(1)) != len(lines) - 1:
+                raise ValueError("truncated list")
+            if len(h) < 7 or h[6] != "complete":
+                raise ValueError("previous list not complete")
+            k = 0
+            for l in lines[1:]:
+                u, n, who, hms = l.split()[:4]
+                hh, mm, ss = map(int, hms.split(":"))
+                c = e - (e % 86400) + hh * 3600 + mm * 60 + ss
+                c -= 86400 if c > e else 0
+                if c < self.since or not n.isdigit():
+                    continue
+                v = self.seen.setdefault(int(n), {"n": int(n), "who": who, "sha": "", "ref": "", "lease": 0,
+                                                  "created": c, "units": set()})
+                v["units"] = set(v["units"]) | {u}
+                self.seeded.setdefault(int(n), set()).add(u)
+                k += 1
+            if e - 600 > self.since:
+                self.floor = e - 600
+            log("seeded", k, "rows from", path, "backfill floor", int(self.floor))
+        except (OSError, ValueError, IndexError) as ex:
+            log("list seed ignored:", str(ex)[:80])
 
     def take(self, p):
         """one row of a list page (or one PR read by number); newest read wins"""
@@ -237,8 +275,12 @@ class State:
         if c is None or c >= self.since or is_open:
             u = p.get("user")
             who = u.get("login") if isinstance(u, dict) else None
+            hd = p.get("head") if isinstance(p.get("head"), dict) else {}
+            body = p.get("body")
             self.seen[n] = {"n": n, "who": who if isinstance(who, str) and who else "?",
-                            "sha": (p.get("head") or {}).get("sha") or "", "created": c, "units": units_named(p)}
+                            "sha": hd.get("sha") or "", "ref": hd.get("ref") if isinstance(hd.get("ref"), str) else "",
+                            "lease": 1 if isinstance(body, str) and LEASE_RX.search(body) else 0,
+                            "created": c, "units": units_named(p) | self.seeded.get(n, set())}
         if is_open:
             try:
                 self.open[n] = file_units(p)
@@ -246,7 +288,9 @@ class State:
                 self.bad[n] = str(e)
                 self.open.setdefault(n, [])
         else:
-            self.open.pop(n, None)
+            gone = self.open.pop(n, None)
+            if gone:                                 # A1: a merged or closed batch PR keeps the units of its files
+                self.closed_files[n] = sorted(set(self.closed_files.get(n, ())) | set(gone))
             if c is not None:
                 self.bad.pop(n, None)
 
@@ -265,9 +309,15 @@ class State:
             if len(rows) < 100 or (o is not None and o < stop):
                 self.mark = start
                 return
-        raise ReadFail(f"over {UPD_PAGES} pages of updates")
+        # A2: more updates than UPD_PAGES pages in one window (a wave): never wedge. What was read is taken; a full
+        # open sweep (new heads, closes) and the by-creation pages back to the mark cover the rest; the mark moves on.
+        log("over", UPD_PAGES, "pages of updates: full open sweep + by-creation pages instead")
+        self.sweep()
+        if self.scan_created(1, OPEN_PAGES, floor=stop) is not None:
+            raise ReadFail("over the page cap by creation too")
+        self.mark = start
 
-    def scan_created(self, first, pages):
+    def scan_created(self, first, pages, floor=None):
         """state=all by creation, newest first, pages first..; returns the next page to read, or None once it reached
         HOURS_BACK (new PRs push rows down: a later page overlaps, never skips)"""
         for pg in range(first, first + pages):
@@ -275,7 +325,7 @@ class State:
             for p in rows:
                 self.take(p)
             o = oldest(rows, "created_at")
-            if len(rows) < 100 or (o is not None and o < self.since):
+            if len(rows) < 100 or (o is not None and o < (self.floor if floor is None else floor)):
                 return None
             if o is not None:
                 self.cover = o
@@ -317,7 +367,7 @@ class State:
     def rows(self):
         first = {}
         for v in self.seen.values():
-            for u in set(v["units"]) | set(self.open.get(v["n"], ())):
+            for u in set(v["units"]) | set(self.open.get(v["n"], ())) | set(self.closed_files.get(v["n"], ())):
                 if u not in first or v["n"] < first[u]["n"]:
                     first[u] = v
         return first
@@ -330,12 +380,18 @@ def render(st, t_hdr):
         m = re.fullmatch(r"(.*)-(\d+)", u)
         return (m.group(1), int(m.group(2))) if m else (u, 0)
     h = f"# updated {int(t_hdr)} {time.strftime('%H:%M:%S', time.gmtime(t_hdr))} steps {len(first)}"
-    if st.cpg:
-        h += f" partial {int(st.cover or st.since)}"
+    if st.cpg:                                   # fixed fields 6 and 7 (A3): "complete 0" or "partial <since epoch>"
+        st.partial_t = st.partial_t or t_hdr
+        h += f" partial {int(st.partial_t)}"
+        if t_hdr - st.partial_t > 120:
+            log(f"ALERT TAKEN-PARTIAL {t_hdr - st.partial_t:.0f} s: closed PRs before {int(st.cover or st.floor)} not all read")
+    else:
+        st.partial_t = None
+        h += " complete 0"
+    h += f" rl {RL['rem'] if RL['rem'] is not None else -1} {RL['reset'] or 0}"
     bad = sorted(n for n in st.bad if n in st.seen or n in st.open)
     if bad:
         h += " skipped " + ",".join(map(str, bad[:50])) + (",+%d" % (len(bad) - 50) if len(bad) > 50 else "")
-    h += f" rl {RL['rem'] if RL['rem'] is not None else -1} {RL['reset'] or 0}"
     out = [h]
     for u in sorted(first, key=key):
         v = first[u]
@@ -347,8 +403,9 @@ def render(st, t_hdr):
 def open_json(st, t_hdr):
     prs = []
     for n in sorted(st.open):
-        v = st.seen.get(n) or {"who": "?", "sha": "", "created": None, "units": set()}
-        prs.append([n, v["who"], v["sha"], v["created"], sorted(set(v["units"]) | set(st.open[n]))])
+        v = st.seen.get(n) or {"who": "?", "sha": "", "created": None, "units": set(), "lease": 0, "ref": ""}
+        prs.append([n, v["who"], v["sha"], v["created"], sorted(set(v["units"]) | set(st.open[n])),
+                    v.get("lease", 0), v.get("ref", "")])
     return json.dumps({"t": int(t_hdr), "full_t": int(st.full_t) if st.full_t else None, "rl": RL["rem"],
                        "skipped": sorted(n for n in st.bad if n in st.open), "prs": prs}, separators=(",", ":")) + "\n"
 

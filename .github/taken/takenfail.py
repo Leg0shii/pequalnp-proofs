@@ -21,6 +21,11 @@ Cases (B6 clock skew, B7 consistency, B9 partial failures, B10 process death):
   T10 null-fields      null user, head, head repo, title, body: listed, sound
   T11 wave-5100-open   16.7: 5,100 open PRs for an hour, under 1,500 counted reads, header never over 60 s old
   T12 seeded-restart   a restart with 500 open PRs reuses the last open.json: at most 40 counted reads
+  T13 merged-batch     w9 A1: a merged batch PR keeps its file unit on the list
+  T14 update-burst     w9 A2: 3,100 updates in one window: every later pass still publishes
+  T15 partial-field    w9 A3: header field 6 complete|partial, field 7 partial-since epoch (0 when complete)
+  T16 seeded-list      w9 A3: restart with the previous taken.txt + open.json: complete at once, merged unit listed
+  T17 open-json-fields w9 A5: open.json rows end with lease 0/1 and head ref
   python3 takenfail.py [SRC]  -> one line per case, then "TAKENFAIL PASS <sha>" (exit 0) or "TAKENFAIL FAIL <sha>: ..."
 """
 import hashlib, importlib.util, json, os, random, re, subprocess, sys, tempfile, time
@@ -473,12 +478,151 @@ def case_T12(src, d):
     return bad, f"restart counted={used}"
 
 
+def case_T13(src, d):
+    """w9 A1: a batch PR (no id) lists U by file while open; it MERGES: U stays on the list"""
+    m = load(src, os.path.join(d, "t.txt")); globals()["TP"] = m
+    g = [T0]; clock(m, g)
+    b = pr(700, T0 - 600, [fpath("L-meta-97001")], title="Batch of proofs", ref="patch-7")
+    w = World([b, pr(701, T0 - 500, [fpath("L-meta-97101")])])
+    m.FAKE = w
+    st = m.State(3 * 3600)
+    t1 = m.one_pass(st)
+    b.update(state="closed", merged_at=iso(T0 + 5), updated_at=iso(T0 + 5))
+    bad = []
+    for k in range(1, 4):
+        g[0] = T0 + 18 * k
+        t = step(m, st)
+        if t and "L-meta-97001" not in parse(t)[1]:
+            bad.append(f"pass {k + 1}: L-meta-97001 of the merged batch PR #700 dropped")
+    return bad[:1] if "L-meta-97001" in parse(t1)[1] else ["not listed while open"], ""
+
+
+def case_T14(src, d):
+    """w9 A2: 3,100 updates inside one window (wave): every later pass still publishes a list"""
+    m = load(src, os.path.join(d, "t.txt")); globals()["TP"] = m
+    g = [T0]; clock(m, g)
+    prs = [pr(10000 + i, T0 - 20000 + i, [fpath("L-meta-%d" % (98000 + i))]) for i in range(3200)]
+    w = World(prs)
+    m.FAKE = w
+    st = m.State(3 * 3600)
+    if m.one_pass(st) is None:
+        return ["no backfill list"], ""
+    for p in prs[:3100]:
+        p["updated_at"] = iso(T0 + 10)
+    prs.append(pr(19999, T0 + 12, [fpath("L-meta-98999")]))
+    got = []
+    for k in range(1, 11):
+        g[0] = T0 + 18 * k
+        got.append(step(m, st))
+    n = sum(1 for t in got if t)
+    bad = [] if n == 10 else [f"{10 - n} of 10 passes without a list after the burst"]
+    last = [t for t in got if t]
+    if last:
+        bad += unsound(last[-1], w, m.unit_of_file)[:2]
+    return bad, f"lists={n}/10 reads={w.reads}"
+
+
+def closed_world(n=3600):
+    prs = [pr(20000 + i, T0 - 9000 + 2 * i, [fpath("L-meta-%d" % (99000 + i))], state="closed") for i in range(n)]
+    prs[n - 3450].update(title="Prove L-meta-99999", merged_at=iso(T0 - 100))      # page 35 by creation
+    return prs
+
+
+def case_T15(src, d):
+    """w9 A3 (Lead's ruling): header fixed field 6 = complete|partial, field 7 = partial since epoch (0 when complete).
+    A restart over the page cap without a seed says partial at once and complete once caught up"""
+    m = load(src, os.path.join(d, "t.txt")); globals()["TP"] = m
+    g = [T0]; clock(m, g)
+    w = World(closed_world())
+    m.FAKE = w
+    st = m.State(3 * 3600)
+    t1 = m.one_pass(st)
+    if t1 is None:
+        return ["no list"], ""
+    h1 = t1.splitlines()[0].split()
+    bad = []
+    if len(h1) < 8 or h1[6] != "partial" or not h1[7].isdigit() or int(h1[7]) <= 0:
+        bad.append("partial restart list without 'partial <epoch>' in fields 6-7: " + " ".join(h1[:9]))
+    g[0] = T0 + 18
+    t2 = m.one_pass(st) or ""
+    h2 = (t2.splitlines() or [""])[0].split()
+    if len(h2) < 8 or h2[6:8] != ["complete", "0"]:
+        bad.append("caught-up list without 'complete 0' in fields 6-7: " + " ".join(h2[:9]))
+    elif "L-meta-99999" not in parse(t2)[1]:
+        bad.append("caught-up list lacks the merged unit")
+    return bad, " ".join(h1[6:8])
+
+
+def case_T16(src, d):
+    """w9 A3 (ruling: seed from the previous list): a restart over the page cap WITH the previous taken.txt and
+    open.json (TAKEN_SEED) gives a complete list at once that lists the merged unit on page 35"""
+    out = os.path.join(d, "t.txt")
+    m = load(src, out); globals()["TP"] = m
+    g = [T0]; clock(m, g)
+    w = World(closed_world())
+    m.FAKE = w
+    st = m.State(3 * 3600)
+    t = None
+    for k in range(4):
+        g[0] = T0 + 18 * k
+        t = m.one_pass(st) or t
+    if t is None:
+        return ["no list before the restart"], ""
+    (m.publish(st, t) if hasattr(m, "publish") else m.write(t))
+    for i in range(300):                             # 300 more closed PRs while the publisher restarts
+        w.prs.append(pr(26000 + i, T0 + 100 + i, title="Prove L-meta-%d" % (140000 + i), state="closed"))
+    os.environ["TAKEN_SEED"] = os.path.join(d, "open.json")
+    os.environ["TAKEN_SEED_LIST"] = out                 # the previous taken.txt (the workflow fetches both)
+    try:
+        m2 = load(src, os.path.join(d, "t2.txt")); globals()["TP"] = m2
+    finally:
+        os.environ.pop("TAKEN_SEED", None); os.environ.pop("TAKEN_SEED_LIST", None)
+    g[0] = T0 + 600
+    clock(m2, g)
+    m2.FAKE = World(w.prs)
+    t2 = m2.one_pass(m2.State(3 * 3600))
+    if t2 is None:
+        return ["no list after the restart"], ""
+    h = t2.splitlines()[0].split()
+    _, rows = parse(t2)
+    bad = []
+    if len(h) < 8 or h[6] != "complete":
+        bad.append("seeded restart not complete at once: " + " ".join(h[:9]))
+    for u in ("L-meta-99999", "L-meta-140299", "L-meta-140000"):
+        if u not in rows:
+            bad.append(u + " missing after the seeded restart")
+    return bad, " ".join(h[6:8])
+
+
+def case_T17(src, d):
+    """w9 A5: open.json rows carry [n, author, head sha, created, units, lease 0/1, head ref] for the closer"""
+    m = load(src, os.path.join(d, "t.txt")); globals()["TP"] = m
+    g = [T0]; clock(m, g)
+    a = pr(800, T0 - 60, [fpath("L-meta-97500")], ref="L-meta-97500", who="Leg0shii"); a["body"] = "x\n\nLease: lid-1"
+    b = pr(801, T0 - 50, [fpath("L-meta-97501")], ref="L-meta-97501", who="Leg0shii"); b["body"] = "no lease here"
+    m.FAKE = World([a, b])
+    st = m.State(3 * 3600)
+    t = m.one_pass(st)
+    oj = getattr(st, "last_open_json", None)
+    if not t or not oj:
+        return ["no open.json"], ""
+    rows = {r[0]: r for r in json.loads(oj)["prs"]}
+    bad = []
+    if len(rows.get(800, [])) < 7 or rows[800][5:7] != [1, "L-meta-97500"]:
+        bad.append(f"#800 row {rows.get(800)} (want lease 1, ref L-meta-97500 at 5-6)")
+    if len(rows.get(801, [])) < 7 or rows[801][5:7] != [0, "L-meta-97501"]:
+        bad.append(f"#801 row {rows.get(801)} (want lease 0)")
+    return bad, ""
+
+
 CASES = [("T1-head-moved", case_T1), ("T2-page-shift", case_T2), ("T3-clock-ahead", case_T3),
          ("T4-poison-files", lambda s, d: case_poison(s, d, "files")),
          ("T5-poison-created", lambda s, d: case_poison(s, d, "created")),
          ("T6-write-fails-once", case_T6), ("T7-killed-mid-pass", case_T7), ("T8-restart-backfill", case_T8),
          ("T9-restart-3500-in-3h", case_T9), ("T10-null-fields", case_T10), ("T11-wave-5100-open", case_T11),
-         ("T12-seeded-restart", case_T12)]
+         ("T12-seeded-restart", case_T12), ("T13-merged-batch-keeps-unit", case_T13),
+         ("T14-update-burst", case_T14), ("T15-partial-field", case_T15), ("T16-seeded-list-restart", case_T16),
+         ("T17-open-json-fields", case_T17)]
 
 
 def main():
