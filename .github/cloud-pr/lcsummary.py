@@ -82,12 +82,12 @@ def main(a):
         except Exception:
             why.append("no canary baseline")
     line = ("LANE-CI %s head=%s w%sx%s warm=%ss first_would_push=%ss after %s, dry=%d/%d race_p95=%s guards_p95=%s "
-            "tree_p95=%s total_p95=%s results=%s alerts=%s reads run=%s pr=%s run=%s verdict=%s%s") % (
+            "tree_p95=%s total_p95=%s results=%s alerts=%s reads run=%s pr=%s left=%s reset=%s run=%s verdict=%s%s") % (
         (a.sha or "?")[:8], (a.head or a.sha or "?")[:8], a.workers or "?", a.slots or "?", a.warm or "0",
         "-" if first is None else first, "release" if rel else "START", len(du), units, f(pct(g("race"), .95)),
         f(pct(g("guards"), .95)), f(pct(tree, .95)), f(pct(g("total"), .95)),
         ",".join("%s:%d" % kv for kv in sorted(res.items())) or "none",
-        ",".join("%s:%d" % kv for kv in sorted(al.items())) or "none", used(a.reads_run), used(a.reads_pr), a.run or "?",
+        ",".join("%s:%d" % kv for kv in sorted(al.items())) or "none", used(a.reads_run), used(a.reads_pr), a.left or "?", a.reset or "?", a.run or "?",
         verdict, (" (" + "; ".join(why) + ")") if why else "")
     print(line)
     return 0 if verdict == "ok" else 1
@@ -97,5 +97,5 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("log"); p.add_argument("--sha"); p.add_argument("--head"); p.add_argument("--workers"); p.add_argument("--slots")
     p.add_argument("--warm"); p.add_argument("--run"); p.add_argument("--reads-run", default=""); p.add_argument("--reads-pr", default="")
-    p.add_argument("--baseline"); p.add_argument("--units", help="units released (loadtest refs), for the lost check")
+    p.add_argument("--left"); p.add_argument("--reset"); p.add_argument("--baseline"); p.add_argument("--units", help="units released (loadtest refs), for the lost check")
     sys.exit(main(p.parse_args()))

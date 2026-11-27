@@ -33,10 +33,8 @@ permissions:
   contents: read
   actions: read
   pull-requests: read
-# Canaries run side by side (Lead 08:36): loadcanary.yml's group is per branch (loadcanary-<branch>), so a lane never
-# waits on the rehearsal or on another lane. Cap (W8): job "queue" lets this canary start only while fewer than 3
-# canaries (loadcanary runs + other lane-ci canaries) are queued or running: the run-token read pool (5000/h) is shared
-# with the live opener. Polls every 20 s, up to 40 min; still full: no canary, the line says so, re-run the run.
+# Canary slot (Lead 09:29): loadcanary.yml's step "Canary slot" runs ONE canary at a time in the whole fork (oldest run
+# first) and none while the run token has under 1,000 left; the LANE-CI line prints reads used, left and reset.
 # Merge gate: job "line" FAILS unless the LANE-CI verdict is ok and every suite passed.
 # Read budget (Lead 08:49): while the fork ref wave/on exists (the Lead sets and deletes it) job "wave" fails and NOTHING
 # else runs (no suite, no canary): the wave's opener owns the read pool. The check is a git ls-remote (no REST read).
@@ -80,40 +78,9 @@ jobs:
     secrets: inherit
     with:
       ref: ${{ github.event.pull_request.head.sha || inputs.ref }}
-  queue:
+  canary:
     needs: wave
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    outputs:
-      go: ${{ steps.wait.outputs.go }}
-      why: ${{ steps.wait.outputs.why }}
-    steps:
-      - name: Wait until fewer than 3 canaries are queued or running
-        id: wait
-        env:
-          GH_TOKEN: ${{ github.token }}
-          R: ${{ github.repository }}
-        shell: bash
-        run: |
-          busy() {   # prints what holds the canary queue, nothing when it is free
-            gh api "repos/$R/actions/workflows/loadcanary.yml/runs?per_page=20" \
-              --jq '.workflow_runs[] | select(.status != "completed") | "loadcanary run \(.id) \(.status)"'
-            for id in $(gh api "repos/$R/actions/workflows/lane-ci.yml/runs?per_page=20" --jq ".workflow_runs[] | select(.status != \"completed\" and .id != $GITHUB_RUN_ID) | .id"); do
-              gh api "repos/$R/actions/runs/$id/jobs" --jq '.jobs[] | select((.name | startswith("canary")) and .status != "completed") | "lane-ci run '"$id"' canary \(.status)"'
-            done
-          }
-          t0=$(date +%s)
-          while :; do
-            all=$(busy 2>&1); n=$(printf '%s' "$all" | grep -c .); b=$(printf '%s' "$all" | head -3 | paste -sd';' -)
-            [ "$n" -lt 3 ] && { echo "start: $n other canaries running after $(( $(date +%s) - t0 )) s ${b:+($b)}"; echo "go=true" >> "$GITHUB_OUTPUT"; exit 0; }
-            [ $(( $(date +%s) - t0 )) -ge 2400 ] && break
-            echo "$(date -u +%T) waiting, $n running: $b"; sleep 20
-          done
-          echo "go=false" >> "$GITHUB_OUTPUT"; echo "why=3 canaries busy for 40 min ($b): re-run this run" >> "$GITHUB_OUTPUT"
-  canary:
-    needs: queue
-    if: needs.queue.outputs.go == 'true'
     uses: ./.github/workflows/loadcanary.yml
     secrets: inherit
     with:
@@ -122,7 +89,7 @@ jobs:
       slots: ${{ inputs.slots }}
       warm_s: ${{ inputs.warm_s || '0' }}
   line:
-    needs: [wave, mintdrill, nodesk, preflight-live, queue, canary]
+    needs: [wave, mintdrill, nodesk, preflight-live, canary]
     if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 3
@@ -135,10 +102,9 @@ jobs:
           R_PL: ${{ needs['preflight-live'].result }}
           R_LC: ${{ needs.canary.result }}
           R_WAVE: ${{ needs.wave.result }}
-          Q_WHY: ${{ needs.queue.outputs.why }}
         shell: bash
         run: |
-          l="${LINE:-LANE-CI ? verdict=BAD (no canary line, canary job $R_LC${Q_WHY:+, $Q_WHY})} suites mintdrill=$R_MD nodesk=$R_ND preflight-live=$R_PL canary=$R_LC"
+          l="${LINE:-LANE-CI ? verdict=BAD (no canary line, canary job $R_LC)} suites mintdrill=$R_MD nodesk=$R_ND preflight-live=$R_PL canary=$R_LC"
           echo "$l"; echo "$l" > line.txt
           { echo '### LANE-CI (paste into team/board/<lane>.md)'; echo '```'; echo "$l"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           [ "$R_WAVE" = success ] || { echo "::error::wave/on is set (or its check failed): lane-ci did not run"; exit 1; }
