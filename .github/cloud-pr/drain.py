@@ -9,13 +9,15 @@ branch drain-state (seen.txt "step sha result epoch", one writer because one run
 re-push is a new commit and runs again. A run stops after DRAIN_MAX_S (1200) or when nothing is pending for 30 s.
 Env: SRC (fork main checkout), W, PR_TOKEN, READ_TOKEN, GITHUB_REPOSITORY."""
 import base64, os, re, subprocess, sys, tempfile, threading, time
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import haltrule                                        # rule 16.1: the same halt rule as submit.py filing_halted()
 from concurrent.futures import ThreadPoolExecutor
 
 SRC = os.environ["SRC"]; W = os.environ.get("W") or tempfile.mkdtemp()
 FORK = os.environ.get("GITHUB_REPOSITORY", "Leg0shii/pequalnp-proofs-fork")
 URL = f"https://github.com/{FORK}.git"
 PR_TOKEN = os.environ.get("PR_TOKEN", "")
-PR_SLOTS = int(os.environ.get("DRAIN_PR_SLOTS", "2"))   # Lead 06:12: PR creations in flight (w12 load drill: 6)
+PR_SLOTS = int(os.environ.get("DRAIN_PR_SLOTS", "6"))   # Lead 06:22 RC-b: 6 PR creations in flight (w12 load drill)
 WORKERS = int(os.environ.get("DRAIN_WORKERS", "14"))   # Lead 17:17: 14 workers = about 10 leased + 10 unleased a minute with the gate open
 MAX_S = float(os.environ.get("DRAIN_MAX_S", "1200")); LINGER = float(os.environ.get("DRAIN_LINGER", "30"))
 UPSTREAM = os.environ.get("DRAIN_UPSTREAM", "https://github.com/open-goat/pequalnp-proofs.git")
@@ -212,19 +214,17 @@ _FH = [0.0, False, ""]    # Lead 05:10: (checked at, halted, why) of the toolkit
 
 
 def halted():
-    """newest filing/stop/<epoch> newer than the newest filing/go/<epoch> = halted; unreadable = halted (fail
-    closed). Read at most every 10 s."""
+    """rule 16.1 (haltrule.decide): newest filing/stop/<n> >= newest filing/go/<n> = halted (a tie too), a stop name
+    that is not plain digits = halted, a go name that is not plain digits is ignored, unreadable = halted. Read at
+    most every 10 s here (new branches only); every PR create re-checks within 2 s (submit.py filing_halted)."""
     if time.time() - _FH[0] > 10:
         for k in range(3):                    # live test 05:13: the toolkit needs auth; 3 tries 2 s apart
             r = sh("git", *auth(), "ls-remote", "https://github.com/Leg0shii/pnp-toolkit.git", "refs/heads/filing/*", timeout=60)
             if r.returncode == 0:
                 break
             time.sleep(2)
-        ep = lambda k: max([int(x) for x in re.findall(r"/filing/%s/(\d+)$" % k, r.stdout, re.M)] or [0])
-        if r.returncode:
-            _FH[:] = [time.time(), True, "filing refs unreadable (fail closed)"]
-        else:
-            _FH[:] = [time.time(), ep("stop") > ep("go"), f"filing/stop/{ep('stop')} newer than filing/go/{ep('go') or '-'}"]
+        h, why = haltrule.decide(r.stdout, r.returncode == 0)
+        _FH[:] = [time.time(), h, why]
     return _FH[1]
 
 
@@ -263,6 +263,53 @@ def main():
     log("drain start,", len(SEEN), "branches already done in the last 6 h",
         "(credit line set)" if os.environ["PNP_LINKEDIN"] else "(no credit line)")
     inflight = {}; idle = None
+    rf = refresher_start()
+    try:
+        _loop(inflight, idle)
+    finally:
+        refresher_stop(rf)
+    log("drain end", STATS)
+    if os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+            f.write(f"### drain: {sum(STATS.values())} branches\n{STATS}\n")
+
+
+def refresher_start():
+    """RC-b 1 (Lead 06:22): one background `submit.py --refresh` per drain keeps W/halt.json and W/rival_snap.json at
+    most 2 s old, so no worker reads GitHub while it holds a PR slot. If it dies, workers read inline (never stale)."""
+    if DRY or os.environ.get("DRAIN_REFRESHER", "0") != "1":     # on in cloud-pr.yml (var DRAIN_REFRESHER, kill switch);
+        return None                                               # off in drills that run the real drain.py
+    env = dict(os.environ, ID="refresher", MOD="refresher", PROOF=os.devnull, TREE=W, W=os.path.join(W, "refresher"),
+               DRY="0", PR_GATE_DIR=W, PR_GATE_N=str(PR_SLOTS), RIVAL_SNAP_DIR=W, GITHUB_OUTPUT=os.devnull)
+    os.makedirs(env["W"], exist_ok=True)
+    try:
+        os.remove(os.path.join(W, "refresh.stop"))
+    except OSError:
+        pass
+    out = open(os.path.join(W, "refresher.log"), "a")
+    p = subprocess.Popen([sys.executable, "-I", os.path.join(SRC, ".github", "cloud-pr", "submit.py"), "--refresh"],
+                         env=env, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+    log("refresher started, pid", p.pid)
+    return p
+
+
+def refresher_stop(p):
+    if not p:
+        return
+    open(os.path.join(W, "refresh.stop"), "w").close()
+    try:
+        p.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        p.kill()
+    hb = ""
+    try:
+        hb = open(os.path.join(W, "refresh.hb")).read().strip()
+    except OSError:
+        pass
+    log("refresher stopped, rc", p.returncode, "last heartbeat (epoch passes counted not_modified remaining):", hb)
+
+
+def _loop(inflight, idle):
     with ThreadPoolExecutor(WORKERS) as ex:
         while time.time() - T0 < MAX_S:
             for k in [k for k, fu in inflight.items() if fu.done()]:
@@ -287,10 +334,6 @@ def main():
             else:
                 idle = None
             time.sleep(1 if inflight else 3)
-    log("drain end", STATS)
-    if os.environ.get("GITHUB_STEP_SUMMARY"):
-        with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
-            f.write(f"### drain: {sum(STATS.values())} branches\n{STATS}\n")
 
 
 if __name__ == "__main__":

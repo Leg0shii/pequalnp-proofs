@@ -69,7 +69,8 @@ jobs:
           PNP_LINKEDIN: ${{ secrets.PNP_LINKEDIN || vars.PNP_LINKEDIN }}
           # rate settings (Lead 06:12), Actions variables so a load drill can change them without a commit
           DRAIN_WORKERS: ${{ vars.DRAIN_WORKERS || '14' }}
-          DRAIN_PR_SLOTS: ${{ vars.DRAIN_PR_SLOTS || '2' }}
+          DRAIN_PR_SLOTS: ${{ vars.DRAIN_PR_SLOTS || '6' }}
+          DRAIN_REFRESHER: ${{ vars.DRAIN_REFRESHER || '1' }}
           PR_PER_MIN: ${{ vars.PR_PER_MIN || '70' }}
           PR_PER_HOUR: ${{ vars.PR_PER_HOUR || '480' }}
         run: python3 -I "$GITHUB_WORKSPACE/src/.github/cloud-pr/drain.py"

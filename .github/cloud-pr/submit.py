@@ -21,6 +21,8 @@ READ_TOKEN (the run's GITHUB_TOKEN, for reads), PR_TOKEN (secret, for the push a
 push, no PR, no branch delete). Prints RESULT=<...> and writes result=<...> to $GITHUB_OUTPUT.
 """
 import base64, fcntl, json, os, re, subprocess, sys, tempfile, time
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # drain runs submit.py with -I (no script dir on the path)
+import ghcond, haltrule                                              # RC-b: 16.7 conditional reads, 16.1 halt rule
 
 UP = "open-goat/pequalnp-proofs"
 GAPS = "https://data.pequalnp.com/data/desk/gaps.json"
@@ -634,6 +636,7 @@ def pr_files(n):
 SNAP_MAX_AGE_S = 5       # A19: one snapshot shared by every drain worker
 SNAP_CREATE_AGE_S = float(os.environ.get("SNAP_CREATE_AGE_S", "2"))   # Lead 06:12: at gh pr create at most 2 s old
 SNAP_DIR = os.environ.get("RIVAL_SNAP_DIR") or os.environ.get("PR_GATE_DIR") or W
+SNAP_PAGE, SNAP_MAX_PAGES = 20, 50      # 16.7: 20 newest PRs a page (fewer changes = more 304s), up to 1,000 since the header
 FILE_UNIT_RX = re.compile(r"lean/PEqualNP/Outside/(L_[a-z0-9]+(?:_[a-z0-9]+)*_\d+|V_[a-z0-9]+(?:_[a-z0-9]+)*_\d+__k\d+)\.lean")
 
 
@@ -649,6 +652,7 @@ def _build_snapshot(files):
     """taken list (fresh fetch) + every open PR created after its header minus 30 s, with its units by title, branch
     and changed files. Older PRs are in the taken list (takenpub.py maps every open PR by file path). Raises on any
     failed read (fail closed)."""
+    t_build = time.time()                   # R3 (red team): the snapshot is as old as its OLDEST read, so stamp it here
     if time.time() - TL_T[0] > 10:          # canary A2: a list fetched in the last 10 s is reused (1 s a fetch)
         _TL.clear()
     tl = taken_list()
@@ -656,11 +660,16 @@ def _build_snapshot(files):
         raise RuntimeError("taken list missing, older than 180 s or truncated (fail closed)")
     cut = TL_HDR[0] - 30
     recent = []
-    for k in range(1, RIVAL_MAX_PAGES + 1):
-        r = gh(["api", f"repos/{UP}/pulls?state=open&sort=created&direction=desc&per_page=100&page={k}"])
-        if r.returncode:
-            raise RuntimeError(f"open pulls page {k}: rc={r.returncode}")
-        pulls = json.loads(r.stdout)
+    for k in range(1, SNAP_MAX_PAGES + 1):
+        # 16.7: small pages (only PRs since the header are needed) read with If-None-Match: an unchanged page is a
+        # 304 and costs nothing of the run token's hourly limit; any failed read raises (fail closed)
+        try:
+            pulls, counted, rem = ghcond.get(f"repos/{UP}/pulls?state=open&sort=created&direction=desc&per_page={SNAP_PAGE}&page={k}",
+                                             gh=lambda a: gh(a, timeout=60))
+        except ghcond.ReadFail as e:
+            raise RuntimeError(f"open pulls page {k}: {e}")
+        if not isinstance(pulls, list):
+            raise RuntimeError(f"open pulls page {k}: not a list")
         old = False
         for p in pulls:
             c = time.mktime(time.strptime(p["created_at"][:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone
@@ -677,9 +686,10 @@ def _build_snapshot(files):
                 files[key] = sorted({u for u in map(file_unit, pr_files(p["number"])) if u})
             recent.append({"n": p["number"], "who": who, "units": sorted(us | set(files[key])),
                            "by_file": sorted(set(files[key]) - us)})
-        if old or len(pulls) < 100:
-            return {"t": time.time(), "hdr": TL_HDR[0], "taken": tl, "recent": recent, "files": files}
-    raise RuntimeError(f"more than {RIVAL_MAX_PAGES} pages of open PRs since the taken list (fail closed)")
+        if old or len(pulls) < SNAP_PAGE:
+            return {"t": t_build, "hdr": TL_HDR[0], "taken": tl, "recent": recent, "files": files,
+                    "rl": ghcond.STATS["remaining"]}
+    raise RuntimeError(f"more than {SNAP_MAX_PAGES} pages of open PRs since the taken list (fail closed)")
 
 
 def rival_snapshot(max_age=None):
@@ -687,6 +697,12 @@ def rival_snapshot(max_age=None):
     max_age = SNAP_MAX_AGE_S if max_age is None else max_age
     os.makedirs(SNAP_DIR, exist_ok=True)
     f = os.path.join(SNAP_DIR, "rival_snap.json")
+    try:                    # RC-b 1: a fresh copy (kept fresh by the drain's refresher) is read WITHOUT the lock, so a
+        old = json.load(open(f))       # worker holding a PR slot never waits on a build in progress
+        if 0 <= time.time() - old["t"] <= max_age:
+            return old
+    except Exception:
+        pass
     with open(os.path.join(SNAP_DIR, "rival_snap.lock"), "w") as lk:
         fcntl.flock(lk, fcntl.LOCK_EX)
         old = {}
@@ -1104,9 +1120,47 @@ def finish(result, why, url=None):
     sys.exit(1 if result in ("submitfail", "formatfail", "error", "stopped") else 0)
 
 
-def filing_halted():
-    """Lead 05:10 HALT ON ONE REJECTION: (halted, why). Halted when the newest toolkit filing/stop/<epoch> is newer
-    than the newest filing/go/<epoch>; fail closed when the refs cannot be read. FILING_FIXTURE = ls-remote text."""
+HALT_MAX_AGE_S = float(os.environ.get("HALT_MAX_AGE_S", "2"))
+
+
+def filing_halted(max_age=None):
+    """RC-b 1 (Lead 06:22): the halt switch, shared by every drain worker like the rival snapshot: one read at most
+    HALT_MAX_AGE_S old in SNAP_DIR/halt.json (stamped at read START), kept fresh by the drain's refresher. A fresh copy
+    is read without the lock; a stale or missing one (refresher dead, or no drain) means an inline read under the
+    lock, never a stale answer. Anything unreadable = halted."""
+    max_age = HALT_MAX_AGE_S if max_age is None else max_age
+    if not os.environ.get("RIVAL_SNAP_DIR") or os.environ.get("FILING_FIXTURE") is not None:
+        return _filing_halted_read()                 # one run per branch (no drain) or a fixture: inline
+    f = os.path.join(SNAP_DIR, "halt.json")
+    try:
+        h = json.load(open(f))
+        if 0 <= time.time() - h["t"] <= max_age:
+            return bool(h["halted"]), h["why"]
+    except Exception:
+        pass
+    try:
+        os.makedirs(SNAP_DIR, exist_ok=True)
+        with open(os.path.join(SNAP_DIR, "halt.lock"), "w") as lk:
+            fcntl.flock(lk, fcntl.LOCK_EX)
+            try:
+                h = json.load(open(f))
+                if 0 <= time.time() - h["t"] <= max_age:      # another worker read it while we waited
+                    return bool(h["halted"]), h["why"]
+            except Exception:
+                pass
+            t = time.time()
+            hv, why = _filing_halted_read()
+            with open(f + ".tmp", "w") as o:
+                json.dump({"t": t, "halted": hv, "why": why}, o)
+            os.replace(f + ".tmp", f)
+            return hv, why
+    except Exception as e:
+        return True, "halt state error (fail closed): " + repr(e)[:100]
+
+
+def _filing_halted_read():
+    """Lead 05:10 HALT ON ONE REJECTION, rule 16.1 (haltrule.py): (halted, why) from the toolkit filing/stop/<n> and
+    filing/go/<n> refs; unreadable = halted. FILING_FIXTURE = ls-remote text."""
     if os.environ.get("FILING_FIXTURE") is not None:
         txt, rc = os.environ["FILING_FIXTURE"], 0
     else:
@@ -1122,13 +1176,7 @@ def filing_halted():
             if rc == 0:
                 break
             time.sleep(2)
-    if rc:
-        return True, "filing refs unreadable (fail closed)"
-    ep = lambda k: max([int(x) for x in re.findall(r"/filing/%s/(\d+)$" % k, txt, re.M)] or [0])
-    st, go = ep("stop"), ep("go")
-    if st > go:
-        return True, f"filing halted: filing/stop/{st} newer than filing/go/{go or '-'}"
-    return False, ""
+    return haltrule.decide(txt, rc == 0)
 
 
 T_START = time.time()
@@ -1266,5 +1314,31 @@ def main():
     finish("submitted" if url else "submitfail", f"{why2}; {time.time() - t0:.0f}s after start", url)
 
 
+REFRESH_S = float(os.environ.get("REFRESH_S", "0.8"))
+
+
+def refresher():
+    """RC-b 1 (Lead 06:22): `submit.py --refresh` (started by drain.py, one per drain): re-reads the halt switch and
+    rebuilds the rival snapshot every REFRESH_S, so a worker holding a PR slot only reads files (no GitHub read inside
+    the slot). It stops when its parent drain is gone or SNAP_DIR/refresh.stop exists. Each pass writes
+    SNAP_DIR/refresh.hb; a dead refresher is harmless: the workers then read inline (never a stale check)."""
+    ppid = os.getppid()
+    n = 0
+    while os.getppid() == ppid and not os.path.exists(os.path.join(SNAP_DIR, "refresh.stop")):
+        t = time.time()
+        try:
+            filing_halted(0)
+        except Exception as e:
+            log("refresher: halt read failed", repr(e)[:100])
+        try:
+            rival_snapshot(0)
+        except Exception as e:
+            log("refresher: snapshot failed (workers read inline)", str(e)[:120])
+        n += 1
+        with open(os.path.join(SNAP_DIR, "refresh.hb"), "w") as o:
+            o.write(f"{time.time():.1f} {n} {ghcond.STATS['counted']} {ghcond.STATS['not_modified']} {ghcond.STATS['remaining']}\n")
+        time.sleep(max(0.05, REFRESH_S - (time.time() - t)))
+
+
 if __name__ == "__main__":
-    main()
+    refresher() if sys.argv[1:2] == ["--refresh"] else main()
