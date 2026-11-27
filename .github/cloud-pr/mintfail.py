@@ -76,6 +76,8 @@ def child_submit(src, w):
         md_run, md_gh, md_git, md_claim = S.run, S.gh, S.git, S.gate_claim
 
         def run(cmd, timeout=300, env=None, cwd=None):
+            if cmd[:2] == ["git", "-C"] and "upstream-base" in cmd[2] and "ls-tree" in cmd:   # PR 16 newest-base path
+                return subprocess.CompletedProcess(cmd, 0, "", "")                            # check: unit not in main
             if (cmd[:3] == ["gh", "pr", "create"] or (cmd[:2] == ["gh", "api"] and "POST" in cmd and any(str(x).endswith("/pulls") for x in cmd))):
                 cnt["pr_create"] += 1
                 s = st_load()
@@ -231,6 +233,8 @@ def child_drain(src, w):
             return cp(a, 0, "mainsha0\trefs/heads/main\n")
         if a[0] == "git" and "rev-parse" in a and any("upstream-base" in x for x in a):
             return cp(a, 0, "mainsha0\n")
+        if a[0] == "git" and any(c in a for c in ("config", "fetch", "checkout")) and any("upstream-base" in x for x in a):
+            return cp(a)                       # PR 16: no gc under a copy; the base refresher's fetch (main unchanged)
         if a[0] == "cp" and "-a" in a:                                        # w12 fix 3: a copy of the shared base
             import shutil
             shutil.copytree(a[-2], a[-1], dirs_exist_ok=True)
