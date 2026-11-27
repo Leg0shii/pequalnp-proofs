@@ -40,8 +40,8 @@ def log(*a):
 PROG = {"t": time.time(), "step": "start", "busy": None}   # Lead 07:53: loop progress for the beat thread
 
 
-def sh(*a, timeout=120, env=None):
-    """every network call goes through here. Lead 07:53 (8 min stall): subprocess.run's timeout kills only the child;
+def _sh(*a, timeout=120, env=None):
+    """every network call goes through here (via sh() below). Lead 07:53 (8 min stall): subprocess.run's timeout kills only the child;
     a killed git can leave its helper (git-remote-https) running. So the call runs in its own process group and the
     WHOLE group is killed at the timeout; the call returns at most 5 s after it. A call over 20 s is logged by name."""
     import signal
@@ -79,6 +79,80 @@ def sh(*a, timeout=120, env=None):
             PROG["t"], PROG["busy"] = time.time(), None
 
 
+# Lead 09:38 RUN-TOKEN-EMPTY (closer): READ_TOKEN (the run token) has one hourly limit per REPOSITORY, shared by every
+# fork run. At 09:27 UTC it was at 0, every closed-PR read failed and the closer pushed a BLIND stop (1795771628).
+# Now: while the run token's remaining is under RT_LOW (beat's rate_limit read) or after a read it answered with its
+# PRIMARY rate limit (403/429 "rate limit", not "secondary"), every read goes to PR_TOKEN until the run token's reset;
+# alert ref RUN-TOKEN-EMPTY at most once per RT_ALERT_S. A read PR_TOKEN cannot do either fails as before, so the
+# blind stop stays for the case where BOTH tokens cannot read. RUNTOKEN_FALLBACK=0 turns it off.
+RT = {"until": 0.0, "alert_t": 0.0, "why": "", "n": 0}
+RT_LOW, RT_ALERT_S = 200, 300
+RT_RL_RX = re.compile(r"API rate limit exceeded|(?:HTTP\s*)?(?:403|429)\b.*rate limit|rate limit.*(?:HTTP\s*)?(?:403|429)\b"
+                      r"|HTTP 429\b", re.I)
+
+
+def rt_fallback_on():
+    return bool(TOK and RTOK and RTOK != TOK and os.environ.get("RUNTOKEN_FALLBACK", "1") != "0")
+
+
+def rt_empty(now=None):
+    return rt_fallback_on() and (time.time() if now is None else now) < RT["until"]
+
+
+def rt_primary_rl(r):
+    """the call was refused for a PRIMARY rate limit (gh api: 'API rate limit exceeded ... (HTTP 403)', or a 429)"""
+    t = (r.stderr or "") + "\n" + (r.stdout or "")[:2000]
+    return r.returncode != 0 and "secondary" not in t.lower() and bool(RT_RL_RX.search(t))
+
+
+def rt_mark(why, reset=None, now=None):
+    """run token empty or low: reads go to PR_TOKEN until its reset (unknown reset: 10 min); alert once per 5 min"""
+    now = time.time() if now is None else now
+    if reset is None:
+        q = _sh("gh", "api", "rate_limit", "--jq", ".resources.core.reset", env=rtenv(), timeout=20)
+        try:
+            reset = float(q.stdout.strip())
+        except ValueError:
+            reset = now + 600
+    if reset <= now:
+        reset = now + 60
+    new = now >= RT["until"]
+    RT.update(until=max(RT["until"], reset), why=why)
+    RT["n"] += 1
+    if new:
+        log(f"RUN-TOKEN-EMPTY {why}: reads go to PR_TOKEN until {time.strftime('%H:%M:%S', time.gmtime(RT['until']))} UTC")
+    if now - RT["alert_t"] >= RT_ALERT_S and not DRY:
+        RT["alert_t"] = now
+        alert_ref(f"RUN-TOKEN-EMPTY {why} until={int(RT['until'])}", "runtokenempty")
+
+
+def rt_rl(remaining, reset, now=None):
+    """the beat's rate_limit read of the run token: under RT_LOW -> PR_TOKEN until its reset"""
+    if not rt_fallback_on():
+        return
+    try:
+        rem, rs = int(remaining), float(reset)
+    except (TypeError, ValueError):
+        return
+    if rem < RT_LOW:
+        rt_mark(f"rl={rem}", rs, now)
+
+
+def sh(*a, timeout=120, env=None):
+    """_sh, plus RUN-TOKEN-EMPTY: a gh read with the run token refused for its primary rate limit is sent again once
+    with PR_TOKEN (and rt_mark sends the next reads there directly, through rdenv())."""
+    r = _sh(*a, timeout=timeout, env=env)
+    if (a and a[0] == "gh" and r.returncode and env is not None and env.get("GH_TOKEN") == RTOK and rt_fallback_on()
+            and rt_primary_rl(r)):
+        rt_mark("refused: " + (r.stderr or "").strip()[-80:])
+        r = _sh(*a, timeout=timeout, env=ghenv())
+    return r
+
+
+def rtenv():
+    return dict(os.environ, GH_TOKEN=RTOK) if RTOK else None
+
+
 def auth():
     return ["-c", "http.https://github.com/.extraheader=AUTHORIZATION: basic "
             + base64.b64encode(f"x-access-token:{TOK}".encode()).decode()] if TOK else []
@@ -89,6 +163,9 @@ def ghenv():
 
 
 def rdenv():
+    """reads: the run token, or PR_TOKEN while the run token is empty (RUN-TOKEN-EMPTY)"""
+    if rt_empty():
+        return ghenv()
     return dict(os.environ, GH_TOKEN=RTOK) if RTOK else None
 
 
@@ -547,7 +624,7 @@ def beat_msg(now=None):
             f"{SPLIT['txt']} br={BR['deleted']}/{len(BR['cand'])}/{BR['kept']} badref={BADREF.get('n', '-')} "
             f"taken_age={'-' if TKST['age'] is None else int(TKST['age'])}{'p' if TKST.get('partial') else ''} "
             f"pages={OPEN.get('pages', '-')} openlist={OPEN.get('src', '-')} rej10={REJ.get('n', '-')} "
-            f"rl={HB.get('rl', '?')} rl_pr={HB.get('rlp', '?')} tok={'read' if os.environ.get('READ_TOKEN') else 'pr'} "
+            f"rl={HB.get('rl', '?')} rl_pr={HB.get('rlp', '?')} tok={('pr-rt' if rt_empty() else 'read') if os.environ.get('READ_TOKEN') else 'pr'} "
             f"run={os.environ.get('GITHUB_RUN_ID', '-')}")
 
 
@@ -558,7 +635,10 @@ def beat_once(push=None):
         sh("git", "init", "-q", "--bare", g, timeout=30)
     if time.time() - HB.get("rl_t", 0) >= 120:        # rate_limit calls are free; read every 2 min, not every beat
         HB["rl_t"] = time.time()
-        HB["rl"] = sh("gh", "api", "rate_limit", "--jq", ".resources.core.remaining", env=rdenv(), timeout=20).stdout.strip() or "?"
+        q = sh("gh", "api", "rate_limit", "--jq", r'"\(.resources.core.remaining) \(.resources.core.reset)"', env=rtenv(),
+               timeout=20).stdout.split()
+        HB["rl"] = q[0] if q else "?"
+        rt_rl(q[0] if q else None, q[1] if len(q) > 1 else None)       # RUN-TOKEN-EMPTY: under RT_LOW -> PR_TOKEN
         HB["rlp"] = sh("gh", "api", "rate_limit", "--jq", r'"\(.resources.core.remaining)/\(.resources.core.reset)"',
                        env=ghenv(), timeout=20).stdout.strip() or "?"
     msg = beat_msg()
