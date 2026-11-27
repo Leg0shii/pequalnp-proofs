@@ -575,11 +575,35 @@ _PZ = [0.0, 0.0]          # (checked at, paused until)
 _FH = [0.0, False, ""]    # Lead 05:10: (checked at, halted, why) of the toolkit filing/stop vs filing/go refs
 
 
+HOLD = [0.0]              # RC-c (Lead 10:13): epoch the warm job began to hold through a halt (0 = not holding)
+HOLD_READ_S = float(os.environ.get("WARM_HOLD_READ_S", "2"))
+HALT_COPY_S = float(os.environ.get("WARM_HALT_COPY_S", "3"))
+
+
+def _halt_copy():
+    """the refresher's halt copy W/halt.json (submit.py filing_halted, same rule 16.1, stamped at read START) when it
+    is at most HALT_COPY_S old, else None: a holding warm job reads the halt state from it (no read of its own)"""
+    try:
+        h = json.load(open(os.path.join(W, "halt.json")))
+        if 0 <= time.time() - float(h["t"]) <= HALT_COPY_S:
+            return bool(h["halted"]), str(h.get("why") or "")
+    except Exception:
+        pass
+    return None
+
+
 def halted():
     """rule 16.1 (haltrule.verdict): newest filing/stop/<n> >= newest filing/go/<n> = halted (a tie too), a stop name
     that is not plain digits = halted, a go name that is not plain digits is ignored, unreadable = halted. Read at
-    most every 10 s here (new branches only); every PR create re-checks within 2 s (submit.py filing_halted)."""
-    if time.time() - _FH[0] > 10:
+    most every 10 s here (new branches only); every PR create re-checks within 2 s (submit.py filing_halted).
+    While a warm job holds through a halt (HOLD): the refresher's copy when fresh, else an own read every 2 s, so the
+    first unit after the go STARTs within seconds."""
+    if HOLD[0]:
+        c = _halt_copy()
+        if c is not None:
+            _FH[:] = [time.time(), c[0], c[1] or _FH[2]]
+            return _FH[1]
+    if time.time() - _FH[0] > (HOLD_READ_S if HOLD[0] else 10):
         for k in range(3):                    # live test 05:13: the toolkit needs auth; 3 tries 2 s apart
             r = sh("git", *auth(), "ls-remote", "https://github.com/Leg0shii/pnp-toolkit.git", "refs/heads/filing/*", timeout=60)
             if r.returncode == 0:
@@ -618,8 +642,11 @@ def main():
         log("shared desk pause until", time.strftime("%H:%M:%S", time.gmtime(_PZ[1])), "UTC: drain does nothing")
         return
     if halted():                 # Lead 05:10: one rejection halts all filing until the Lead's filing/go
-        log("halted: drain files nothing,", _FH[2])
-        return
+        if not wd.active():
+            log("halted: drain files nothing,", _FH[2])
+            return
+        HOLD[0] = time.time()    # RC-c (Lead 10:13): a warm job started during a halt holds and resumes on the go
+        log("HALT-HOLD at start: warm job stays up, files nothing until filing/go,", _FH[2])
     # Lead 05:50 (signed): the credit line from config/linkedin.txt in the toolkit when neither the secret nor the
     # variable gives one; read ONCE per drain, passed to every submit child; a failure means no line. Never logged.
     if not os.environ.get("PNP_LINKEDIN", "").strip():
@@ -995,9 +1022,18 @@ def _loop(inflight, idle):
                     log("PR-STALL-GIVEUP: drain ends, remaining units stay for the next drain or the PC")
                     break
             elif halted():
-                log("halted: no new branch, in-flight ones stop before their PR,", _FH[2]); todo = []
-                if not inflight:
-                    break
+                todo = []
+                if wd.active():                 # RC-c (Lead 10:13): the warm job holds through a halt (no new unit,
+                    if not HOLD[0]:             # in-flight ones stop before their PR) and resumes on the go; nothing
+                        HOLD[0] = time.time()   # has to dispatch it again after a lift
+                        log("HALT-HOLD warm job stays up through the halt: no new branch, in-flight ones stop before "
+                            "their PR, waiting for filing/go,", _FH[2])
+                    if wd.handover_now() and not inflight:   # a hotfix during the halt: the next job holds the same way
+                        break
+                else:
+                    log("halted: no new branch, in-flight ones stop before their PR,", _FH[2])
+                    if not inflight:
+                        break
             elif paused():
                 log("shared desk pause started: no new branch, in-flight ones finish"); todo = []
                 if not inflight:
@@ -1013,6 +1049,9 @@ def _loop(inflight, idle):
             else:
                 _SITE["logged"] = False
                 todo = [x for x in pending() if x not in inflight] if len(inflight) < WORKERS else []
+            if HOLD[0] and not _FH[1]:
+                log(f"HALT-LIFT filing/go seen after {time.time() - HOLD[0]:.0f} s of hold: the warm job files again")
+                HOLD[0] = 0.0
             for x in todo[:WORKERS - len(inflight)]:
                 inflight[x] = ex.submit(work, *x)
                 log("START", x[0], x[1][:8], f"({len(todo)} pending)")
