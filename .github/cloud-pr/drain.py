@@ -22,6 +22,13 @@ WORKERS = int(os.environ.get("DRAIN_WORKERS", "14"))   # Lead 17:17: 14 workers 
 MAX_S = float(os.environ.get("DRAIN_MAX_S", "1200")); LINGER = float(os.environ.get("DRAIN_LINGER", "30"))
 UPSTREAM = os.environ.get("DRAIN_UPSTREAM", "https://github.com/open-goat/pequalnp-proofs.git")
 DRY = os.environ.get("DRAIN_DRY", "0") == "1"       # test: everything but submit.py (prints what it would run)
+# Lead 06:30 LIVE DRY LOAD CANARY (loadcanary.yml): DRAIN_PREFIX=loadtest drains refs loadtest/<ID> with every submit.py
+# in DRY mode (guards, race check, no claim, no push, no PR) and keeps its own state branch. Only "ready" ever files.
+PREFIX = os.environ.get("DRAIN_PREFIX", "ready")
+if not re.fullmatch(r"ready|loadtest", PREFIX):
+    sys.exit(f"DRAIN_PREFIX {PREFIX!r}: only ready or loadtest")
+CHILD_DRY = "0" if PREFIX == "ready" else "1"
+STATE_REF = "drain-state" if PREFIX == "ready" else f"drain-state-{PREFIX}"
 T0 = time.time()
 LOCK = threading.Lock(); FETCH = threading.Lock()
 SEEN = {}            # (step, sha) -> (result, epoch)
@@ -64,7 +71,7 @@ def linkedin_file():
 
 
 def load_seen():
-    if sh("git", "-C", SRC, "fetch", "-q", "--depth", "1", URL, "+refs/heads/drain-state:refs/drain/state").returncode:
+    if sh("git", "-C", SRC, "fetch", "-q", "--depth", "1", URL, f"+refs/heads/{STATE_REF}:refs/drain/state").returncode:
         return
     for l in sh("git", "-C", SRC, "show", "refs/drain/state:seen.txt").stdout.splitlines():
         p = l.split()
@@ -88,7 +95,7 @@ def save_seen():
                GIT_COMMITTER_EMAIL="46093332+Leg0shii@users.noreply.github.com")
     c = sh("git", "-C", SRC, "commit-tree", tree, "-m", f"drain state {len(SEEN)}", env=env).stdout.strip()
     if c and not DRY:
-        sh("git", *auth(), "-C", SRC, "push", "-q", "-f", URL, f"{c}:refs/heads/drain-state", timeout=120)
+        sh("git", *auth(), "-C", SRC, "push", "-q", "-f", URL, f"{c}:refs/heads/{STATE_REF}", timeout=120)
 
 
 RETRYABLE = ("failed", "submitfail", "error")     # W6 mintfail: a child that died or failed half way is tried again
@@ -113,11 +120,11 @@ def retry_due(v):
 
 
 def pending():
-    r = sh("git", "ls-remote", URL, "refs/heads/ready/*", timeout=60)
+    r = sh("git", "ls-remote", URL, f"refs/heads/{PREFIX}/*", timeout=60)
     out = []
     for l in r.stdout.splitlines():
         sha, ref = l.split()
-        sid = ref[len("refs/heads/ready/"):]
+        sid = ref[len(f"refs/heads/{PREFIX}/"):]
         if re.fullmatch(r"L-[a-z0-9]+(-[a-z0-9]+)*", sid) and retry_due(SEEN.get((sid, sha))):
             out.append((sid, sha))
     def num(s):
@@ -129,7 +136,8 @@ def pending():
 T_ONE = {}
 
 
-def one(sid, sha, prefix="ready", extra=None):
+def one(sid, sha, prefix=None, extra=None):
+    prefix = prefix or PREFIX
     T_ONE[sid] = time.time()
     d = tempfile.mkdtemp(prefix=sid + "-", dir=W)
     lref = f"refs/drain/{sid}"
@@ -161,7 +169,7 @@ def one(sid, sha, prefix="ready", extra=None):
         return "error", "upstream checkout failed"
     os.makedirs(os.path.join(tree, "lean", "PEqualNP", "Outside"), exist_ok=True)
     outp = os.path.join(d, "out")
-    env = dict(os.environ, ID=sid, MOD=mod, PROOF=proof, TREE=tree, W=d, DRY="0", GITHUB_REF_NAME=f"{prefix}/{sid}",
+    env = dict(os.environ, ID=sid, MOD=mod, PROOF=proof, TREE=tree, W=d, DRY=CHILD_DRY, GITHUB_REF_NAME=f"{prefix}/{sid}",
                GITHUB_OUTPUT=outp, PR_GATE_DIR=W, PR_GATE_N=str(PR_SLOTS), READY_MSG=msg, RIVAL_SNAP_DIR=W)
     env.update(extra or {})
     if DRY:
