@@ -254,9 +254,40 @@ def _gate(req, gid, wait):
     return None
 
 
+_CL1 = []
+
+
 def claim_list():
     """lane leases L1/N1/N2: (ids, ok, why) from the drain reader's shared copy (claimallow.read_copy); a local file
-    read, no network, no wait. ok false = the list is not confirmed now; ids are then the last good list."""
+    read, no network, no wait. ok false = the list is not confirmed now; ids are then the last good list.
+    Red team V3: a single run outside a drain (workflow_dispatch submit: no RIVAL_SNAP_DIR, so no reader) makes ONE
+    read of its own, through the same claimallow.Reader, before its first answer."""
+    if not os.environ.get("RIVAL_SNAP_DIR") and PR_TOKEN and not _CL1 and \
+            not os.path.exists(os.path.join(SNAP_DIR, claimallow.FILE)):
+        _CL1.append(1)
+        try:
+            g = dg().REPO
+
+            def ls():
+                r = run(["git", "-C", g, "ls-remote", "origin", claimallow.PREFIX + "*"], timeout=20)
+                return r.stdout if r.returncode == 0 else None
+
+            def fetch(n):
+                return run(["git", "-C", g, "fetch", "-q", "--depth=1", "origin",
+                            f"+{claimallow.PREFIX}{n}:refs/claim-allow"], timeout=30).returncode == 0
+
+            def show():
+                r = run(["git", "-C", g, "log", "-1", "--format=%H%n%ct%n%B", "refs/claim-allow"], timeout=10)
+                if r.returncode:
+                    raise RuntimeError("log failed")
+                sha, ct, msg = r.stdout.split("\n", 2)
+                return sha.strip(), int(ct), msg
+            os.makedirs(SNAP_DIR, exist_ok=True)
+            c = claimallow.Reader(SNAP_DIR, ls, fetch, show).refresh()
+            log("claim list (single run, own read):", c["why"], "ok" if c["ok"] else "NOT CONFIRMED")
+        except Exception as e:
+            log("claim list (single run) read error:", repr(e)[:80])
+            return set(), False, "single-run claim list read failed"
     return claimallow.read_copy(SNAP_DIR)
 
 

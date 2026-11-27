@@ -13,6 +13,7 @@
 #       above every number seen turns it on again
 #   K10 N3: a ref with a far-future NUMBER is beaten by the writer's next "off" (haltrule.next_ref_epoch numbering)
 #   K11 N2: submit.claim_list() makes no git call at all; no copy (no reader) = no list
+#   K13 V3: a single run outside a drain (no RIVAL_SNAP_DIR) makes ONE read of its own, then reads only its copy
 # Prints one line per case and "CLAIMLIST SELFTEST OK <n>" or "CLAIMLIST SELFTEST FAIL <cases>". Exit 0 iff OK.
 import json, os, subprocess, sys, tempfile, time
 
@@ -163,6 +164,26 @@ k = calls()
 os.remove(f)
 ids, ok, why = S.claim_list()
 case("K11-unit-read-is-local", k == {"ls-remote": 0, "fetch": 0} and ids == set() and ok and "no claim list copy" in why, (k, why))
+# K13 V3: single run (workflow_dispatch submit), no drain reader
+git("-C", WT, "commit", "-q", "--allow-empty", "-m", "CLAIM-ALLOW v1 L-meta-12")
+git("-C", WT, "push", "-q", TK, "HEAD:refs/heads/claimallow/9000000002")
+LOCAL = tempfile.mkdtemp()
+git("init", "-q", "--bare", LOCAL)
+git("-C", LOCAL, "remote", "add", "origin", TK)
+
+
+class DG:
+    REPO = LOCAL
+
+
+S.dg = lambda: DG()
+SR = [0]
+_run = S.run
+S.run = lambda a, **k: (SR.__setitem__(0, SR[0] + ("ls-remote" in a)), _run(a, **k))[1]
+os.environ.pop("RIVAL_SNAP_DIR")
+ids1, ok1, why1 = S.claim_list()
+ids2, ok2, why2 = S.claim_list()
+case("K13-single-run-own-read-once", ids1 == {"L-meta-12"} and ok1 and ids2 == ids1 and SR[0] == 1, (sorted(ids1), why1, SR[0]))
 pure = C.newest("%s\trefs/heads/claimallow/30\n%s\trefs/heads/claimallow/200\n%s\trefs/heads/claim/allow-900\n%s\trefs/heads/claimallow/7\n"
                 % ("a" * 40, "b" * 40, "d" * 40, "c" * 40))
 case("K12-newest-pure-ignores-other-prefixes", pure == ("b" * 40, 200), pure)
