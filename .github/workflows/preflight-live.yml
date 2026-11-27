@@ -16,7 +16,7 @@ on:
   schedule:
     - cron: '17 4 * * *'
   push:
-    branches: ['main', 'gateway-*', 'claude/**']
+    branches: ['main', 'gateway-*']      # not claude/** (Lead 09:36 read budget: 29 runs an hour; lane PRs get it via lane-ci)
     paths: ['.github/workflows/**', '.github/cloud-pr/**']
 permissions:
   contents: read
@@ -29,6 +29,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - name: Run-token floor (Lead 09:41, exit before any read)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          read left reset < <(gh api rate_limit --jq '.resources.core|"\(.remaining) \(.reset)"' 2>/dev/null || echo "0 0")
+          echo "RL start ${left} left, reset $(date -u -d @${reset:-0} +%H:%M) UTC"
+          [ "${left:-0}" -ge 2500 ] || { echo "::error::run token left ${left} < 2500 (Lead floor): exit before any read"; exit 1; }
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref }}
@@ -49,12 +56,22 @@ jobs:
         run: python3 -I .github/cloud-pr/qdelay.py run | tee qd.txt
       - name: Summary
         if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          echo "RL end $(gh api rate_limit --jq '.resources.core|"\(.remaining) left, reset \(.reset | strftime("%H:%M")) UTC"' 2>/dev/null || echo '?')"
           { echo '### secretcheck'; echo '```'; cat static.txt live.txt qd.txt 2>/dev/null | grep -v '^info'; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
   fakedrift:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Run-token floor (Lead 09:41, exit before any read)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          read left reset < <(gh api rate_limit --jq '.resources.core|"\(.remaining) \(.reset)"' 2>/dev/null || echo "0 0")
+          echo "RL start ${left} left, reset $(date -u -d @${reset:-0} +%H:%M) UTC"
+          [ "${left:-0}" -ge 2500 ] || { echo "::error::run token left ${left} < 2500 (Lead floor): exit before any read"; exit 1; }
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref }}
@@ -80,5 +97,8 @@ jobs:
         run: python3 -I .github/cloud-pr/qdelay.py run
       - name: Summary
         if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          echo "RL end $(gh api rate_limit --jq '.resources.core|"\(.remaining) left, reset \(.reset | strftime("%H:%M")) UTC"' 2>/dev/null || echo '?')"
           { echo '### fakedrift'; echo '```'; grep -v '^info' drift.txt 2>/dev/null; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

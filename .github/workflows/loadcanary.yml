@@ -47,9 +47,10 @@ permissions:
 # W8 (Lead 08:36): one group PER BRANCH, so lanes and the rehearsal run side by side. A DRY drain only reads the
 # loadtest/* units (no claim, no push, no delete), so parallel runs cannot take each other's units; non-drill runs skip
 # the rehearsal's L-drill-* units (DRAIN_MATCH below).
-# READ BUDGET (Lead 09:29): ONE canary at a time in the whole fork, first come first served, and none starts while the
-# run token (the repo's pool, shared with the wave drain's refresher) has under 1,000 left. Step "Canary slot": waits
-# while any older lane-ci or loadcanary run (created under 70 min ago) is not completed; rate_limit (free) first, then
+# READ BUDGET (Lead 09:29, 09:36): ONE canary at a time in the whole fork, first come first served, and none starts while
+# the run token (the repo's pool, 5000 an hour, shared with the live closer and the wave drain) has under 2,500 left.
+# Step "Canary slot": waits while any older lane-ci, loadcanary (rehearsals included), warmcanary or pushcanary run
+# (created under 70 min ago) is not completed; rate_limit (free) first, then
 # one runs listing per 60 s. 30 min without a slot: FAIL, nothing read. Exempt (no wait, no floor): branch names
 # loadcanary/<x>-prio-w<N>... (the frozen-head canary and Canary C; infra names them).
 concurrency:
@@ -78,7 +79,7 @@ jobs:
             echo "::error::wave is ON (wave/on-$on newer than wave/off-${off:-none}): no canary until the Lead says WAVE OFF"; exit 1
           fi
           echo "wave off (on-${on:-none} off-${off:-none}): go"
-      - name: Canary slot (one at a time in the fork, run token >= 1000 left; Lead 09:29)
+      - name: Canary slot (one at a time in the fork, run token >= 2500 left; Lead 09:29, 09:36)
         env:
           GH_TOKEN: ${{ github.token }}
           R: ${{ github.repository }}
@@ -91,11 +92,13 @@ jobs:
           t0=$(date +%s)
           while :; do
             read left reset < <(lim); why=""
-            if [ "${left:-0}" -lt 1000 ]; then why="run token left $left < 1000 (reset $(date -u -d @$reset +%H:%M) UTC)"
+            echo "RL $(date -u +%T) ${left} left, reset $(date -u -d @${reset:-0} +%H:%M) UTC"
+            if [ "${left:-0}" -lt 2500 ]; then   # Lead 09:41: under the floor = exit before any (further) read
+              echo "::error::run token left $left < 2500 (Lead floor): canary not started"; exit 1
             else
-              why=$(gh api "repos/$R/actions/runs?per_page=40" --jq '.workflow_runs[] | select((.name=="lane-ci" or .name=="loadcanary")
+              why=$(gh api "repos/$R/actions/runs?per_page=40" --jq '.workflow_runs[] | select((.name=="lane-ci" or .name=="loadcanary" or .name=="warmcanary" or .name=="pushcanary")
                     and .status!="completed" and .id!=($ENV.ME|tonumber) and .created_at < $ENV.MINE and .created_at > $ENV.CUT)
-                    | "\(.name) \(.id) \(.status)"' 2>&1 | head -3 | paste -sd';' -)
+                    | "\(.name) \(.id) \(.status)"' 2>&1 | head -3 | paste -sd';' - || true)
             fi
             [ -z "$why" ] && { echo "slot free after $(( $(date +%s) - t0 )) s, run token left $left"; exit 0; }
             [ $(( $(date +%s) - t0 )) -ge 1800 ] && { echo "::error::no canary slot in 30 min ($why): not started, re-run later"; exit 1; }
@@ -239,6 +242,7 @@ jobs:
                  --warm "$warm" --run "$GITHUB_RUN_ID" --reads-run "$rb,$ra" --reads-pr "$pb,$pa" --left "$ra" --reset "$rst") ; rc=$?
           [ -n "$line" ] || line="LANE-CI $(echo $sha | cut -c1-8) head=$(echo $HEAD_SHA | cut -c1-8) verdict=BAD (no drain.log or summary error)"
           echo "$line"; echo "$line" > canary.txt
+          echo "RL end ${ra:-?} left, reset ${rst} UTC"
           echo "line=$line" >> "$GITHUB_OUTPUT"
           { echo '### LANE-CI'; echo '```'; echo "$line"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           exit 0
