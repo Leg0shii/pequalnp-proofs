@@ -680,7 +680,7 @@ def cases():
                 {"must_close": [], "stop_count": 1, "halted": False}))
     # B9 partial failures. B9a: gh pr close times out AFTER the close happened (our own duplicate, CI comment) -> no halt
     d1, d2 = our_pr(50300, "L-meta-93300", created=-200), our_pr(50301, "L-meta-93300", created=-100)
-    d2["comments"] = [{"body": "CI: build started", "user": {"login": "ci-bot"}, "created_at": iso(T0 + 5)}]
+    d2["comments"] = [{"body": "CI: build started", "user": {"login": "ci-bot"}, "created_at": iso(T0 - 50)}]
     out.append(("hostile/B9a", "close", {"open_pulls": [d1, d2], "close_timeout": [50301], "passes": [0, 20, 60, 120]},
                 {"must_close": [50301], "must_keep": [50300], "no_push": True}))
     # B9b: the stop push lands but answers an error -> next pass sees the stop names the PR: exactly one stop, halted
