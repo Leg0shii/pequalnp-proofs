@@ -765,11 +765,32 @@ def finish(result, why, url=None):
     sys.exit(1 if result in ("submitfail", "formatfail", "error", "stopped") else 0)
 
 
+def filing_halted():
+    """Lead 05:10 HALT ON ONE REJECTION: (halted, why). Halted when the newest toolkit filing/stop/<epoch> is newer
+    than the newest filing/go/<epoch>; fail closed when the refs cannot be read. FILING_FIXTURE = ls-remote text."""
+    if os.environ.get("FILING_FIXTURE") is not None:
+        txt, rc = os.environ["FILING_FIXTURE"], 0
+    else:
+        r = run(["git", "ls-remote", TK_URL, "refs/heads/filing/*"], timeout=60)
+        txt, rc = r.stdout, r.returncode
+    if rc:
+        return True, "filing refs unreadable (fail closed)"
+    ep = lambda k: max([int(x) for x in re.findall(r"/filing/%s/(\d+)$" % k, txt, re.M)] or [0])
+    st, go = ep("stop"), ep("go")
+    if st > go:
+        return True, f"filing halted: filing/stop/{st} newer than filing/go/{go or '-'}"
+    return False, ""
+
+
 T_START = time.time()
 
 
 def main():
     t0 = time.time()
+    h, hwhy = filing_halted()             # Lead 05:10: before anything else (no guards, no desk, no PR); branch kept
+    if h:
+        log("halted:", ID, hwhy)
+        finish("halted", hwhy)
     if not re.fullmatch(r"L-[a-z0-9]+(-[a-z0-9]+)*", ID) or len(ID) > 64:
         finish("error", f"bad step id {ID!r}")
     if not (MOD == ID.replace("-", "_") or re.fullmatch(r"V%s__k\d+" % re.escape(ID.replace("-", "_")[1:]), MOD)):
@@ -852,6 +873,11 @@ def main():
     if late:
         lease = None
     LEASE[0] = lease
+    h, hwhy = filing_halted()             # Lead 05:10: again right before the PR (a stop may have come meanwhile)
+    if h and not DRY:
+        free_slot()
+        log("halted:", ID, hwhy, "(before the PR)")
+        finish("halted", hwhy + (f"; lease {lease} kept on claim/{ID}" if lease else ""))
     url, why2 = submit(ID, lease)
     if late and url and url != "dry-run":
         # late lease (Lead 13:37 probe): one claim through deskguard now that the PR is open; on a grant the PR body

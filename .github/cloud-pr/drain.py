@@ -127,7 +127,7 @@ def one(sid, sha, prefix="ready", extra=None):
     # Lead 19:14: the per-stage seconds of every unit in the drain log (prep = fetch of the ready commit + upstream
     # checkout before submit.py starts)
     for l in (r.stdout or "").splitlines():
-        if " TIMES " in l or " gate: " in l or " SKIP " in l:
+        if " TIMES " in l or " gate: " in l or " SKIP " in l or " halted: " in l:
             log(sid, l.strip()[:200], f"prep={t_sub - T_ONE.get(sid, t_sub):.1f}" if " TIMES " in l else "")
     res = dict(l.split("=", 1) for l in open(outp).read().splitlines() if "=" in l) if os.path.exists(outp) else {}
     tail = (r.stdout + r.stderr).strip().splitlines()[-1:] or [""]
@@ -148,7 +148,7 @@ def work(sid, sha):
     except Exception as e:
         res, why = "error", repr(e)[:200]
     with LOCK:
-        if res != "paused" and not (res == "unleased" and "desk off or paused" in why):
+        if res not in ("paused", "halted") and not (res == "unleased" and "desk off or paused" in why):
             SEEN[(sid, sha)] = (res, time.time())          # paused ones run again after the pause
         STATS[res] = STATS.get(res, 0) + 1
         try:
@@ -160,6 +160,20 @@ def work(sid, sha):
 
 
 _PZ = [0.0, 0.0]          # (checked at, paused until)
+_FH = [0.0, False, ""]    # Lead 05:10: (checked at, halted, why) of the toolkit filing/stop vs filing/go refs
+
+
+def halted():
+    """newest filing/stop/<epoch> newer than the newest filing/go/<epoch> = halted; unreadable = halted (fail
+    closed). Read at most every 10 s."""
+    if time.time() - _FH[0] > 10:
+        r = sh("git", "ls-remote", "https://github.com/Leg0shii/pnp-toolkit.git", "refs/heads/filing/*", timeout=60)
+        ep = lambda k: max([int(x) for x in re.findall(r"/filing/%s/(\d+)$" % k, r.stdout, re.M)] or [0])
+        if r.returncode:
+            _FH[:] = [time.time(), True, "filing refs unreadable (fail closed)"]
+        else:
+            _FH[:] = [time.time(), ep("stop") > ep("go"), f"filing/stop/{ep('stop')} newer than filing/go/{ep('go') or '-'}"]
+    return _FH[1]
 
 
 def paused():
@@ -185,6 +199,9 @@ def main():
     if paused():                 # Lead 15:58: while the desk pause runs, the drain touches nothing (branches stay queued)
         log("shared desk pause until", time.strftime("%H:%M:%S", time.gmtime(_PZ[1])), "UTC: drain does nothing")
         return
+    if halted():                 # Lead 05:10: one rejection halts all filing until the Lead's filing/go
+        log("halted: drain files nothing,", _FH[2])
+        return
     load_seen()
     log("drain start,", len(SEEN), "branches already done in the last 6 h")
     inflight = {}; idle = None
@@ -192,7 +209,11 @@ def main():
         while time.time() - T0 < MAX_S:
             for k in [k for k, fu in inflight.items() if fu.done()]:
                 inflight.pop(k)
-            if paused():
+            if halted():
+                log("halted: no new branch, in-flight ones stop before their PR,", _FH[2]); todo = []
+                if not inflight:
+                    break
+            elif paused():
                 log("shared desk pause started: no new branch, in-flight ones finish"); todo = []
                 if not inflight:
                     break

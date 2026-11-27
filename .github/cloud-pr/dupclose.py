@@ -24,6 +24,7 @@ CMT = {}          # PR number -> comments (read once)
 FIRST = []
 REJ = {"t": 0.0, "alerted": 0.0}
 REJ_EVERY, REJ_WIN, REJ_MIN = 60, 600, 3      # Lead 18:42: REJ-BURST n at 3 or more in 10 min, once per 10 min
+HALTED = set()     # Lead 05:10: PRs that already pushed a filing/stop ref
 
 
 def log(*a):
@@ -241,6 +242,27 @@ def rival_lower(gid, num):
         return False
 
 
+def filing_go():
+    """epoch of the newest toolkit filing/go/<epoch> (0 if none or unreadable)."""
+    if os.environ.get("FIXTURE_FILING") is not None:
+        txt = os.environ["FIXTURE_FILING"]
+    else:
+        txt = sh("git", *auth(), "ls-remote", TK, "refs/heads/filing/go/*", timeout=60).stdout
+    return max([int(x) for x in re.findall(r"/filing/go/(\d+)$", txt, re.M)] or [0])
+
+
+def filing_stop(msg):
+    """push toolkit ref filing/stop/<epoch> (the opener files nothing while it is newer than every filing/go)."""
+    g = os.path.join(W, "taken.git")
+    if not os.path.isdir(g):
+        sh("git", "init", "-q", "--bare", g)
+    tree = subprocess.run(["git", "-C", g, "mktree"], input="", capture_output=True, text=True).stdout.strip()
+    env = dict(os.environ, GIT_AUTHOR_NAME="dupclose", GIT_AUTHOR_EMAIL="dupclose@localhost",
+               GIT_COMMITTER_NAME="dupclose", GIT_COMMITTER_EMAIL="dupclose@localhost")
+    c = subprocess.run(["git", "-C", g, "commit-tree", tree, "-m", msg], capture_output=True, text=True, env=env).stdout.strip()
+    return sh("git", *auth(), "-C", g, "push", "-q", TK, f"{c}:refs/heads/filing/stop/{int(time.time())}").returncode == 0
+
+
 def alert_ref(msg, kind):
     g = os.path.join(W, "taken.git")
     if not os.path.isdir(g):
@@ -324,6 +346,21 @@ def rej_burst():
             return 0
     n = sum(1 for p in prs if not p.get("mergedAt") and p.get("closedAt") and now - t(p["closedAt"]) <= REJ_WIN
             and any("proved first" in (c.get("body") or "").lower() for c in p.get("comments") or []))
+    # Lead 05:10 HALT ON ONE REJECTION: one of our PRs closed unmerged (not by dupclose) with a "proved first" comment
+    # or any comment by another login, closed after the newest filing/go ref -> filing/stop/<epoch> + REJ-HALT, once
+    go = filing_go()
+    hit = [p["number"] for p in prs if not p.get("mergedAt") and p.get("closedAt") and now - t(p["closedAt"]) <= REJ_WIN
+           and t(p["closedAt"]) > go and p["number"] not in HALTED
+           and any("proved first" in (c.get("body") or "").lower() or ((c.get("user") or {}).get("login") or HANDLE) != HANDLE
+                   for c in p.get("comments") or [])]
+    if hit:
+        HALTED.update(hit)
+        if not DRY:
+            ok = filing_stop(f"filing stop: REJ-HALT {len(hit)} {' '.join(map(str, hit[:20]))}")
+            alert_ref(f"REJ-HALT {len(hit)} {' '.join(map(str, hit[:10]))}", "rejhalt")
+            log("REJ-HALT", hit, "stop ref", "pushed" if ok else "PUSH FAILED")
+        else:
+            log("REJ-HALT (dry)", hit)
     REJ["n"] = n                                      # 20:10: rej10=<n> in the heartbeat (late-lease loop tripwire)
     if n >= REJ_MIN and now - REJ["alerted"] >= REJ_WIN:
         REJ["alerted"] = now
@@ -453,6 +490,36 @@ if __name__ == "__main__" and sys.argv[1:2] == ["selftest-merged"]:
     MERGED.clear(); fx[:] = [m("L-meta-1 and L-meta-2")]; REJ["t"] = 0; rej_burst(); d = not MERGED
     print("MERGED SELFTEST", "OK" if a and b and c and d else "FAIL", a, b, c, d)
     sys.exit(0 if a and b and c and d else 1)
+if __name__ == "__main__" and sys.argv[1:2] == ["selftest-halt"]:
+    # Lead 05:10 fixture: one "proved first" rejection -> one filing/stop push + REJ-HALT; the same PR again -> nothing;
+    # a close with only our own comment -> nothing; a rejection closed before the newest filing/go -> nothing
+    import tempfile as _tf
+    now_s = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    old_s = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 120))
+    pr = lambda n, body, who="checker", ca=now_s: {"number": n, "closedAt": ca, "mergedAt": None,
+                                                  "comments": [{"body": body, "user": {"login": who}}]}
+    pushes = []
+    real = sh
+    def fake(*a, **k):
+        if "push" in a:
+            pushes.append(a[-1]); return subprocess.CompletedProcess(a, 0, "", "")
+        return real(*a, **k)
+    sh = fake
+    DRY = False
+    def case(prs, go_epoch):
+        f = _tf.NamedTemporaryFile("w", suffix=".json", delete=False); json.dump(prs, f); f.close()
+        os.environ["FIXTURE_CLOSED"] = f.name
+        os.environ["FIXTURE_FILING"] = f"x\trefs/heads/filing/go/{go_epoch}\n" if go_epoch else ""
+        n0 = len(pushes); REJ["t"] = 0; rej_burst()
+        return [x for x in pushes[n0:]]
+    r1 = case([pr(101, "This step was proved first by #99")], 0)
+    a = sum("filing/stop/" in x for x in r1) == 1 and sum("alert/rejhalt-" in x for x in r1) == 1
+    b = case([pr(101, "This step was proved first by #99")], 0) == []
+    c = case([pr(102, "closing my duplicate", who=HANDLE)], 0) == []
+    d = case([pr(103, "any maker comment")], 0) != []
+    e = case([pr(104, "proved first", ca=old_s)], int(time.time()) - 30) == []
+    print("HALT SELFTEST", "OK" if all((a, b, c, d, e)) else "FAIL", a, b, c, d, e)
+    sys.exit(0 if all((a, b, c, d, e)) else 1)
 if __name__ == "__main__" and sys.argv[1:2] == ["measure"]:
     # Lead 19:30 item 2: one full sweep, print the split and what rule v2 would close; closes nothing
     sp, close2, exposed = exposure(open_prs())
