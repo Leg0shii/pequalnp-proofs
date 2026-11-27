@@ -20,7 +20,7 @@ Environment: ID, MOD (L_meta_N or V_meta_N__kK), PROOF (file), TREE (shallow clo
 READ_TOKEN (the run's GITHUB_TOKEN, for reads), PR_TOKEN (secret, for the push and the PR), DRY=1 (no claim, no
 push, no PR, no branch delete). Prints RESULT=<...> and writes result=<...> to $GITHUB_OUTPUT.
 """
-import base64, fcntl, json, os, re, shutil, subprocess, sys, tempfile, threading, time
+import base64, fcntl, json, os, re, subprocess, sys, tempfile, threading, time
 from concurrent.futures import ThreadPoolExecutor
 REAL_SLEEP = time.sleep      # 16.14 refresher heartbeat thread (tests patch time.sleep)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # drain runs submit.py with -I (no script dir on the path)
@@ -1274,61 +1274,6 @@ class pr_gate:
             self.f.close()
 
 
-def _base_index(base):
-    """lane tree-b (W6, Lead 08:29): ONE index of the upstream base tree per drain (read-tree once, by the first unit on
-    that base, under a lock in the shared SNAP_DIR), keyed by the base sha. Nobody writes it after it is renamed into
-    place; every unit works on its own copy. Returns the path, or None (the caller then reads the tree itself)."""
-    d = os.path.join(SNAP_DIR, "baseidx")
-    f = os.path.join(d, base + ".idx")
-    if os.path.exists(f):
-        return f
-    try:
-        os.makedirs(d, exist_ok=True)
-        with open(os.path.join(d, "lock"), "w") as lk:
-            fcntl.flock(lk, fcntl.LOCK_EX)
-            if os.path.exists(f):
-                return f
-            tmp = f"{f}.{os.getpid()}.tmp"
-            if git("read-tree", base, env=dict(os.environ, GIT_INDEX_FILE=tmp)).returncode:
-                return None
-            os.replace(tmp, f)
-            return f
-    except OSError as e:
-        log("base index:", str(e)[:80])
-        return None
-
-
-def build_tree(base, blob, rel):
-    """the tree of base plus one file. A private copy of the drain's base index (no shared mutable index), then
-    update-index --cacheinfo for the one path and write-tree --missing-ok: the upstream checkout is blobless
-    (--filter=blob:none), and a plain write-tree checks every blob of each directory it rewrites, which in a partial
-    clone FETCHES the 15,000 blobs of lean/PEqualNP/Outside from the promisor (7.9 s alone, 59.5 s p50 at w28). Every
-    entry comes from the base tree, which upstream holds, plus our blob, written just before: the check adds nothing.
-    Same tree sha as read-tree + write-tree (treeb_test.py). Returns (tree, '') or ('', why)."""
-    idx = os.path.join(W, "submit.idx")
-    env = dict(os.environ, GIT_INDEX_FILE=idx)
-    t = time.time()
-    src = _base_index(base)
-    STG["cm_base"] = round(time.time() - t, 3)
-    t = time.time()
-    try:
-        if not src:
-            raise OSError("no base index")
-        shutil.copyfile(src, idx)
-    except OSError:
-        if git("read-tree", base, env=env).returncode:
-            return "", "read-tree failed"
-    STG["cm_copy"] = round(time.time() - t, 3)
-    t = time.time()
-    if git("update-index", "--add", "--cacheinfo", f"100644,{blob},{rel}", env=env).returncode:
-        return "", "update-index failed"
-    STG["cm_upd"] = round(time.time() - t, 3)
-    t = time.time()
-    tree = git("write-tree", "--missing-ok", env=env).stdout.strip()
-    STG["cm_wt"] = round(time.time() - t, 3)
-    return (tree, "") if tree else ("", "write-tree failed")
-
-
 def submit(gid, lease):
     # Lead 06:12 (W6 mintfail): the head branch Leg0shii:<ID> is created once with a create-only push and never
     # forced. If it exists: our open PR on it = done; our closed PR on it = stop (nothing reopens, I5); neither = the
@@ -1351,27 +1296,24 @@ def submit(gid, lease):
         return None, "no upstream main"
     if git("cat-file", "-e", f"{base}:{REL}").returncode == 0:
         return None, "file already in upstream main"
+    idx = os.path.join(W, "submit.idx")
+    env = dict(os.environ, GIT_INDEX_FILE=idx)
     blob = git("hash-object", "-w", PROOF).stdout.strip()
-    tree, why = build_tree(base, blob, REL)
-    if not tree:
-        return None, why
-    t_d = time.time()
+    if git("read-tree", base, env=env).returncode:
+        return None, "read-tree failed"
+    git("update-index", "--add", "--cacheinfo", f"100644,{blob},{REL}", env=env)
+    tree = git("write-tree", env=env).stdout.strip()
     changed = git("diff-tree", "--name-only", "-r", base, tree).stdout.split()
-    STG["cm_diff"] = round(time.time() - t_d, 3)
     if changed != [REL]:
         return None, f"unexpected changed files {changed}"
     # rule 16.5 (2): a per-opener nonce, so two openers never build the same sha
     msg = gid + f"\n\nOpener-Nonce: cloud-{os.environ.get('GITHUB_RUN_ID', 'x')}-{os.urandom(6).hex()}" \
         "\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\n"
     cenv = dict(os.environ, GIT_AUTHOR_NAME=HANDLE, GIT_COMMITTER_NAME=HANDLE, GIT_AUTHOR_EMAIL=EMAIL, GIT_COMMITTER_EMAIL=EMAIL)
-    t_c = time.time()
     c = git("commit-tree", tree, "-p", base, "-m", msg, env=cenv).stdout.strip()
-    STG["cm_ct"] = round(time.time() - t_c, 3)
     if not c:
         return None, "commit-tree failed"
     STG["commit"] = round(time.time() - t_cm, 1)
-    log("COMMIT-STAGES " + " ".join(f"{k}={STG[k]}" for k in ("cm_base", "cm_copy", "cm_upd", "cm_wt", "cm_diff", "cm_ct")
-                                    if k in STG) + f" total={time.time() - t_cm:.3f}")
     if DRY:
         tw = time.time()                 # rehearsal (Lead 08:12): the would-create time per unit, epoch to 0.001 s
         log(f"WOULD-CREATE {gid} {tw:.3f}"); log(sight_line(gid, tw))
