@@ -286,6 +286,8 @@ case("16.7-wave-hour-opener-reads", builds >= 4400 and CNT["counted"] < 1000,
 os.environ.setdefault("SRC", "/tmp")
 try:
     import drain as D
+    if hasattr(D, "_SV"):
+        D._SV["final"] = True          # imported for tests: no drain-state save at exit (w12 fix 1 atexit hook)
     have = hasattr(D, "stall_alerts")
 except Exception as e:
     have, D = False, None
