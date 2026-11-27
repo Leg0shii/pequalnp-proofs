@@ -68,7 +68,7 @@ jobs:
           # workers from the branch name loadcanary/<x>-w<N> (Lead 07:14: runs at 14, 20, 28)
           # branch loadcanary/<x>-w<N>[-warm<S>] (Lead 08:12: WARM_S = the refresher runs S s before the units are released)
           # rehearsal: -lin<S> = DRAIN_LINGER S, -drill = only loadtest/L-drill-* units (DRAIN_MATCH)
-          case "$GITHUB_REF_NAME" in *-drill*) export DRAIN_MATCH='L-drill-[0-9]+';; esac
+          case "$GITHUB_REF_NAME" in *-drill*) export DRAIN_MATCH='L-drill-[a-z0-9-]+';; esac
           r=${GITHUB_REF_NAME%-drill*}
           case "$r" in *-lin[0-9]*) export DRAIN_LINGER=${r##*-lin}; r=${r%-lin*};; esac
           case "$r" in *-warm[0-9]*) export DRAIN_WARM_S=${r##*-warm};; esac
