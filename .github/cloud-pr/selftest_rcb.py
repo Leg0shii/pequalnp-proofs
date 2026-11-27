@@ -475,8 +475,8 @@ if True:                                   # runs on older code too (the convoy 
             put_hb(REAL_TIME())
             try:
                 S.rival_snapshot(0)
-            except Exception:
-                pass
+            except Exception as e:
+                print("  refresher build failed:", repr(e)[:160])
     def hb():
         while not stop.is_set():
             put_hb(REAL_TIME()); REAL_SLEEP(0.5)

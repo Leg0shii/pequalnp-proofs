@@ -732,20 +732,34 @@ def _build_snapshot(files):
             us = set(UNIT_TOKEN.findall(p.get("title") or "")) | \
                 set(UNIT_TOKEN.findall(((p.get("head") or {}).get("ref") or "").replace("_", "-")))
             key = f"{p['number']}:{(p.get('head') or {}).get('sha') or ''}"
-            if key not in files:
-                nfr[0] += 1
-                files[key] = sorted({u for u in map(file_unit, pr_files(p["number"])) if u})
-            recent.append({"n": p["number"], "who": who, "units": sorted(us | set(files[key])),
-                           "by_file": sorted(set(files[key]) - us)})
+            todo.append((p["number"], who, us, key))
         return old or len(pulls) < size
 
+    def fill():
+        """canary 51e630d7: a cold file cache cost 82 serial files reads = 36.7 s on the first build of a drain;
+        the missing file lists are read 8 at a time, any failure raises (fail closed)"""
+        need = sorted({(n, key) for n, _, _, key in todo if key not in files})
+        if need:
+            nfr[0] += len(need)
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(min(8, len(need))) as ex:
+                got = list(ex.map(lambda nk: (nk[1], sorted({u for u in map(file_unit, pr_files(nk[0])) if u})), need))
+            files.update(dict(got))
+        for n, who, us, key in todo:
+            recent.append({"n": n, "who": who, "units": sorted(us | set(files[key])), "by_file": sorted(set(files[key]) - us)})
+        todo.clear()
+
+    todo = []
     for k in range(1, maxp + 1):
         if k == 1:
             t_build = time.time()
-        if page(k):
+        last = page(k)
+        fill()
+        if last:
             if k > 1:           # w12 07:16: several pages took time; page 1 (the newest PRs) is read again last and
                 t_build = time.time()     # the snapshot is stamped at THAT request (usually a 304)
                 page(1)
+                fill()
             return {"t": t_build, "d": round(dur.get(1, 0.0), 3), "hdr": TL_HDR[0], "taken": tl, "recent": recent,
                     "files": files, "rl": ghcond.STATS["remaining"], "full": full,
                     "b": round(time.time() - t_b0, 2), "pages": len(dur), "fr": nfr[0]}
@@ -1607,6 +1621,7 @@ def main():
         finish("formatfail", "guards: " + ((r.stdout + r.stderr).strip().splitlines() or ["?"])[-1][:200])
     log(f"guards passed ({time.time() - t0:.0f}s)")
     STG["guards"] = round(time.time() - t0, 1)
+    STG["start"] = round(t0 - T_START, 1)      # opener start -> guards start (halt check, gaps read, setup)
     if unlisted:
         finish("waiting", "not posted: prestage guards passed, branch kept for ready-wait")
     # GATEWAY v1 section 4: a pause never stops filing (the gate answers closed and the unleased branch decides)
