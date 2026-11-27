@@ -313,6 +313,9 @@ def primary_rl(r):
                 and re.search(r"^x-ratelimit-remaining:\s*0\s*$", r.stdout or "", re.I | re.M))
 
 
+RUNTOKEN_FLOOR = int(os.environ.get("RUNTOKEN_FLOOR", "200"))
+
+
 def _rt_empty_file():
     return os.path.join(os.environ.get("RIVAL_SNAP_DIR") or os.environ.get("PR_GATE_DIR") or W, "runtoken-empty")
 
@@ -368,6 +371,10 @@ def gh(args, write=False, timeout=120):
         t = toks[i]; i += 1
         for att in range(3):
             r = run(["gh"] + args, timeout=timeout, env=dict(os.environ, GH_TOKEN=t))
+            if fb and t == READ_TOKEN and (r.stdout or "").startswith("HTTP/"):   # Lead 09:34: under the floor = switch
+                m = re.search(r"^x-ratelimit-remaining:\s*(\d+)\s*$", r.stdout, re.I | re.M)   # before it is empty
+                if m and int(m.group(1)) < RUNTOKEN_FLOOR and not runtoken_empty():
+                    _mark_runtoken_empty(r, args)
             if r.returncode == 0:
                 return r
             if fb and t == READ_TOKEN and primary_rl(r):
