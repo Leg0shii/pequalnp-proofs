@@ -15,6 +15,8 @@ Cases (each must hold for ALL THREE components):
   H2 paused   our handle on the mirror pause list: 0 desk requests (I7, V8)
   H3 halt-mid filing/stop pushed while the feeder runs: no claim after the stop (V7, Y9)
   O1 one-pr   cloud opener and PC watcher both file unit U: exactly one PR of ours on U (B5, V6)
+  O2 grace    the drain holds U (drain-state inflight, fresh drain-beat, claim/U taken, no PR yet) and the PC's ready/
+              intake is past READY_GRACE: the PC files nothing on U (Y8, V6; W11's rule)
   B1 lostrep  the gate takes the claim but its answer is lost (bus desk-rep dropped / no lease ref): no PR without
               a Lease line on a unit the gate granted us (B16, Y11)
 Every case prints its GitHub calls, desk requests and data-host reads (I12).
@@ -360,6 +362,8 @@ def pc_tk(w, pc_src):
     tk = os.path.join(w.d, "pc-tk"); wd = os.path.join(tk, "watch")
     if os.path.isdir(wd):
         return tk
+    env = w.env("pc")
+    sh("git", "clone", "-q", TK_URL + ".git", tk, env=env)        # TK is the PC's toolkit clone (origin = toolkit)
     os.makedirs(wd)
     for name, alts in (("watch.py", ("watch.py", "watch_watch.py")), ("deskguard.py", ("deskguard.py", "watch_deskguard.py"))):
         p = next((os.path.join(pc_src, a) for a in alts if os.path.exists(os.path.join(pc_src, a))), None)
@@ -369,14 +373,13 @@ def pc_tk(w, pc_src):
     open(os.path.join(wd, "bus.py"), "w").write(FAKE_BUS)
     open(os.path.join(tk, "formatscan.sh"), "w").write("#!/bin/sh\necho ok\n")
     # the PC clone: origin = fork, upstream = upstream; the deskguard clone of the toolkit
-    env = w.env("pc")
     sh("git", "clone", "-q", "-o", "origin", FORK_URL + ".git", os.path.join(w.d, "pc-repo"), env=env)
     sh("git", "-C", os.path.join(w.d, "pc-repo"), "remote", "add", "upstream", UP_URL + ".git", env=env)
     sh("git", "clone", "-q", TK_URL + ".git", os.path.join(w.d, "pc-dg"), env=env)
     return tk
 
 
-def run_pc(w, pc_src, extra=None, timeout=150):
+def run_pc(w, pc_src, extra=None, timeout=150, ready=False):
     tk = pc_tk(w, pc_src)
     home = os.path.join(w.d, "pc-home"); os.makedirs(os.path.join(home, "out"), exist_ok=True)
     env = w.env("pc", dict(WATCH_HOME=home, PNP_REPO=os.path.join(w.d, "pc-repo"), DESKGUARD_REPO=os.path.join(w.d, "pc-dg"),
@@ -384,10 +387,51 @@ def run_pc(w, pc_src, extra=None, timeout=150):
                            WATCH_FETCH_LOCK=os.path.join(w.d, "pc-fetch.lock"), WATCH_GATE_WAIT="3", WATCH_LF_WAIT="3",
                            WATCH_SLOT_WAIT="3", WATCH_BUS="1", WATCH_BUS_PY=os.path.join(tk, "watch", "bus.py"),
                            PNP_SESSION_URL="", **(extra or {})))
-    r = subprocess.run([sys.executable, os.path.abspath(__file__), "--child-pc", tk, w.proof], env=env, capture_output=True,
-                       text=True, timeout=timeout)
+    r = subprocess.run([sys.executable, os.path.abspath(__file__), "--child-pc" + ("-ready" if ready else ""), tk, w.proof],
+                       env=env, capture_output=True, text=True, timeout=timeout)
     m = re.findall(r"^MXPC (.*)$", r.stdout, re.M)
     return (m[-1] if m else "crash: " + (r.stdout + r.stderr).strip()[-200:]), r
+
+
+def child_pc_ready(tk, proof):
+    """the PC's ready/ intake (intake_ready, the READY_GRACE path) with the grace already elapsed; handle_file is
+    replaced by the real submit() so that the filing decision is intake_ready's own"""
+    sys.path.insert(0, os.path.join(tk, "watch"))
+    sys.argv = [os.path.join(tk, "watch", "watch.py")]
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("watch", os.path.join(tk, "watch", "watch.py"))
+    W = importlib.util.module_from_spec(spec)
+    sys.modules["watch"] = W
+    spec.loader.exec_module(W)
+    gj = W.curl_json_fresh(W.GAPS, 60)
+    gaps_by_id = {g["id"]: g for g in gj.get("gaps") or []}
+    for g in gaps_by_id.values():
+        W._HOLDERS[g["id"]] = g.get("holders_now") or 0
+    held = {gid: 0 for gid in gaps_by_id}
+    out = W.run(["git", "-C", W.TK, "ls-remote", "origin", "refs/heads/ready/*"], timeout=60).stdout
+    state = {"done": {}, "seen": {}, "ready_first": {}}
+    for line in out.splitlines():           # first sighting READY_GRACE + 1 s ago
+        sha, ref = line.split()
+        state["ready_first"][f"ready:{ref.split('refs/heads/ready/')[1]}:{sha}"] = time.time() - W.READY_GRACE - 1
+    filed = []
+
+    def handle_file(g, fam, args, st, path, t0=None):
+        url, why = W.submit(g["id"], path, "Proof written by an AI worker.")
+        filed.append({"gid": g["id"], "url": url, "why": str(why)[:120]})
+        return "submitted" if url else "submitfail"
+    W.handle_file = handle_file
+    try:
+        W.intake_ready(types_ns(), state, gaps_by_id, held, None)
+        res = {"filed": filed, "done": state["done"], "grace": W.READY_GRACE}
+    except Exception as e:
+        res = {"filed": filed, "exception": repr(e)[:160]}
+    print("MXPC", json.dumps(res), flush=True)
+    os._exit(0)
+
+
+def types_ns():
+    import types
+    return types.SimpleNamespace(dry_run=False, observe=False, once=True)
 
 
 def child_pc(tk, proof):
@@ -611,12 +655,41 @@ def case_lost_answer(a):
     return all(res), w
 
 
-CASES = [("H1", case_halt), ("H2", case_paused), ("H3", case_halt_mid), ("O1", case_one_pr), ("B1", case_lost_answer)]
+def case_ready_grace(a):
+    """Y8/V6: the cloud drain works on U (drain-state seen.txt has U inflight, drain-beat fresh, claim/U and gatereq/U
+    pushed by the cloud, no PR yet). The PC's ready/ intake past READY_GRACE must not file U while the drain holds it."""
+    w = World("O2", {})
+    env = w.env("cloud")
+    mod = GID.replace("-", "_")
+    # toolkit ready/<gid> with the file (what worker ready.sh pushes); the fork's ready/<gid> too
+    body = open(w.proof).read()
+    b = sh("git", "-C", w.tk, "hash-object", "-w", "--stdin", inp=body, env=env).stdout.strip()
+    t1 = sh("git", "-C", w.tk, "mktree", inp=f"100644 blob {b}\t{mod}.lean\n", env=env).stdout.strip()
+    t2 = sh("git", "-C", w.tk, "mktree", inp=f"040000 tree {t1}\tready\n", env=env).stdout.strip()
+    c = sh("git", "-C", w.tk, "commit-tree", t2, "-m", "ready " + GID, env=env).stdout.strip()
+    sh("git", "-C", w.tk, "update-ref", "refs/heads/ready/" + GID, c, env=env)
+    # the drain run: seen.txt "<step> <sha> inflight <epoch>" on fork drain-state, a fresh fork drain-beat
+    fb = sh("git", "-C", w.fork, "hash-object", "-w", "--stdin", inp=f"{GID} {c} inflight {int(time.time())}\n", env=env).stdout.strip()
+    ft = sh("git", "-C", w.fork, "mktree", inp=f"100644 blob {fb}\tseen.txt\n", env=env).stdout.strip()
+    sh("git", "-C", w.fork, "update-ref", "refs/heads/drain-state", sh("git", "-C", w.fork, "commit-tree", ft, "-m", "drain state 1", env=env).stdout.strip(), env=env)
+    et = sh("git", "-C", w.fork, "hash-object", "-t", "tree", "-w", "--stdin", inp="", env=env).stdout.strip()
+    sh("git", "-C", w.fork, "update-ref", "refs/heads/drain-beat", sh("git", "-C", w.fork, "commit-tree", et, "-m", "beat %d" % int(time.time()), env=env).stdout.strip(), env=env)
+    # the drain's submit.py has taken the team claim lock and asked the gate (its PR comes when the answer does)
+    w.ref("claim/" + GID, "claim " + GID + " cloud drain")
+    w.ref("gatereq/" + GID, "claim " + GID + " cloud")
+    o, _ = run_pc(w, a.pc, ready=True)
+    p = [x for x in w.prs() if x["by"] == "pc"]
+    return verdict("O2-ready-grace", "pc", not p, f"pc PRs while the drain holds U={len(p)} lease_in_body={[('Lease:' in x['body']) for x in p]} {o[:110]}", w, "pc"), w
+
+
+CASES = [("H1", case_halt), ("H2", case_paused), ("H3", case_halt_mid), ("O1", case_one_pr), ("O2", case_ready_grace), ("B1", case_lost_answer)]
 
 
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "--child-cloud":
         return child_cloud(sys.argv[2])
+    if len(sys.argv) > 1 and sys.argv[1] == "--child-pc-ready":
+        return child_pc_ready(sys.argv[2], sys.argv[3])
     if len(sys.argv) > 1 and sys.argv[1] == "--child-pc":
         return child_pc(sys.argv[2], sys.argv[3])
     if len(sys.argv) > 1 and sys.argv[1] == "--child-feed":
