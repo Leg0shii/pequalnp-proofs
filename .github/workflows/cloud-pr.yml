@@ -34,6 +34,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
   pull-requests: read
 
 defaults:
@@ -72,6 +73,11 @@ jobs:
           PR_PER_MIN: ${{ vars.PR_PER_MIN || '70' }}
           PR_PER_HOUR: ${{ vars.PR_PER_HOUR || '480' }}
         run: python3 -I "$GITHUB_WORKSPACE/src/.github/cloud-pr/drain.py"
+      - name: Queue delay (B13, measurement only, never fails the job)
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -I "$GITHUB_WORKSPACE/src/.github/cloud-pr/qdelay.py" run || true
 
   submit:
     if: github.event_name == 'workflow_dispatch'
@@ -151,3 +157,8 @@ jobs:
           echo "${WHY:-}" >> "$GITHUB_STEP_SUMMARY"
           [ -n "${URL:-}" ] && echo "PR: $URL" >> "$GITHUB_STEP_SUMMARY"
           exit 0
+      - name: Queue delay (B13, measurement only, never fails the job)
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -I "$GITHUB_WORKSPACE/src/.github/cloud-pr/qdelay.py" run || true

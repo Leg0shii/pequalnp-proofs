@@ -15,6 +15,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
   pull-requests: read
 
 concurrency:
@@ -44,7 +45,12 @@ jobs:
           PR_TOKEN: ${{ secrets.PR_TOKEN }}
           MINUTES: ${{ inputs.minutes || '50' }}
         run: |
-          [ -n "${PR_TOKEN:-}" ] || { echo "no PR_TOKEN secret: stop"; exit 0; }
+          [ -n "${PR_TOKEN:-}" ] || { echo "::error::no PR_TOKEN secret: stop"; exit 1; }
           case "$MINUTES" in ''|*[!0-9]*) MINUTES=50;; esac
           python3 -I "$GITHUB_WORKSPACE/src/.github/cloud-pr/utest.py" 2>&1 | tee "$W.log"
           grep -E " (DONE|STOP|test ends|unleased test start) " "$W.log" | tail -100 | sed 's/^/    /' >> "$GITHUB_STEP_SUMMARY" || true
+      - name: Queue delay (B13, measurement only, never fails the job)
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -I "$GITHUB_WORKSPACE/src/.github/cloud-pr/qdelay.py" run || true
