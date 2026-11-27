@@ -1,0 +1,90 @@
+# lane-ci (W8, Lead 08:17 UTC 27 Nov, team/board/README.md): every lane proves itself on GitHub's real runner.
+# On every pull request to gateway-v1 INSIDE the fork (head repo = this repo; a PR from another repo runs nothing, so
+# no secret ever reaches outside code) and on dispatch: mintdrill, nodesk, preflight-live and the dry loadcanary, on
+# the PR head sha. The run ends with ONE line a lane pastes into its board file (job "line", also artifact lane-ci-line):
+#   LANE-CI <sha8> head=<h8> w<N>x<M> warm=<S>s first_would_push=<s>s after release, dry=.. race_p95=.. guards_p95=..
+#   tree_p95=.. total_p95=.. results=.. alerts=.. reads run=.. pr=.. run=<id> verdict=ok|SLOW|BAD suites mintdrill=..
+# team/infra/preflight.sh step "canary" requires verdict=ok from the newest such run on the sha (artifact lane-ci-canary).
+# Dispatch works once this file is on main (GitHub's rule); until then open a PR to gateway-v1 or push loadcanary/<sha8>-w28.
+name: lane-ci
+on:
+  pull_request:
+    branches: [gateway-v1]
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: commit or branch to test (empty = the dispatched branch)
+        type: string
+        default: ''
+      workers:
+        description: DRAIN_WORKERS (empty = the LOADCANARY_WORKERS variable, else 28)
+        type: string
+        default: ''
+      slots:
+        description: DRAIN_PR_SLOTS (empty = the LOADCANARY_SLOTS variable, else 8)
+        type: string
+        default: ''
+      warm_s:
+        description: DRAIN_WARM_S
+        type: string
+        default: '0'
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+concurrency:                       # never the group "loadcanary" (a caller sharing a called workflow's group deadlocks)
+  group: lane-ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+jobs:
+  mintdrill:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    uses: ./.github/workflows/mintdrill.yml
+    with:
+      ref: ${{ github.event.pull_request.head.sha || inputs.ref }}
+  nodesk:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    uses: ./.github/workflows/nodesk.yml
+    with:
+      ref: ${{ github.event.pull_request.head.sha || inputs.ref }}
+  preflight-live:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    uses: ./.github/workflows/preflight-live.yml
+    secrets: inherit
+    with:
+      ref: ${{ github.event.pull_request.head.sha || inputs.ref }}
+  canary:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    uses: ./.github/workflows/loadcanary.yml
+    secrets: inherit
+    with:
+      ref: ${{ github.event.pull_request.head.sha || inputs.ref }}
+      workers: ${{ inputs.workers }}
+      slots: ${{ inputs.slots }}
+      warm_s: ${{ inputs.warm_s || '0' }}
+  line:
+    needs: [mintdrill, nodesk, preflight-live, canary]
+    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: One line for the board file
+        env:
+          LINE: ${{ needs.canary.outputs.line }}
+          R_MD: ${{ needs.mintdrill.result }}
+          R_ND: ${{ needs.nodesk.result }}
+          R_PL: ${{ needs['preflight-live'].result }}
+          R_LC: ${{ needs.canary.result }}
+        shell: bash
+        run: |
+          l="${LINE:-LANE-CI ? verdict=BAD (no canary line, canary job $R_LC)} suites mintdrill=$R_MD nodesk=$R_ND preflight-live=$R_PL canary=$R_LC"
+          echo "$l"; echo "$l" > line.txt
+          { echo '### LANE-CI (paste into team/board/<lane>.md)'; echo '```'; echo "$l"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          case "$l" in *verdict=ok*) ;; *) echo "::warning::canary verdict not ok";; esac
+          [ "$R_MD" = success ] && [ "$R_ND" = success ] && [ "$R_PL" = success ]
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lane-ci-line
+          path: line.txt
+          retention-days: 14

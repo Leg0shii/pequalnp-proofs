@@ -7,6 +7,12 @@
 name: preflight-live
 on:
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: commit to test (empty = the caller's commit)
+        type: string
+        default: ''
   schedule:
     - cron: '17 4 * * *'
   push:
@@ -25,6 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.ref }}
           persist-credentials: false
       - name: Static check (every secret used is listed here, no silent skip)
         run: python3 -I .github/cloud-pr/secretcheck.py static "$GITHUB_WORKSPACE" | tee static.txt
@@ -50,6 +57,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.ref }}
           persist-credentials: false
       - name: Capture and diff
         env:
