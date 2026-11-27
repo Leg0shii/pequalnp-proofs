@@ -222,6 +222,7 @@ jobs:
           grep -i "refresher" drain.log | head -3
           echo "refresher log: $(grep -c 'rival snapshot:' "$W/refresher.log" 2>/dev/null) builds"; grep 'rival snapshot:' "$W/refresher.log" 2>/dev/null | sed -n '1,3p;$p'
           grep -v 'rival snapshot:' "$W/refresher.log" 2>/dev/null | tail -5
+          echo "closer reader (Lead 08:27 HOLD): $(grep -c '^.*closer beat' "$W/refresher.log" 2>/dev/null) beats read"; grep -E 'closer beat|HOLD|CLOSER-STALE' "$W/refresher.log" 2>/dev/null | sed -n '1,3p;$p'; echo "closer copy: $(cat "$W/closer.json" 2>/dev/null)"
           exit $rc
       - name: LANE-CI summary line (lane ci, W8)
         id: lcsum

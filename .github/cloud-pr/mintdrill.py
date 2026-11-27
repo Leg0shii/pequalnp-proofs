@@ -1194,7 +1194,9 @@ def main():
                                  ("rttest.py", [], "RT SELFTEST OK", "runtoken"),           # Lead 09:38 closer RUN-TOKEN-EMPTY
                                  ("movebase_test.py", [src], "MOVEBASE PASS", "movingmain"),
                                  ("claimtest.py", [], "CLAIMLIST SELFTEST OK", "leases"),   # Lead 10:17 L1 claimallow ref
-                                 ("treeprime_test.py", [], "TREEPRIME PASS", "treeprime")):      # infra 10:58 tree prime
+                                 ("treeprime_test.py", [], "TREEPRIME PASS", "treeprime"),       # infra 10:58 tree prime
+                                 ("holdtest.py", [], "HOLD SELFTEST OK", "hold"),           # Lead 08:27 closer HOLD
+                                 ("headstest.py", [], "HEADS SELFTEST OK", "heads")):       # Lead 08:17 fork_head shared
         tp = os.path.join(src, ".github", "cloud-pr", tool)
         if os.path.exists(tp):
             rr = subprocess.run([sys.executable, "-I", tp] + (args or [os.path.dirname(tp)]), capture_output=True, text=True, timeout=600)
