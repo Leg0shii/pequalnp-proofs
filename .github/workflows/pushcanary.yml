@@ -21,7 +21,7 @@ defaults:
 jobs:
   push:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
         with:
@@ -34,14 +34,18 @@ jobs:
           PR_TOKEN: ${{ secrets.PR_TOKEN }}
           READ_TOKEN: ${{ github.token }}
         run: |
-          set -uo pipefail
+          set +e -uo pipefail
           [ -n "${PR_TOKEN:-}" ] || { echo "::error::no PR_TOKEN"; exit 1; }
           export PC_TAG=$(echo "${GITHUB_REF_NAME#pushcanary-run/}" | tr -cd 'a-z0-9' | cut -c1-12)
           git --version; nproc
-          python3 -I src/.github/cloud-pr/pushcanary.py; rc=$?
+          if [[ "$PC_TAG" == pb* ]]; then
+            python3 -I src/.github/cloud-pr/pushbatch_canary.py; rc=$?      # lane pushbatch: 60 units, PUSH_BATCH_S=10
+          else
+            python3 -I src/.github/cloud-pr/pushcanary.py; rc=$?
+          fi
           b=$(echo -n "x-access-token:$PR_TOKEN" | base64 -w0)
           u="https://github.com/$GITHUB_REPOSITORY.git"; h="http.https://github.com/.extraheader=AUTHORIZATION: basic $b"
-          for r in $(git -C src -c "$h" ls-remote "$u" | awk '$2 ~ /^refs\/heads\/(pushcanary(-run)?|upbase)\//{print $2}'); do
-            git -C src -c "$h" push -q "$u" --delete "$r" && echo "deleted $r"
-          done
+          refs=$(git -C src -c "$h" ls-remote "$u" | awk '$2 ~ /^refs\/heads\/((pushcanary(-run)?|upbase)\/|utest\/L-drill-)/{print $2}')
+          # ONE multi-ref delete push (GitHub: at most 6 pushes a minute per repository)
+          [ -z "$refs" ] || { git -C src -c "$h" push -q "$u" --delete $refs && echo "deleted $(echo $refs | wc -w) refs in one push"; }
           exit $rc

@@ -1450,12 +1450,23 @@ def upbase_ref(base):
     return None
 
 
+def _fork_tip_base(url, env=None):
+    """fallback negotiation base: the highest fork L-meta branch (its own base may be far behind: a large pack)"""
+    refs = git("ls-remote", url, "refs/heads/L-*", timeout=120).stdout.split("\n")
+    nums = sorted(((int(m.group(1)), m.group(0)) for l in refs for m in [re.search(r"refs/heads/L-meta-(\d+)$", l)] if m),
+                  reverse=True)
+    if nums:
+        git("fetch", "-q", "--depth=1", url, f"{nums[0][1]}:refs/fork/tip", timeout=180, env=env)
+
+
 def push_branch(c, gid):
     url = f"https://github.com/{FORK}.git"
     t = time.time()
     base = git("rev-parse", f"{c}^").stdout.strip()
     ub = upbase_ref(base) if base else None
     STG["upbase"] = round(time.time() - t, 3)
+    if PUSH_BATCH_S > 0:
+        return push_batched(c, gid, not ub)
     if not ub:
         # fallback: a recent fork branch as negotiation base (its own base may be far behind: a large pack)
         refs = git("ls-remote", url, "refs/heads/L-*", timeout=120).stdout.split("\n")
@@ -1641,6 +1652,229 @@ def push_first_done(gid):
             os.remove(os.path.join(d, "pushfirst"))
         except OSError:
             pass
+
+
+# Lane pushbatch (Lead 09:10 UTC 27 Nov, RC-c): GitHub recommends at most 6 pushes a minute per repository (Repository
+# limits) and a single push got a 429 at 08:49:57. With PUSH_BATCH_S > 0 the drain's workers do not push one by one:
+# each hands (commit, head) to PR_GATE_DIR/pushq and waits; whichever worker holds pushq/push.lock (non-blocking
+# flock, so a dead worker never blocks the queue) sends EVERY waiting head in ONE multi-ref push, at most once per
+# PUSH_BATCH_S. Create-only per ref as before (--force-with-lease=<ref>: per head): a ref that exists is rejected alone
+# and the others land (per-ref results from --porcelain). The objects of every unit's tree reach the push through
+# GIT_ALTERNATE_OBJECT_DIRECTORIES. A 403/429 on the push is a 16.13 refusal (bucket_refusal: stall for the whole
+# drain, rate halved, 4th ends the drain's creates); waiting heads stay queued until the stall ends.
+# PUSH_BATCH_S=0 (default) = the per-unit push above, unchanged.
+PUSH_BATCH_S = float(os.environ.get("PUSH_BATCH_S", "0") or 0)
+PUSH_WAIT_MAX_S = float(os.environ.get("PUSH_WAIT_MAX_S", "300"))
+PUSH_BATCH_MAX = int(os.environ.get("PUSH_BATCH_MAX", "200"))
+
+
+def _pushq():
+    return os.path.join(os.environ.get("PR_GATE_DIR") or SNAP_DIR, "pushq")
+
+
+def _qkey(gid):
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", gid)
+
+
+def _jread(f):
+    try:
+        with open(f) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+def _jwrite(f, v):
+    with open(f + ".tmp", "w") as fh:
+        json.dump(v, fh)
+    os.replace(f + ".tmp", f)
+
+
+def _rm(f):
+    try:
+        os.remove(f)
+    except OSError:
+        pass
+
+
+def push_batched(c, gid, fallback=False):
+    """hand (c, gid) to the drain's pusher and wait for its per-ref result: None = landed, else why not"""
+    q = _pushq()
+    os.makedirs(q, exist_ok=True)
+    k = _qkey(gid)
+    req, res = os.path.join(q, k + ".req"), os.path.join(q, k + ".res")
+    _rm(res)
+    _rm(os.path.join(q, k + ".att"))
+    t0 = time.time()
+    _jwrite(req, {"c": c, "head": gid, "objs": os.path.join(TREE, ".git", "objects"), "tree": TREE, "t": t0, "fb": bool(fallback)})
+    while True:
+        v = _jread(res)
+        if v is not None:
+            _rm(res)
+            STG["push_wait"] = round(time.time() - t0, 3)
+            STG["push_batch"] = v.get("n")
+            return v.get("err")
+        if time.time() - t0 > PUSH_WAIT_MAX_S:
+            _rm(req)
+            STG["push_wait"] = round(time.time() - t0, 3)
+            return f"push batch: no result in {PUSH_WAIT_MAX_S:.0f} s"
+        push_leader(q)
+        time.sleep(0.2)
+
+
+def push_leader(q, flusher=False, final=False):
+    """one batch push when this worker holds the lock and PUSH_BATCH_S passed since the start of the last one (and no
+    stall): every waiting head and every queued ready/ delete. No fixed tick: a head after a quiet spell goes at once.
+    flusher (submit.py --pushflush, one per drain): deletes only, and only while no head waits (a waiting worker
+    carries them with its heads)."""
+    lk = open(os.path.join(q, "push.lock"), "w")
+    try:
+        fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lk.close()
+        return
+    try:
+        now = time.time()
+        lastf = os.path.join(q, "last")
+        try:
+            last = float(open(lastf).read())
+        except (OSError, ValueError):
+            last = 0.0
+        if now - last < PUSH_BATCH_S:
+            return
+        d = os.environ.get("PR_GATE_DIR")
+        if d:
+            try:
+                if now < float(open(os.path.join(d, "stall")).read()):
+                    return                                  # 16.13 stall: no push either
+            except (OSError, ValueError):
+                pass
+        reqs, dels = [], []
+        for f in sorted(os.listdir(q)):
+            if f.endswith(".req") and not os.path.exists(os.path.join(q, f[:-4] + ".res")):
+                v = _jread(os.path.join(q, f))
+                if isinstance(v, dict) and v.get("c") and v.get("head"):
+                    v["k"] = f[:-4]
+                    reqs.append(v)
+            elif f.endswith(".del"):
+                v = _jread(os.path.join(q, f))
+                if isinstance(v, dict) and str(v.get("ref", "")).startswith("refs/heads/"):
+                    v["f"] = os.path.join(q, f)
+                    dels.append(v)
+        if flusher and reqs and not final:
+            return                                          # the waiting workers carry the deletes
+        if flusher:
+            reqs = []
+        if not reqs and not dels:
+            return
+        if reqs and d and os.path.exists(os.path.join(d, "giveup")):
+            for v in reqs:                                  # 16.13: the drain's creates ended: no head push either
+                _jwrite(os.path.join(q, v["k"] + ".res"), {"err": "stall-giveup: four create refusals in this drain, no push",
+                                                        "n": 0, "t": now})
+                _rm(os.path.join(q, v["k"] + ".req"))
+            reqs = []
+        if reqs:
+            h, hwhy = filing_halted()                       # R3: a fresh halt read before every head push
+            if h:
+                for v in reqs:
+                    _jwrite(os.path.join(q, v["k"] + ".res"), {"err": "halted: " + hwhy, "n": 0, "t": now})
+                    _rm(os.path.join(q, v["k"] + ".req"))
+                reqs = []
+        if not reqs and not dels:
+            return
+        reqs.sort(key=lambda v: v.get("t", 0))
+        reqs = reqs[:PUSH_BATCH_MAX]
+        dels = dels[:PUSH_BATCH_MAX]
+        with open(lastf + ".tmp", "w") as o:
+            o.write(f"{now:.3f}")
+        os.replace(lastf + ".tmp", lastf)
+        t = time.time()
+        out, whole = push_many(reqs, dels, flusher)
+        dt = time.time() - t
+        with open(os.path.join(q, "pushes.log"), "a") as o:
+            o.write(f"{now:.3f} {len(reqs)} {dt:.2f} {'ok' if whole is None else 'fail'} {len(dels)}\n")
+        log(f"PUSH-BATCH {len(reqs)} heads + {len(dels)} ready deletes in one push, {dt:.2f} s"
+            + ("" if whole is None else f": {whole[:150]}"))
+        if whole is None or not (push_refusal_kind(whole) == "refused" or TRANSIENT.search(whole)):
+            for v in dels:                                  # a delete that failed is not retried (the next drain sees
+                _rm(v["f"])                                 # the unit again: submit.py is idempotent there)
+            bad = [v["ref"] for v in dels if out.get(v["ref"])]
+            if bad:
+                log("ready deletes failed:", " ".join(bad)[:200])
+        kind = push_refusal_kind(whole) if whole is not None else None
+        if kind == "refused" and d:
+            push_refusal(f"batch-{os.getpid()}", whole, last=True)   # w9's push ladder + PUSH-REFUSED alert, no pushfirst
+        elif kind == "denied":
+            push_denied(f"batch-{os.getpid()}", whole)
+        for v in reqs:
+            err = out.get(v["head"], "") if whole is None else None
+            if whole is not None:
+                af = os.path.join(q, v["k"] + ".att")
+                try:
+                    a = int(open(af).read()) + 1
+                except (OSError, ValueError):
+                    a = 1
+                open(af, "w").write(str(a))
+                if kind == "refused" and a < 2:
+                    continue                                # stays queued; goes in the first batch after the stall
+                if kind is None and TRANSIENT.search(whole) and a < 4:
+                    continue                                # retried in the next batch
+                err = ("PUSH-DENIED: " if kind == "denied" else "PUSH-REFUSED twice: " if kind == "refused" else "") + whole[:280]
+            _jwrite(os.path.join(q, v["k"] + ".res"), {"err": err, "n": len(reqs), "t": now})
+            _rm(os.path.join(q, v["k"] + ".req"))
+    except Exception as e:
+        log("push leader failed:", repr(e)[:200])
+    finally:
+        lk.close()
+
+
+def push_many(reqs, dels=(), flusher=False):
+    """ONE git push of every head in reqs (create-only per ref) and every ready/ delete in dels. Returns
+    ({head or deleted ref: None | why}, None) when git answered per ref, or ({}, why) when the whole push failed."""
+    url = f"https://github.com/{FORK}.git"
+    alts = sorted({v["objs"] for v in reqs if os.path.isdir(v.get("objs") or "")})
+    env = dict(os.environ, GIT_ALTERNATE_OBJECT_DIRECTORIES=":".join(alts))
+    repo = TREE
+    if flusher:                                             # deletes only: any repository will do
+        repo = os.path.join(_pushq(), "flushrepo")
+        if not os.path.isdir(os.path.join(repo, ".git")):
+            run(["git", "init", "-q", repo], timeout=30)
+    if any(v.get("fb") for v in reqs):
+        _fork_tip_base(url, env=env)
+    cmd = (["git"] + auth_cfg() + ["-C", repo, "push", "--porcelain"]
+           + [f"--force-with-lease=refs/heads/{v['head']}:" for v in reqs] + [url]
+           + [f"{v['c']}:refs/heads/{v['head']}" for v in reqs] + [f":{v['ref']}" for v in dels])
+    r = run(cmd, timeout=600, env=env)
+    st = {}
+    for l in r.stdout.splitlines():
+        m = re.match(r"^(.)\t[^\t]*:refs/heads/(\S+)\t?(.*)$", l)
+        if m:
+            st[m.group(2)] = (m.group(1), m.group(3))
+    if not st:
+        return {}, (r.stderr.strip() or f"push rc={r.returncode}, no per-ref result")[:300]
+    out, rej = {}, []
+    for v in dels:
+        f = st.get(v["ref"][len("refs/heads/"):])
+        out[v["ref"]] = None if f and f[0] == "-" else f"delete: {f[1] if f else 'no result'}"[:200]
+    for v in reqs:
+        f = st.get(v["head"])
+        if f is None:
+            out[v["head"]] = "no result for this ref: " + r.stderr.strip()[:200]
+        elif f[0] in "*+ =":
+            out[v["head"]] = None
+        else:
+            out[v["head"]] = f"rejected: {f[1]}"[:300]
+            rej.append(v)
+    if rej:                     # rejected but already ours (a retry after a lost answer): landed
+        have = {}
+        for l in git("ls-remote", url, *[f"refs/heads/{v['head']}" for v in rej], timeout=120, env=env).stdout.splitlines():
+            p = l.split("\t")
+            if len(p) == 2:
+                have[p[1][len("refs/heads/"):]] = p[0]
+        for v in rej:
+            if have.get(v["head"]) == v["c"]:
+                out[v["head"]] = None
+    return out, None
 
 
 PR_PER_MIN = int(os.environ.get("PR_PER_MIN", "70"))       # Lead 06:12: GitHub documents 80/min and 500/hour per token
@@ -2107,6 +2341,13 @@ def delete_ready():
     pre = "utest" if UNLEASED_TEST else "ready"
     if DRY or os.environ.get("GITHUB_REF_NAME") != f"{pre}/{ID}":     # push, or a dispatch on the ready/ branch
         return
+    if PUSH_BATCH_S > 0 and os.environ.get("PR_GATE_DIR"):
+        # lane pushbatch (Lead 09:22): the delete rides in the drain's next batch push (heads or the flusher); the drain
+        # marks the unit seen when this process ends, so a ready ref waiting for its delete never runs twice
+        q = _pushq(); os.makedirs(q, exist_ok=True)
+        _jwrite(os.path.join(q, _qkey(f"{pre}/{ID}") + ".del"), {"ref": f"refs/heads/{pre}/{ID}", "t": time.time()})
+        log(f"queued delete of {pre}/{ID} for the next batch push")
+        return
     r = run(["git"] + auth_cfg() + ["-C", TREE, "push", "-q", f"https://github.com/{FORK}.git", "--delete", f"{pre}/{ID}"], timeout=120)
     log(f"deleted {pre}/" + ID if r.returncode == 0 else f"could not delete {pre}/" + ID + ": " + r.stderr.strip()[:120])
 
@@ -2543,5 +2784,22 @@ def refresher():
     done[0] = True
 
 
+def pushflush():
+    """lane pushbatch: one per drain (drain.py, PUSH_BATCH_S > 0). Sends the queued ready/ deletes when no worker is
+    waiting to carry them, within the same one-push-per-PUSH_BATCH_S budget. On pushq/flush.stop: one last flush
+    (after the interval) and exit."""
+    q = _pushq(); os.makedirs(q, exist_ok=True)
+    ppid = os.getppid()
+    log("pushflush started, batch", PUSH_BATCH_S, "s")
+    while os.getppid() == ppid and not os.path.exists(os.path.join(q, "flush.stop")):
+        push_leader(q, flusher=True)
+        time.sleep(0.5)
+    t = time.time()
+    while time.time() - t < PUSH_BATCH_S + 30 and any(f.endswith((".del", ".req")) for f in os.listdir(q)):
+        push_leader(q, flusher=True, final=not any(f.endswith(".req") for f in os.listdir(q)))
+        time.sleep(0.5)
+    log("pushflush stopped; left:", sum(1 for f in os.listdir(q) if f.endswith(".del")), "deletes")
+
+
 if __name__ == "__main__":
-    refresher() if sys.argv[1:2] == ["--refresh"] else main()
+    refresher() if sys.argv[1:2] == ["--refresh"] else pushflush() if sys.argv[1:2] == ["--pushflush"] else main()

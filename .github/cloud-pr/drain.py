@@ -676,11 +676,13 @@ def main():
             ok = alert_ref(f"WARM drain run {os.environ.get('GITHUB_RUN_ID', '?')} released units at {time.time():.0f}",
                            "warm", prefix="drill")
             log("WARM marker ref drill/warm-*", "pushed" if ok else "push FAILED")
+    pf = pushflush_start()
     try:
         _loop(inflight, idle)
     finally:
         CL["stop"].set()
         wd.stop_refresher()
+        pushflush_stop(pf)
     try:                                   # 16.12: live newest-page read duration of this drain
         ds = sorted(float(l.split()[1]) for l in open(os.path.join(W, "snapd.log")) if len(l.split()) == 2)
         if ds:
@@ -711,6 +713,43 @@ def refresher_start():
                          env=env, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
     log("refresher started, pid", p.pid)
     return p
+
+
+def pushflush_start():
+    """lane pushbatch (Lead 09:22): with PUSH_BATCH_S > 0 the ready/ deletes ride in the batch pushes; one background
+    `submit.py --pushflush` sends those left when no worker waits to carry them"""
+    if DRY or float(os.environ.get("PUSH_BATCH_S", "0") or 0) <= 0:
+        return None
+    env = dict(os.environ, ID="pushflush", MOD="pushflush", PROOF=os.devnull, TREE=W, W=os.path.join(W, "pushflush"),
+               DRY="0", PR_GATE_DIR=W, PR_GATE_N=str(PR_SLOTS), RIVAL_SNAP_DIR=W, GITHUB_OUTPUT=os.devnull)
+    os.makedirs(env["W"], exist_ok=True)
+    try:
+        os.remove(os.path.join(W, "pushq", "flush.stop"))
+    except OSError:
+        pass
+    p = subprocess.Popen([sys.executable, "-I", os.path.join(SRC, ".github", "cloud-pr", "submit.py"), "--pushflush"],
+                         env=env, stdout=open(os.path.join(W, "pushflush.log"), "a"), stderr=subprocess.STDOUT,
+                         stdin=subprocess.DEVNULL)
+    log("pushflush started, pid", p.pid)
+    return p
+
+
+def pushflush_stop(p):
+    if not p:
+        return
+    os.makedirs(os.path.join(W, "pushq"), exist_ok=True)
+    open(os.path.join(W, "pushq", "flush.stop"), "w").close()
+    try:
+        p.wait(timeout=float(os.environ.get("PUSH_BATCH_S", "10") or 10) + 45)
+    except subprocess.TimeoutExpired:
+        p.kill()
+    try:
+        log("pushflush:", open(os.path.join(W, "pushflush.log")).read().strip().splitlines()[-1][:200])
+        pl = [l.split() for l in open(os.path.join(W, "pushq", "pushes.log")).read().splitlines()]
+        log(f"PUSH-BATCH summary: {len(pl)} pushes, {sum(int(x[1]) for x in pl)} heads, "
+            f"{sum(int(x[4]) for x in pl if len(x) > 4)} ready deletes")
+    except (OSError, IndexError, ValueError):
+        pass
 
 
 def refresher_stop(p):
