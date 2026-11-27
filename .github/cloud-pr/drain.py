@@ -29,6 +29,10 @@ if not re.fullmatch(r"ready|loadtest", PREFIX):
     sys.exit(f"DRAIN_PREFIX {PREFIX!r}: only ready or loadtest")
 CHILD_DRY = "0" if PREFIX == "ready" else "1"
 STATE_REF = "drain-state" if PREFIX == "ready" else f"drain-state-{PREFIX}"
+if PREFIX == "loadtest" and os.environ.get("GITHUB_RUN_ID"):
+    # infra 09:02 (r3 45968532320): parallel canaries force-pushed the one drain-state-loadtest ref (3 failed pushes in a row,
+    # job red) and each run loaded the others' seen units at start. A loadtest drain keeps its own state per run attempt.
+    STATE_REF += f"-{os.environ['GITHUB_RUN_ID']}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}"
 T0 = time.time()
 LOCK = threading.Lock(); FETCH = threading.Lock()
 SEEN = {}            # (step, sha) -> (result, epoch)
@@ -105,7 +109,7 @@ def save_seen(seen=None, grants=None, unleased=None):
     if not DRY:
         r = sh("git", *auth(), "-C", SRC, "push", "-q", "-f", URL, f"{c}:refs/heads/{STATE_REF}", timeout=120)
         if r.returncode:
-            raise RuntimeError("state push rc=%d %s" % (r.returncode, r.stderr.strip()[-100:]))
+            raise RuntimeError("state push rc=%d %s" % (r.returncode, " | ".join(r.stderr.strip().splitlines())[-300:]))
 
 
 # w12 speed fix 1 (Lead 06:30): the drain-state push (2-5 s) ran inside LOCK once per finished unit, so every worker
@@ -146,7 +150,7 @@ def save_now(why="tick"):
             with LOCK:
                 _SV["dirty"] = True                   # retried at the next tick
             _SV["fails"] += 1
-            log("state save failed", f"({why}, {_SV['fails']} in a row)", repr(e)[:120])
+            log("state save failed", f"({why}, {_SV['fails']} in a row)", repr(e)[:400])
             if _SV["fails"] == 3:
                 _alert("drain-state push failed 3 times in a row (filing continues; a re-run is idempotent)")
             return False
