@@ -41,6 +41,7 @@ jobs:
           PR_TOKEN: ${{ secrets.PR_TOKEN }}
           READ_TOKEN: ${{ github.token }}
           IN_MIN: ${{ inputs.minutes }}
+          DUPCLOSE_PRUNE: ${{ vars.DUPCLOSE_PRUNE || '0' }}    # Lead 09:18: head-branch prune off unless the variable says 1
         run: |
           [ -n "${PR_TOKEN:-}" ] || { echo "::error::no PR_TOKEN secret: stop"; exit 1; }
           MIN=${IN_MIN:-58}; case "$MIN" in ''|*[!0-9]*) MIN=58;; esac

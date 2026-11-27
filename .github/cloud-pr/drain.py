@@ -11,6 +11,7 @@ Env: SRC (fork main checkout), W, PR_TOKEN, READ_TOKEN, GITHUB_REPOSITORY."""
 import base64, json, os, re, subprocess, sys, tempfile, threading, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import haltrule                                        # rule 16.1 (w9's haltrule.py): the same rule as submit.py and the closer
+import warm as wd                                      # RC-c always-warm drain in the wave window (warm.py)
 from concurrent.futures import ThreadPoolExecutor
 
 SRC = os.environ["SRC"]; W = os.environ.get("W") or tempfile.mkdtemp()
@@ -503,6 +504,10 @@ def _paused_old():
 
 def main():
     os.makedirs(W, exist_ok=True)
+    log("SETTINGS", f"workers={WORKERS} pr_slots={PR_SLOTS} pr_per_min={os.environ.get('PR_PER_MIN', '70')} "
+        f"pr_per_hour={os.environ.get('PR_PER_HOUR', '480')} save_every_s={SAVE_EVERY_S:.0f} linger={LINGER:.0f} "
+        f"max_s={MAX_S:.0f} refresher={os.environ.get('DRAIN_REFRESHER', '0')} warm={os.environ.get('WARM', '')} "
+        f"warm_window={os.environ.get('WARM_WINDOW', '')!r} prefix={PREFIX} dry={DRY}")   # Lead 09:18: effective settings first
     if paused():                 # Lead 15:58: while the desk pause runs, the drain touches nothing (branches stay queued)
         log("shared desk pause until", time.strftime("%H:%M:%S", time.gmtime(_PZ[1])), "UTC: drain does nothing")
         return
@@ -524,7 +529,7 @@ def main():
     except Exception as e:
         log("RUN-TOKEN rate_limit unreadable:", repr(e)[:80])
     inflight = {}; idle = None
-    rf = refresher_start()
+    rf = wd.track(refresher_start(), refresher_start, refresher_stop, log)
     warm = float(os.environ.get("DRAIN_WARM_S", "0") or 0)
     if rf and warm > 0:                    # Lead 08:12 (b): units are released only after the refresher's first copies
         t_w = time.time()                  # exist (or WARM_S passed), so the cold first build is not on any unit's path
@@ -540,7 +545,7 @@ def main():
     try:
         _loop(inflight, idle)
     finally:
-        refresher_stop(rf)
+        wd.stop_refresher()
     try:                                   # 16.12: live newest-page read duration of this drain
         ds = sorted(float(l.split()[1]) for l in open(os.path.join(W, "snapd.log")) if len(l.split()) == 2)
         if ds:
@@ -809,6 +814,10 @@ def _loop(inflight, idle):
                 log("shared desk pause started: no new branch, in-flight ones finish"); todo = []
                 if not inflight:
                     break
+            elif wd.handover_now():             # lane warm: a hotfix on main reaches the wave without waiting hours
+                todo = []
+                if not inflight:
+                    break
             elif site_closed():                 # 16.11: hold, never end the drain on it (it reopens)
                 if not _SITE.get("logged"):
                     log("site-closed: no new branch,", _SITE["why"]); _SITE["logged"] = True
@@ -821,11 +830,12 @@ def _loop(inflight, idle):
                 log("START", x[0], x[1][:8], f"({len(todo)} pending)")
             if not inflight and not todo:
                 idle = idle or time.time()
-                if time.time() - idle > LINGER:
+                if time.time() - idle > wd.linger(LINGER, idle):
                     break
             else:
                 idle = None
-            time.sleep(1 if inflight else float(os.environ.get("DRAIN_IDLE_POLL_S", "3")))
+            wd.tick(bool(inflight or todo), idle, T0, MAX_S, _FH[1], LINGER)
+            time.sleep(1 if inflight else wd.poll(float(os.environ.get("DRAIN_IDLE_POLL_S", "3"))))
 
 
 if __name__ == "__main__":

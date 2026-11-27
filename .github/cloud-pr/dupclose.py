@@ -916,8 +916,9 @@ def one_pass():
         alert_ref(f"DUP-OPEN {len(dups)}", "dupopen")
         log("DUP-OPEN", len(dups))
     rb = rej_burst()
-    try:
-        prune_branches()
+    try:                          # Lead 09:18: DUPCLOSE_PRUNE=0 (the workflow default) = no head deletes in a wave: each was
+        if os.environ.get("DUPCLOSE_PRUNE", "1") != "0":   # its own fork push against GitHub's 6 pushes a minute
+            prune_branches()
     except Exception as e:
         log("branch prune failed:", repr(e)[:120])
     try:

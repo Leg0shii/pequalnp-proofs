@@ -1,0 +1,78 @@
+# RC-c ALWAYS-WARM DRAIN (Lead 08:10 UTC 27 Nov, SPEED FIRST10.md section c). The same drain job as cloud-pr.yml, in the
+# same concurrency group cloud-pr-drain (one drain at a time, repo-wide), started by dispatch instead of a ready/ push.
+# Inside the window (variable WARM_WINDOW, UTC "HHMM-HHMM") it lingers up to the input `linger` (at most 1200 s, never
+# past the window end) polling ready/ every 2 s, and REARM_S before its DRAIN_MAX_S it dispatches the next warm run,
+# which waits in the group and starts when this one ends (schedules do not fire on this fork). Outside the window, with
+# WARM=0, or while filing is halted, a run drains what is pending and ends after 30 s idle, and starts no next run.
+# One job can cover the window: WARM_MAX_S up to 18000 (5 h), WARM_HANDOVER "HHMM" = the one chosen handover.
+# LIVE stop (variables are fixed at job start): push any commit to fork ref warm/off; delete it to allow warm again.
+# Arm at the window start:  gh workflow run warm.yml --repo Leg0shii/pequalnp-proofs-fork --ref main
+# (any ready/ push inside the window arms it too). Stop for later jobs:  variable WARM=0.
+name: warm-drain
+
+on:
+  workflow_dispatch:
+    inputs:
+      linger:
+        description: Idle linger in seconds inside the window (at most WARM_MAX_S)
+        required: false
+        type: string
+        default: '18000'
+      window:
+        description: Window UTC HHMM-HHMM (empty = from the start for WARM_MAX_S; a handover passes the running window on)
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+
+jobs:
+  drain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330            # WARM_MAX_S up to 5 h; GitHub-hosted job limit 6 h
+    concurrency:
+      group: cloud-pr-drain
+      cancel-in-progress: false
+    steps:
+      - name: Check out fork main (drain.py, submit.py, guards)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: src
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Warm drain (waits on ready/ refs inside the window)
+        env:
+          SRC: ${{ github.workspace }}/src
+          W: ${{ github.workspace }}/work
+          READ_TOKEN: ${{ github.token }}
+          PR_TOKEN: ${{ secrets.PR_TOKEN }}
+          PNP_LINKEDIN: ${{ secrets.PNP_LINKEDIN || vars.PNP_LINKEDIN }}
+          DRAIN_WORKERS: ${{ vars.DRAIN_WORKERS || '28' }}     # Lead 09:18: defaults = the wave setting
+          DRAIN_PR_SLOTS: ${{ vars.DRAIN_PR_SLOTS || '8' }}
+          DRAIN_REFRESHER: ${{ vars.DRAIN_REFRESHER || '1' }}
+          PR_PER_MIN: ${{ vars.PR_PER_MIN || '60' }}
+          PR_PER_HOUR: ${{ vars.PR_PER_HOUR || '400' }}
+          DRAIN_SAVE_EVERY_S: ${{ vars.DRAIN_SAVE_EVERY_S || '60' }}
+          WARM: ${{ vars.WARM || '1' }}
+          WARM_WINDOW: ${{ inputs.window || vars.WARM_WINDOW || '' }}
+          WARM_LINGER: ${{ inputs.linger || vars.WARM_LINGER || '18000' }}
+          WARM_MAX_S: ${{ vars.WARM_MAX_S || '18000' }}
+          WARM_HANDOVER: ${{ vars.WARM_HANDOVER || '' }}
+          DRAIN_MAX_S: ${{ vars.WARM_MAX_S || '18000' }}
+        run: |
+          # no window given: this job's own window, from now for WARM_MAX_S (capped at 23:59 UTC)
+          if [ -z "$WARM_WINDOW" ]; then
+            e=$(( $(date +%s) + WARM_MAX_S )); [ "$(date -u -d @$e +%j)" = "$(date -u +%j)" ] || e=$(( $(date +%s) / 86400 * 86400 + 86340 ))
+            export WARM_WINDOW="$(date -u +%H%M)-$(date -u -d @$e +%H%M)"
+          fi
+          echo "warm window $WARM_WINDOW UTC, job length up to $DRAIN_MAX_S s, linger $WARM_LINGER s"
+          python3 -I "$GITHUB_WORKSPACE/src/.github/cloud-pr/drain.py"
+      - name: Queue delay (B13, measurement only, never fails the job)
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -I "$GITHUB_WORKSPACE/src/.github/cloud-pr/qdelay.py" run || true
