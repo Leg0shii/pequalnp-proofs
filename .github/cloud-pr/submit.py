@@ -266,7 +266,23 @@ def gh(args, write=False, timeout=120):
             if not TRANSIENT.search(r.stderr + r.stdout):
                 break
             time.sleep(5 * (att + 1))
+    LAST_GH[0] = r
     raise RuntimeError("gh " + " ".join(args[:3]) + ": " + (r.stderr.strip()[:200] if r else "no token"))
+
+
+LAST_GH = [None]
+
+
+def gh_cond(args, timeout=60):
+    """for ghcond.get: the CompletedProcess even when gh exits non-zero (w12 07:02: `gh api -i` exits 1 on a 304, which
+    gh() raises on); ghcond reads the status line and decides (304 = cached body, anything else non-2xx = fail closed)"""
+    LAST_GH[0] = None
+    try:
+        return gh(args, timeout=timeout)
+    except RuntimeError as e:
+        if LAST_GH[0] is not None:
+            return LAST_GH[0]
+        return subprocess.CompletedProcess(args, 1, "", str(e))
 
 
 # ---- survey.py port -------------------------------------------------------------------------------------------
@@ -680,7 +696,7 @@ def _build_snapshot(files):
         # 304 and costs nothing of the run token's hourly limit; any failed read raises (fail closed)
         try:
             pulls, counted, rem = ghcond.get(f"repos/{UP}/pulls?state=open&sort=created&direction=desc&per_page={size}&page={k}",
-                                             gh=lambda a: gh(a, timeout=60))
+                                             gh=gh_cond)
         except ghcond.ReadFail as e:
             raise RuntimeError(f"open pulls page {k}: {e}")
         if not isinstance(pulls, list):

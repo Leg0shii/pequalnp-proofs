@@ -69,6 +69,8 @@ def fake_gh(args, write=False, timeout=120):
 
 
 def fake_run(cmd, timeout=300, env=None, cwd=None):
+    if cmd[0] == "gh":                     # the real submit.gh() over a faked process (304 = exit 1, like gh api -i)
+        return fake_gh(cmd[1:])
     if cmd[0] == "git" and "ls-remote" in cmd:
         CNT["lsremote"] += 1
         return cp(LS["txt"], LS["rc"], "" if LS["rc"] == 0 else "fatal")
@@ -79,6 +81,7 @@ class DG:
     REPO = "/nonexistent"
 
 
+REAL_GH = S.gh
 S.gh = fake_gh
 S.run = fake_run
 S.dg = lambda: DG()
@@ -153,6 +156,22 @@ try:
 except Exception as e:
     case("FRESH-AT-CREATE-2s", False, repr(e)[:100])
 S.gh = orig; S._taken_list = fake_taken
+
+# ---- 304-REAL-GH (w12 07:02): with submit's real gh() (which raises on exit 1) an unchanged page answers 304 = exit 1;
+# the snapshot must use the cached page, not fail the rival check
+reset_snap(); PULLS.clear()
+add_pr(72001, CLK[0] - 5, "Prove L-meta-72001")
+S.gh = REAL_GH
+os.environ["READ_TOKEN"] = "x"; S.READ_TOKEN = "x"
+try:
+    r1 = S.rival_now("L-meta-72999", 0.0001); CLK[0] += 1
+    n304 = CNT["304"]
+    reset_snap()
+    r2 = S.rival_now("L-meta-72999", 0.0001)
+    case("304-REAL-GH-cached-page", r1 is None and r2 is None and CNT["304"] > n304, f"(first {r1}, second {r2}, 304s {CNT['304'] - n304})")
+except Exception as e:
+    case("304-REAL-GH-cached-page", False, repr(e)[:100])
+S.gh = fake_gh
 
 # ---- 16.1 through the real filing_halted (inline: no drain dir for these)
 del os.environ["RIVAL_SNAP_DIR"]
