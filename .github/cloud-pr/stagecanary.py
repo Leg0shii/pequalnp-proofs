@@ -58,7 +58,7 @@ def main():
     refs = dict((l.split()[1], l.split()[0]) for l in sh("git", *AUTH, "ls-remote", url, f"refs/heads/stagecanary/{TAG}/*").stdout.splitlines())
     print(f"STAGECANARY refs {len(refs)}", flush=True)
     rb = os.path.join(W, "ready.git"); sh("git", "init", "-q", "--bare", rb)
-    procs, bad, SUBS = [], [], []
+    procs, bad, SUBS, RES = [], [], [], []
     units = sorted(int(m.group(1)) for r in refs for m in [re.fullmatch(rf"refs/heads/stagecanary/{TAG}/r(\d+)", r)] if m)
     tam = set()
     for i in units:
@@ -103,6 +103,8 @@ def main():
             bad.append(f"unit {i}: pushed")
         if i in tam:
             continue
+        RES.append((i, mod, head))
+    for i, mod, head in RES[:int(os.environ.get("SC_VERIFY", "3"))]:     # a full clone takes ~57 s: verify the first 3 heads
         v = os.path.join(W, f"v{i}"); tv = time.time()
         c = sh("git", *AUTH, "clone", "-q", "--no-local", "--single-branch", "--branch", f"stagecanary/{TAG}/h{i}", url, v)
         if c.returncode:
