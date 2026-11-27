@@ -29,6 +29,15 @@ EMAIL = "46093332+Leg0shii@users.noreply.github.com"
 SIZE_LIMIT = 524288
 DESC = "Proof written by an AI worker."
 FOOTER = "\n\n\U0001F916 Generated with [Claude Code](https://claude.com/claude-code)"
+# Owner 05:22 UTC 27 Nov: the makers' optional credit line (PULL_REQUEST_TEMPLATE.md, tools/pnp.sh PNP_LINKEDIN). The address
+# comes ONLY from the fork secret PNP_LINKEDIN (never from a file in a repository); unset or malformed = no line, and the
+# body is then byte for byte what it was before. The Lease paragraph and the footer keep their place and form.
+_LI = os.environ.get("PNP_LINKEDIN", "").strip()
+LI = f"\n\n**LinkedIn profile**: {_LI}" if re.fullmatch(r"https://www\.linkedin\.com/in/[A-Za-z0-9%._-]+/?", _LI) else ""
+
+
+def pr_body(lease):
+    return DESC + LI + (f"\n\nLease: {lease}" if lease else "") + FOOTER
 
 ID = os.environ["ID"]; MOD = os.environ["MOD"]; PROOF = os.environ["PROOF"]; TREE = os.environ["TREE"]
 W = os.environ.get("W", tempfile.mkdtemp())
@@ -728,7 +737,7 @@ def submit(gid, lease):
     for att in range(5):
         if stopped():                    # STOP may appear while this PR waited for a retry
             return None, "STOP file on upstream main"
-        body = DESC + (f"\n\nLease: {lease}" if lease else "") + FOOTER
+        body = pr_body(lease)
         with pr_gate():
             r = run(["gh", "pr", "create", "--repo", UP, "--head", f"{HANDLE}:{gid}", "--base", "main",
                      "--title", gid, "--body", body], timeout=120, env=dict(os.environ, GH_TOKEN=PR_TOKEN))
@@ -895,7 +904,7 @@ def main():
         lid, lwhy = claim_unheld(ID, PRIO[0])
         log("late lease:", lwhy)
         if lid:
-            body = DESC + f"\n\nLease: {lid}" + FOOTER
+            body = pr_body(lid)
             r = run(["gh", "pr", "edit", url, "--body", body], timeout=60, env=dict(os.environ, GH_TOKEN=PR_TOKEN))
             log("late lease: Lease line added" if r.returncode == 0 else "late lease: PR edit failed: " + r.stderr.strip()[:150])
             LEASE[0] = lid
