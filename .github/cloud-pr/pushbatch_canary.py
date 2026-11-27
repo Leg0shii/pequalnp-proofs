@@ -219,8 +219,9 @@ def main():
         bad.append(f"{per_min} fork ref writes in 60 s > {MAXPM}")
     if diffbad:
         bad.append(f"{len(diffbad)} heads with a wrong parent/diff")
-    if qrefs:
-        bad.append(f"{len(qrefs)} queue refs not deleted")
+    rival_q = [q for q in qrefs if any(is_pre and q.endswith("/" + g) for g, (r, _, is_pre) in allres.items())]
+    if len(qrefs) > len(rival_q):           # the rival's unit made no PR: its queue ref stays for the drain's retry
+        bad.append(f"{len(qrefs) - len(rival_q)} queue refs not deleted")
     print("PUSHBATCH PASS" if not bad else "PUSHBATCH FAIL: " + "; ".join(bad))
     return 1 if bad else 0
 
