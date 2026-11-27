@@ -138,10 +138,10 @@ def fakes(root):
     """the objects mintdrill's fakes serve, per endpoint; None + reason when the fake code is not the one we model"""
     src_p = os.path.join(root, ".github", "cloud-pr", "mintdrill.py")
     src = open(src_p).read()
-    need = {"E3": 'json.dumps([{"filename": f} for f in p.get("files") or []])',
-            "E4": 'json.dumps(p.get("comments", []))',
-            "E5": '"".join(f"0\\t{r}\\n" for r in refs)'}
-    miss = [k for k, s in need.items() if s not in src]
+    need = {"E3": ['json.dumps([{"filename": f} for f in p.get("files") or []])'],
+            "E4": ['json.dumps(p.get("comments", []))', 'json.dumps(cmts(p))'],          # cmts: Y3 comments by created_at
+            "E5": ['"".join(f"0\\t{r}\\n" for r in refs)', '"".join(f"{h}\\t{r}\\n" for h, r in rows']}
+    miss = [k for k, alts in need.items() if not any(x in src for x in alts)]
     sys.path.insert(0, os.path.dirname(src_p))
     import mintdrill as M
     cs, _ = M.cases()
