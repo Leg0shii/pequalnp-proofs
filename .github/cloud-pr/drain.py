@@ -89,13 +89,34 @@ def save_seen():
         sh("git", *auth(), "-C", SRC, "push", "-q", "-f", URL, f"{c}:refs/heads/drain-state", timeout=120)
 
 
+RETRYABLE = ("failed", "submitfail", "error")     # W6 mintfail: a child that died or failed half way is tried again
+RETRY_MAX = 3
+RETRY_WAIT = (0, 60, 300)                         # seconds after the 1st, 2nd, 3rd failure
+
+
+def attempts(v):
+    """(result, failures so far) of a SEEN value 'result' or 'result#n'"""
+    if not v:
+        return None, 0
+    r, _, n = v[0].partition("#")
+    return r, (int(n) if n.isdigit() else (1 if r in RETRYABLE else 0))
+
+
+def retry_due(v):
+    if v is None:
+        return True
+    r, n = attempts(v)
+    # seen.txt rounds the time to whole seconds: allow 1 s
+    return r in RETRYABLE and n < RETRY_MAX and time.time() - v[1] >= RETRY_WAIT[min(n, len(RETRY_WAIT)) - 1] - 1
+
+
 def pending():
     r = sh("git", "ls-remote", URL, "refs/heads/ready/*", timeout=60)
     out = []
     for l in r.stdout.splitlines():
         sha, ref = l.split()
         sid = ref[len("refs/heads/ready/"):]
-        if re.fullmatch(r"L-[a-z0-9]+(-[a-z0-9]+)*", sid) and (sid, sha) not in SEEN:
+        if re.fullmatch(r"L-[a-z0-9]+(-[a-z0-9]+)*", sid) and retry_due(SEEN.get((sid, sha))):
             out.append((sid, sha))
     def num(s):
         m = re.search(r"(\d+)$", s)
@@ -170,7 +191,13 @@ def work(sid, sha):
         res, why = "error", repr(e)[:200]
     with LOCK:
         if res not in ("paused", "halted") and not (res == "unleased" and "desk off or paused" in why):
-            SEEN[(sid, sha)] = (res, time.time())          # paused ones run again after the pause
+            if res in RETRYABLE:                           # W6: retried up to RETRY_MAX times (submit.py is idempotent:
+                n = attempts(SEEN.get((sid, sha)))[1] + 1  # create-only head, our PR found, lease recovered)
+                SEEN[(sid, sha)] = (f"{res}#{n}", time.time())
+                if n >= RETRY_MAX:
+                    log("GIVE-UP", sid, f"{res} {n} times:", why[:120])
+            else:
+                SEEN[(sid, sha)] = (res, time.time())      # paused ones run again after the pause
         STATS[res] = STATS.get(res, 0) + 1
         try:
             save_seen()

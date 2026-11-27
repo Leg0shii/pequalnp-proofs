@@ -101,9 +101,10 @@ def child_submit(src, w):
         out["reads"] += 1
         if a[0] == "api" and "/pulls?" in a[1]:
             q = dict(x.split("=", 1) for x in a[1].split("?", 1)[1].split("&"))
-            if "head" in q:                          # open_pr_for_branch: our own open PR on fork branch <gid>
+            if "head" in q:                          # open_pr_for_branch: our own open (or closed) PR on fork branch <gid>
                 h = q["head"].split(":", 1)[-1]
-                return cp("".join("https://github.com/open-goat/pequalnp-proofs/pull/%d\n" % p["number"] for p in pulls_open
+                src_h = pulls_open if q.get("state", "open") == "open" else pulls_closed
+                return cp("".join("https://github.com/open-goat/pequalnp-proofs/pull/%d\n" % p["number"] for p in src_h
                                   if p["user"]["login"] == HANDLE and (p.get("head") or {}).get("ref") == h))
             src_l = [p for p in (pulls_open if q.get("state") == "open" else pulls_closed) if vis(p)]
             pp, pg = int(q.get("per_page", 30)), int(q.get("page", 1))
@@ -222,6 +223,10 @@ def child_submit(src, w):
     S.push_branch = lambda c, g: None
     S.delete_ready = lambda: None
     S.pr_gate = contextlib.nullcontext
+    if hasattr(S, "fork_head"):              # fork branches of ours that exist already (W6 create-only head)
+        S.fork_head = lambda g: (w.get("fork_heads") or {}).get(g)
+    if hasattr(S, "gate_answer_lease"):
+        S.gate_answer_lease = lambda g: (w.get("gate_answers_ref") or {}).get(g)
     out["li_reads"] = 0
 
     def fake_li():                          # config/linkedin.txt in the toolkit (Lead 05:50): None = unreadable

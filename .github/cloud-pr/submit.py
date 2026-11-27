@@ -199,6 +199,19 @@ def _gate(req, gid, wait):
     return None
 
 
+def gate_answer_lease(gid):
+    """the lease id in the gate's last answer ref lease/<gid> ("lease <gid> ok <lease>"), else None"""
+    try:
+        g = dg().REPO
+        if run(["git", "-C", g, "fetch", "-q", "origin", f"+refs/heads/lease/{gid}:refs/gate-ans"], timeout=60).returncode:
+            return None
+        m = re.fullmatch(rf"lease {re.escape(gid)} ok (\S+)",
+                         run(["git", "-C", g, "log", "-1", "--format=%s", "refs/gate-ans"], timeout=30).stdout.strip())
+        return m.group(1) if m else None
+    except Exception:
+        return None
+
+
 STG = {}          # Lead 19:14: seconds per stage per unit (guards, race, gate, push, pr), printed as one TIMES line
 LAST_GJ = [None]  # the gaps.json read of the race check (mirror pause check of gate_open_now)
 
@@ -555,6 +568,10 @@ def claim(gid, prio=1):
         old = None if DRY or not PR_TOKEN else dg().lease_of(gid)
         if old:      # D: our own earlier claim (retry or the other opener): reuse its lease, never claim twice
             return old, "reused the lease recorded on claim/" + gid
+        rec = gate_answer_lease(gid)     # W6 B10: the earlier run died after the grant, before record_lease
+        if rec:
+            dg().record_lease(gid, rec)
+            return rec, "recovered the lease from the gate's answer lease/" + gid
         return None, "claim skipped: this step was claimed once already"
     t = time.time()
     cls, lid = gate_claim(gid)
@@ -846,13 +863,34 @@ def stopped():
     return r.stdout.strip() == "200"
 
 
+def fork_head(gid):
+    """sha of this fork's branch <gid> (the PR head), None when it does not exist. A git read, no API call. Raises when
+    unreadable (callers fail closed: no push, no PR)."""
+    for k in range(3):
+        r = run(["git"] + (auth_cfg() if PR_TOKEN else []) + ["ls-remote", f"https://github.com/{FORK}.git", f"refs/heads/{gid}"],
+                timeout=60)
+        if r.returncode == 0:
+            o = r.stdout.split()
+            return o[0] if o else None
+        time.sleep(2)
+    raise RuntimeError("fork branch unreadable")
+
+
+def our_prs_on_branch(gid, state):
+    out = gh(["api", f"repos/{UP}/pulls?head={HANDLE}:{gid}&state={state}", "--jq", ".[].html_url"])
+    if out.returncode:
+        raise RuntimeError(f"PR lookup failed rc={out.returncode}")
+    return out.stdout.split()
+
+
 def open_pr_for_branch(gid):
-    """Our own open PR whose head is this fork's branch <gid> (exact, no search index lag). Skipped (no API call) when
-    the fresh taken list has no PR at all for the step."""
+    """Our own open PR whose head is this fork's branch <gid> (exact, no search index lag). No API call when neither
+    the fresh taken list nor the fork has anything for the step (W6 mintfail: a PR younger than the taken list header
+    was missed and a re-run pushed onto it)."""
     tl = taken_list()
-    if tl is not None and gid not in tl:
+    if tl is not None and gid not in tl and fork_head(gid) is None:
         return None
-    out = gh(["api", f"repos/{UP}/pulls?head={HANDLE}:{gid}&state=open", "--jq", ".[].html_url"]).stdout.split()
+    out = our_prs_on_branch(gid, "open")
     return out[0] if out else None
 
 
@@ -874,7 +912,9 @@ def push_branch(c, gid):
     if nums:
         git("fetch", "-q", "--depth=1", url, f"{nums[0][1]}:refs/fork/tip", timeout=180)
     for att in range(4):
-        r = run(["git"] + auth_cfg() + ["-C", TREE, "push", "-q", "-f", url, f"{c}:refs/heads/{gid}"], timeout=600)
+        # create-only (Lead 06:12): the ref must not exist yet; an existing head is never rewritten
+        r = run(["git"] + auth_cfg() + ["-C", TREE, "push", "-q", f"--force-with-lease=refs/heads/{gid}:", url,
+                                        f"{c}:refs/heads/{gid}"], timeout=600)
         if r.returncode == 0 or not TRANSIENT.search(r.stderr):
             return r.stderr.strip()[:300] if r.returncode else None
         log("push retry", r.stderr.strip()[:150].replace("\n", " | "))
@@ -958,6 +998,21 @@ class pr_gate:
 
 
 def submit(gid, lease):
+    # Lead 06:12 (W6 mintfail): the head branch Leg0shii:<ID> is created once with a create-only push and never
+    # forced. If it exists: our open PR on it = done; our closed PR on it = stop (nothing reopens, I5); neither = the
+    # earlier run died between push and create: open the PR from the existing commit.
+    try:
+        head = fork_head(gid)
+        if head:
+            op = our_prs_on_branch(gid, "open")
+            if op:
+                return op[0], "ok (our PR on the existing branch)"
+            if our_prs_on_branch(gid, "closed"):
+                return None, "our PR on this branch was closed: no reopen (I5)"
+            log("branch", gid, "exists at", head[:12], "with no PR: opening the PR from it (no push)")
+            return create_pr(gid, lease)
+    except RuntimeError as e:
+        return None, "head check failed (fail closed): " + str(e)[:120]
     base = git("rev-parse", "HEAD").stdout.strip()
     if not base:
         return None, "no upstream main"
@@ -973,7 +1028,9 @@ def submit(gid, lease):
     changed = git("diff-tree", "--name-only", "-r", base, tree).stdout.split()
     if changed != [REL]:
         return None, f"unexpected changed files {changed}"
-    msg = gid + "\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\n"
+    # rule 16.5 (2): a per-opener nonce, so two openers never build the same sha
+    msg = gid + f"\n\nOpener-Nonce: cloud-{os.environ.get('GITHUB_RUN_ID', 'x')}-{os.urandom(6).hex()}" \
+        "\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\n"
     cenv = dict(os.environ, GIT_AUTHOR_NAME=HANDLE, GIT_COMMITTER_NAME=HANDLE, GIT_AUTHOR_EMAIL=EMAIL, GIT_COMMITTER_EMAIL=EMAIL)
     c = git("commit-tree", tree, "-p", base, "-m", msg, env=cenv).stdout.strip()
     if not c:
@@ -986,6 +1043,10 @@ def submit(gid, lease):
     if err:
         return None, "push: " + err
     log("pushed", c[:12], "to", f"{FORK}:{gid}")
+    return create_pr(gid, lease)
+
+
+def create_pr(gid, lease):
     r = None
     t_pr = time.time()
     for att in range(5):
@@ -1094,7 +1155,15 @@ def main():
     if url and DRY:
         log("dry run: our PR is already open, testing the rest anyway:", url)
     elif url:
-        finish("exists", "our PR for this branch is already open (PC watcher or an earlier run)", url)
+        old = None
+        try:
+            old = dg().lease_of(ID) if PR_TOKEN else None
+        except Exception:
+            pass
+        if old:                          # W6: the earlier run died before its release; the PR is open, so release now
+            release(old, "submitted")
+        finish("exists", "our PR for this branch is already open (PC watcher or an earlier run)"
+               + (f"; lease {old} released" if old else ""), url)
     # 1. guards (= formatscan on the PC)
     env = dict(os.environ, NODE=subprocess.run(["sh", "-c", "command -v node"], capture_output=True, text=True).stdout.strip())
     if MOD != ID.replace("-", "_"):
