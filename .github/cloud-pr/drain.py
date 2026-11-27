@@ -424,8 +424,8 @@ def one(sid, sha, prefix=None, extra=None):
     # Lead 19:14: the per-stage seconds of every unit in the drain log (prep = fetch of the ready commit + upstream
     # checkout before submit.py starts)
     for l in (r.stdout or "").splitlines():
-        if " TIMES " in l or " gate: " in l or " SKIP " in l or " halted: " in l or "WOULD-CREATE " in l or "SIGHT-TO-CREATE " in l:
-            log(sid, l.strip()[:200], f"prep={t_sub - T_ONE.get(sid, t_sub):.1f}" if " TIMES " in l else "")
+        if " TIMES " in l or " gate: " in l or " SKIP " in l or " halted: " in l or "WOULD-CREATE " in l or "SIGHT-TO-CREATE " in l or "COMMIT-STAGES" in l:
+            log(sid, l.strip()[:900], f"prep={t_sub - T_ONE.get(sid, t_sub):.1f}" if " TIMES " in l else "")
     res = dict(l.split("=", 1) for l in open(outp).read().splitlines() if "=" in l) if os.path.exists(outp) else {}
     tail = (r.stdout + r.stderr).strip().splitlines()[-1:] or [""]
     now = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
@@ -528,7 +528,8 @@ def main():
             time.sleep(0.5)
         log(f"WARM {time.time() - t_w:.1f} s: refresher copies", "ready" if all(os.path.exists(os.path.join(W, x))
             for x in ("rival_snap.json", "halt.json")) else "NOT ready (released anyway)", "- units released now")
-        if PREFIX == "loadtest":           # rehearsal marker for the builder: toolkit ref drill/warm-<epoch>
+        if PREFIX == "loadtest" and os.environ.get("DRILL_GAPS_REF"):   # rehearsal marker for the builder: toolkit ref
+            # drill/warm-<epoch>, only in -drill runs (W8 08:36: a lane canary with warm must not look like a rehearsal)
             ok = alert_ref(f"WARM drain run {os.environ.get('GITHUB_RUN_ID', '?')} released units at {time.time():.0f}",
                            "warm", prefix="drill")
             log("WARM marker ref drill/warm-*", "pushed" if ok else "push FAILED")

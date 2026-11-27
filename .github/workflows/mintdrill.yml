@@ -5,6 +5,12 @@ on:
   workflow_dispatch:
   push:
     branches: ['gateway-*']
+  workflow_call:
+    inputs:
+      ref:
+        description: commit to test (empty = the caller's commit)
+        type: string
+        default: ''
 permissions:
   contents: read
 jobs:
@@ -13,6 +19,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
       - name: Replay suite
         env:
           GH_TOKEN: ${{ github.token }}
