@@ -11,6 +11,10 @@ on:
     branches: ['loadcanary/**']
   workflow_dispatch:
     inputs:
+      ref:
+        description: commit or branch to test (empty = the dispatched branch)
+        type: string
+        default: ''
       workers:
         description: DRAIN_WORKERS
         type: string
@@ -23,14 +27,28 @@ on:
         description: DRAIN_PR_SLOTS
         type: string
         default: '8'
+  # lane ci (W8, Lead 08:17): lane-ci.yml calls this on every fork-internal PR to gateway-v1
+  workflow_call:
+    inputs:
+      ref: {type: string, default: ''}
+      workers: {type: string, default: '28'}
+      slots: {type: string, default: '8'}
+      warm_s: {type: string, default: '0'}
+    outputs:
+      line:
+        description: the LANE-CI summary line (lcsummary.py)
+        value: ${{ jobs.load.outputs.line }}
 
 permissions:
   contents: read
   actions: read
   pull-requests: read
 
+# W8 (Lead 08:36): one group PER BRANCH, so lanes and the rehearsal run side by side. A DRY drain only reads the
+# loadtest/* units (no claim, no push, no delete), so parallel runs cannot take each other's units; non-drill runs skip
+# the rehearsal's L-drill-* units (DRAIN_MATCH below). Lanes cap themselves at 3 canaries at once (lane-ci.yml "queue").
 concurrency:
-  group: loadcanary
+  group: loadcanary-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: false
 
 defaults:
@@ -41,13 +59,23 @@ jobs:
   load:
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    outputs:
+      line: ${{ steps.lcsum.outputs.line }}
     steps:
       - name: Check out the candidate (drain.py, submit.py, guards)
         uses: actions/checkout@v4
         with:
           path: src
+          ref: ${{ inputs.ref }}
           fetch-depth: 1
           persist-credentials: false
+      - name: GitHub core before (rate_limit is free)
+        env:
+          RT: ${{ github.token }}
+          PT: ${{ secrets.PR_TOKEN }}
+        run: |
+          for t in RT PT; do GH_TOKEN=${!t} gh api rate_limit --jq .resources.core.remaining 2>/dev/null || echo "?"; done | paste -sd' ' > core.before
+          cat core.before
       - name: Drain loadtest/ refs, every unit DRY
         env:
           SRC: ${{ github.workspace }}/src
@@ -73,6 +101,7 @@ jobs:
           case "$GITHUB_REF_NAME" in
             *-drill-*) t=${GITHUB_REF_NAME##*-drill-}; export DRAIN_MATCH="L-drill-$t-[0-9]+" DRILL_GAPS_REF="loadtest-gaps/$t";;
             *-drill) export DRAIN_MATCH='L-drill-[a-z0-9-]+' DRILL_GAPS_REF='loadtest-gaps/drill';;
+            *) export DRAIN_MATCH='(?!L-drill-).+';;      # W8: lane and plain canaries leave the rehearsal's units alone
           esac
           r=${GITHUB_REF_NAME%-drill*}
           case "$r" in *-lin[0-9]*) export DRAIN_LINGER=${r##*-lin}; r=${r%-lin*};; esac
@@ -124,3 +153,40 @@ jobs:
           grep -v 'rival snapshot:' "$W/refresher.log" 2>/dev/null | tail -5
           echo "closer reader (Lead 08:27 HOLD): $(grep -c '^.*closer beat' "$W/refresher.log" 2>/dev/null) beats read"; grep -E 'closer beat|HOLD|CLOSER-STALE' "$W/refresher.log" 2>/dev/null | sed -n '1,3p;$p'; echo "closer copy: $(cat "$W/closer.json" 2>/dev/null)"
           exit $rc
+      - name: LANE-CI summary line (lane ci, W8)
+        id: lcsum
+        if: always()
+        env:
+          RT: ${{ github.token }}
+          PT: ${{ secrets.PR_TOKEN }}
+          IN_W: ${{ inputs.workers || vars.LOADCANARY_WORKERS || '28' }}
+          IN_S: ${{ inputs.slots || vars.LOADCANARY_SLOTS || '8' }}
+          IN_WARM: ${{ inputs.warm_s || '0' }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || inputs.ref || github.sha }}
+        run: |
+          for t in RT PT; do GH_TOKEN=${!t} gh api rate_limit --jq .resources.core.remaining 2>/dev/null || echo "?"; done | paste -sd' ' > core.after
+          read rb pb < core.before; read ra pa < core.after
+          # the run token's first rate_limit answer can come from a fresh bucket (PR 3: 4999, drain 1 s later 3155):
+          # take "before" from the drain's own RUN-TOKEN line, the same bucket as core.after
+          d=$(grep -oE 'RUN-TOKEN rate_limit core limit/remaining: [0-9]+ [0-9]+' drain.log 2>/dev/null | head -1 | awk '{print $NF}')
+          [ -n "$d" ] && rb=$d
+          w=$IN_W; warm=$IN_WARM; r=${GITHUB_REF_NAME%-drill*}; r=${r%-lin*}       # same branch-name rules as the drain step
+          case "$r" in *-warm[0-9]*) warm=${r##*-warm}; r=${r%-warm*};; esac
+          case "$r" in *-w[0-9]*) w=${r##*-w};; esac
+          sha=$(git -C src rev-parse HEAD)
+          line=$(python3 -I src/.github/cloud-pr/lcsummary.py drain.log --sha "$sha" --head "$HEAD_SHA" --workers "$w" --slots "$IN_S" \
+                 --warm "$warm" --run "$GITHUB_RUN_ID" --reads-run "$rb,$ra" --reads-pr "$pb,$pa") ; rc=$?
+          [ -n "$line" ] || line="LANE-CI $(echo $sha | cut -c1-8) head=$(echo $HEAD_SHA | cut -c1-8) verdict=BAD (no drain.log or summary error)"
+          echo "$line"; echo "$line" > canary.txt
+          echo "line=$line" >> "$GITHUB_OUTPUT"
+          { echo '### LANE-CI'; echo '```'; echo "$line"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+      - name: Keep the summary and the drain log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lane-ci-canary
+          path: |
+            canary.txt
+            drain.log
+          retention-days: 14
