@@ -651,6 +651,16 @@ def stall_tick(n_inflight):
             log(m, "(alert ref pushed)" if ok else "(alert ref push FAILED)")
     except (OSError, ValueError, IndexError):
         pass
+    try:                                   # Lead 09:29: the run token's hourly limit (per repository) is used up
+        re_ = open(os.path.join(W, "runtoken-empty")).read().split()
+        if time.time() - ALERTED.get("runtoken-empty", 0) >= 300 and time.time() < float(re_[0]):
+            ALERTED["runtoken-empty"] = time.time()
+            m = (f"RUN-TOKEN-EMPTY the run token is at its hourly limit until "
+                 f"{time.strftime('%H:%M:%S', time.gmtime(float(re_[0])))} UTC: the drain reads with PR_TOKEN")
+            ok = DRY or alert_ref(m, "runtoken-empty")
+            log(m, "(alert ref pushed)" if ok else "(alert ref push FAILED)")
+    except (OSError, ValueError, IndexError):
+        pass
     try:                                   # 16.13: four create refusals ended this drain's creates
         gv = open(os.path.join(W, "giveup")).read().strip()
         if not ALERTED.get("prstall-giveup"):

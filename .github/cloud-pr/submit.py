@@ -297,17 +297,83 @@ def gate_claim(gid):
     return cls, (p[3] if cls == "ok" and len(p) >= 4 else None)
 
 
+# Lead 09:29 (RUN-TOKEN-EMPTY, RC-b): the run token's hourly limit is per REPOSITORY (5000 here), shared by every run of
+# the fork (canaries, lane-ci, the closer). At 0 every read failed closed = zero filing at mint time. Now a read refused
+# for the PRIMARY rate limit is sent again with PR_TOKEN, and until the run token's reset epoch every read of the drain
+# goes to PR_TOKEN directly (shared file SNAP_DIR/runtoken-empty: "<reset epoch> <when> <what>"); drain.py alerts
+# RUN-TOKEN-EMPTY. Writes and the create path are unchanged; RUNTOKEN_FALLBACK=0 turns it off.
+def primary_rl(r):
+    """the run token's PRIMARY rate limit refused this call (not a secondary limit, not a 304 at 0 remaining)"""
+    t = (r.stdout or "") + "\n" + (r.stderr or "")
+    if "secondary" in t.lower():
+        return False
+    if re.search(r"API rate limit exceeded", t, re.I):
+        return True
+    return bool(re.match(r"HTTP/\S+\s+(403|429)\b", r.stdout or "")
+                and re.search(r"^x-ratelimit-remaining:\s*0\s*$", r.stdout or "", re.I | re.M))
+
+
+def _rt_empty_file():
+    return os.path.join(os.environ.get("RIVAL_SNAP_DIR") or os.environ.get("PR_GATE_DIR") or W, "runtoken-empty")
+
+
+def runtoken_empty(now=None):
+    try:
+        return (time.time() if now is None else now) < float(open(_rt_empty_file()).read().split()[0])
+    except (OSError, ValueError, IndexError):
+        return False
+
+
+def _mark_runtoken_empty(r, args):
+    reset = None
+    m = re.search(r"^x-ratelimit-reset:\s*(\d+)", r.stdout or "", re.I | re.M)
+    if m:
+        reset = float(m.group(1))
+    if reset is None:
+        try:                                   # rate_limit is free and answers even at 0
+            q = run(["gh", "api", "rate_limit", "--jq", ".resources.core.reset"], timeout=20,
+                    env=dict(os.environ, GH_TOKEN=READ_TOKEN))
+            reset = float(q.stdout.strip())
+        except (ValueError, Exception):
+            reset = time.time() + 600
+    try:
+        f = _rt_empty_file()
+        os.makedirs(os.path.dirname(f), exist_ok=True)
+        with open(f + ".%d.tmp" % os.getpid(), "w") as o:
+            o.write(f"{reset:.0f} {time.time():.0f} {' '.join(args[:2])[:80]}\n")
+        os.replace(f + ".%d.tmp" % os.getpid(), f)
+    except OSError:
+        pass
+    log(f"RUN-TOKEN-EMPTY: run token at its hourly limit until {time.strftime('%H:%M:%S', time.gmtime(reset))} UTC; "
+        "reads go to PR_TOKEN")
+
+
 def gh(args, write=False, timeout=120):
-    """gh with the run's own token for reads (falls back to PR_TOKEN), PR_TOKEN for writes. Retries transient errors."""
-    # reads use the run's own GITHUB_TOKEN only: never fall back to PR_TOKEN, whose API limit the PC and every PR
-    # creation share (20:27 UTC: the account hit its limit and gh pr create failed on a wave)
-    toks = [PR_TOKEN] if write else [READ_TOKEN or ("" if os.environ.get("GITHUB_ACTIONS") else PR_TOKEN)]
+    """gh with the run's own token for reads, PR_TOKEN for writes. Retries transient errors. A read refused for the
+    run token's primary rate limit goes to PR_TOKEN (RUN-TOKEN-EMPTY above)."""
+    # reads use the run's own GITHUB_TOKEN: PR_TOKEN's API limit is shared by the PC and every PR creation (20:27 UTC
+    # 26 Nov: the account hit its limit and gh pr create failed on a wave), so it takes reads only while the run token is
+    # empty
+    fb = not write and READ_TOKEN and PR_TOKEN and os.environ.get("RUNTOKEN_FALLBACK", "1") != "0"
+    if write:
+        toks = [PR_TOKEN]
+    elif fb and runtoken_empty():
+        toks = [PR_TOKEN]
+    else:
+        toks = [READ_TOKEN or ("" if os.environ.get("GITHUB_ACTIONS") else PR_TOKEN)]
     r = None
-    for t in [x for x in toks if x]:
+    toks = [x for x in toks if x]
+    i = 0
+    while i < len(toks):                        # a list that can grow by PR_TOKEN (run token empty)
+        t = toks[i]; i += 1
         for att in range(3):
             r = run(["gh"] + args, timeout=timeout, env=dict(os.environ, GH_TOKEN=t))
             if r.returncode == 0:
                 return r
+            if fb and t == READ_TOKEN and primary_rl(r):
+                _mark_runtoken_empty(r, args)
+                toks.append(PR_TOKEN)
+                break
             if not TRANSIENT.search(r.stderr + r.stdout):
                 break
             time.sleep(5 * (att + 1))
