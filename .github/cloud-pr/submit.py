@@ -1204,15 +1204,112 @@ def push_branch(c, gid):
                   reverse=True)
     if nums:
         git("fetch", "-q", "--depth=1", url, f"{nums[0][1]}:refs/fork/tip", timeout=180)
+    refused = 0
     for att in range(4):
+        if push_gate_wait(gid):                    # Lead 09:08 (16.13 ext.): a drain stall stops pushes too
+            return "stall-giveup: four refusals in this drain, no push"
         # create-only (Lead 06:12): the ref must not exist yet; an existing head is never rewritten
         r = run(["git"] + auth_cfg() + ["-C", TREE, "push", "-q", f"--force-with-lease=refs/heads/{gid}:", url,
                                         f"{c}:refs/heads/{gid}"], timeout=600)
+        if r.returncode and push_refused(r.stderr):
+            refused += 1
+            push_refusal(gid, r.stderr, last=refused > 1)
+            if refused > 1:                        # the one retry after the stall was refused too: the drain retries
+                return "PUSH-REFUSED twice: " + r.stderr.strip()[:250]
+            continue
+        if refused:
+            push_first_done(gid)
         if r.returncode == 0 or not TRANSIENT.search(r.stderr):
             return r.stderr.strip()[:300] if r.returncode else None
         log("push retry", r.stderr.strip()[:150].replace("\n", " | "))
         time.sleep(5 * (att + 1))
+    push_first_done(gid)
     return r.stderr.strip()[:300]
+
+
+# Lead 09:08 (HARDENING 16.13 extended): GitHub recommends at most 6 pushes a minute per repository; pushes to the fork
+# got a 429 (08:49:57, "The requested URL returned error: 429") and a 403 inside bursts. A 403 or 429 on a head push is
+# a REFUSAL: the same drain stall as a create refusal (PR_GATE_DIR/stall, ladder 60/120/240, 4th = giveup), alert
+# PUSH-REFUSED, the refused unit pushes once more after the stall and FIRST (PR_GATE_DIR/pushfirst): no other worker
+# pushes or creates before it. A push rejected because the ref exists is not a refusal.
+PUSH_REFUSED_RE = re.compile(r"returned error: (403|429)\b|\bHTTP (403|429)\b")
+PUSH_FIRST_S = 120             # a pushfirst token older than its stall + this is stale (its worker died)
+
+
+def push_refused(stderr):
+    return bool(PUSH_REFUSED_RE.search(stderr or ""))
+
+
+def _push_first():
+    """(gid, deadline) of the refused unit that pushes first, or None"""
+    d = os.environ.get("PR_GATE_DIR")
+    try:
+        g, dl = open(os.path.join(d, "pushfirst")).read().split()
+        return (g, float(dl)) if time.time() < float(dl) else None
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def push_gate_wait(gid):
+    """before every head push: wait out a drain stall and another unit's push-first turn. True = give up (the drain's
+    4th refusal). No drain (PR_GATE_DIR unset): no wait."""
+    d = os.environ.get("PR_GATE_DIR")
+    if not d:
+        return False
+    t0 = time.time()
+    while True:
+        if os.path.exists(os.path.join(d, "giveup")):
+            return True
+        try:
+            until = float(open(os.path.join(d, "stall")).read())
+        except (OSError, ValueError):
+            until = 0.0
+        pf = _push_first()
+        now = time.time()
+        if now >= until and (pf is None or pf[0] == gid):
+            break
+        time.sleep(max(0.05, min((until - now) if now < until else 0.2, 5)))
+    if time.time() - t0 > 0.5:
+        STG["push_wait"] = round(time.time() - t0, 1)
+    return False
+
+
+def push_refusal(gid, stderr, last=False):
+    """a 403/429 on gid's head push: the drain stall (bucket_refusal, same ladder and giveup), PR_GATE_DIR/pushrefused
+    for the drain's PUSH-REFUSED alert, and the push-first token for gid (cleared when last). No drain: wait 60 s."""
+    txt = " ".join((stderr or "").split())[:200]
+    d = os.environ.get("PR_GATE_DIR")
+    if not d:
+        log("PUSH-REFUSED", gid, txt, "(no drain: retry in 60 s)" if not last else "")
+        if not last:
+            time.sleep(60)
+        return
+    k, wait, rate = bucket_refusal(d, {}, "PUSH-REFUSED " + txt, kind="PUSH-REFUSED")
+    now = time.time()
+    try:
+        with open(os.path.join(d, "pushrefused.tmp"), "w") as o:
+            o.write(f"{now:.0f} {k} {wait:.0f} {gid} {txt}\n")
+        os.replace(os.path.join(d, "pushrefused.tmp"), os.path.join(d, "pushrefused"))
+        if last:
+            push_first_done(gid)
+        else:
+            with open(os.path.join(d, "pushfirst.tmp"), "w") as o:
+                o.write(f"{gid} {now + wait + PUSH_FIRST_S:.1f}\n")
+            os.replace(os.path.join(d, "pushfirst.tmp"), os.path.join(d, "pushfirst"))
+    except OSError:
+        pass
+    log("PUSH-REFUSED", gid, f"refusal {k}/4: every worker stops pushing and creating for {wait:.0f} s,",
+        "this unit pushes once more first" if not last else "second refusal: unit left for the drain's retry", f"({txt})")
+
+
+def push_first_done(gid):
+    pf = _push_first()
+    d = os.environ.get("PR_GATE_DIR")
+    if d and pf and pf[0] == gid:
+        try:
+            os.remove(os.path.join(d, "pushfirst"))
+        except OSError:
+            pass
 
 
 PR_PER_MIN = int(os.environ.get("PR_PER_MIN", "70"))       # Lead 06:12: GitHub documents 80/min and 500/hour per token
@@ -1231,6 +1328,8 @@ def bucket_wait(d, now):
             until = 0.0
         if now < until:
             return until - now
+        if _push_first() is not None:            # Lead 09:08: the refused unit's push goes before any create
+            return 0.2
         f = os.path.join(d, "creates.log")
         try:
             ts = [float(x) for x in open(f).read().split() if now - float(x) < 3600]
@@ -1281,7 +1380,7 @@ def refusal_wait(k, hdr, now):
     return max(base, 60.0 * 2 ** (k - 1)) if k > 1 else base
 
 
-def bucket_refusal(d, hdr, why, now=None):
+def bucket_refusal(d, hdr, why, now=None, kind="PR-STALL"):
     """16.13: GitHub refused a create (403/429/secondary limit). Every worker of the drain stops creating for
     refusal_wait(); the rate is halved; the 4th refusal ends the drain's creates (PR_GATE_DIR/giveup, PR-STALL-GIVEUP).
     Returns (k, wait, rate)."""
@@ -1306,7 +1405,7 @@ def bucket_refusal(d, hdr, why, now=None):
     if k >= 4:
         log(f"PR-STALL-GIVEUP refusal {k} in this drain: no more creates in this drain (units stay unseen) ({hs})")
     else:
-        log(f"PR-STALL refusal {k}/4: every worker stops creating for {wait:.0f} s, rate now {rate}/min ({hs})")
+        log(f"{kind} refusal {k}/4: every worker stops creating for {wait:.0f} s, rate now {rate}/min ({hs})")
     return k, wait, rate
 
 

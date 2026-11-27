@@ -649,6 +649,16 @@ def stall_tick(n_inflight):
             log(m, "(alert ref pushed)" if ok else "(alert ref push FAILED)")
     except OSError:
         pass
+    try:                                   # Lead 09:08 (16.13 ext.): GitHub refused a head push (403/429)
+        pr = open(os.path.join(W, "pushrefused")).read().split(None, 4)
+        if time.time() - ALERTED.get("pushrefused", 0) >= 300 and time.time() - float(pr[0]) < 300:
+            ALERTED["pushrefused"] = time.time()
+            m = (f"PUSH-REFUSED refusal {pr[1]}/4 on {pr[3]}: every worker stops pushing and creating for {pr[2]} s, "
+                 f"that unit pushes first after it ({pr[4][:120] if len(pr) > 4 else ''})")
+            ok = DRY or alert_ref(m, "pushrefused")
+            log(m, "(alert ref pushed)" if ok else "(alert ref push FAILED)")
+    except (OSError, ValueError, IndexError):
+        pass
     for kind, msg in stall_alerts(time.time(), n_inflight, LAST_DONE[0], T0, su):
         ALERTED[kind] = time.time()
         ok = DRY or alert_ref(msg, kind)
