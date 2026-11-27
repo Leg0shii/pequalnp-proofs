@@ -1,0 +1,120 @@
+# LIVE DRY LOAD CANARY (Lead 06:30 UTC 27 Nov): the real drain.py on a real runner, at the wave setting, over the
+# test refs loadtest/<ID> (each one commit with ready/<MOD>.lean, like a ready/ push). Every submit.py runs DRY: guards,
+# race check, rival snapshot, no desk claim, no push, no PR. State goes to drain-state-loadtest, never drain-state.
+# Reports: per-unit prep and submit times (p50/p95), runner CPU (vmstat every 2 s), results.
+# Start: push the candidate sha as branch loadcanary/<anything> (a push runs the workflow file of the pushed commit, so
+# this works before the file is on main); or dispatch once it is on main. The drain code is that ref, not main.
+name: loadcanary
+
+on:
+  push:
+    branches: ['loadcanary/**']
+  workflow_dispatch:
+    inputs:
+      workers:
+        description: DRAIN_WORKERS
+        type: string
+        default: '28'
+      warm_s:
+        description: DRAIN_WARM_S (refresher runs this long before units are released)
+        type: string
+        default: '0'
+      slots:
+        description: DRAIN_PR_SLOTS
+        type: string
+        default: '8'
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+
+concurrency:
+  group: loadcanary
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  load:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out the candidate (drain.py, submit.py, guards)
+        uses: actions/checkout@v4
+        with:
+          path: src
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Drain loadtest/ refs, every unit DRY
+        env:
+          SRC: ${{ github.workspace }}/src
+          W: ${{ github.workspace }}/work
+          READ_TOKEN: ${{ github.token }}
+          PR_TOKEN: ${{ secrets.PR_TOKEN }}
+          DRAIN_PREFIX: loadtest
+          DRAIN_WORKERS: ${{ inputs.workers || vars.LOADCANARY_WORKERS || '28' }}
+          DRAIN_PR_SLOTS: ${{ inputs.slots || vars.LOADCANARY_SLOTS || '8' }}
+          DRAIN_REFRESHER: '1'
+          DRAIN_LINGER: '20'
+          DRAIN_MAX_S: '900'
+          DRAIN_IDLE_POLL_S: '1'
+          DRAIN_WARM_S: ${{ inputs.warm_s || '0' }}
+        run: |
+          set -uo pipefail
+          [ -n "${PR_TOKEN:-}" ] || { echo "::error::no PR_TOKEN secret: stop"; exit 1; }
+          # workers from the branch name loadcanary/<x>-w<N> (Lead 07:14: runs at 14, 20, 28)
+          # branch loadcanary/<x>-w<N>[-warm<S>] (Lead 08:12: WARM_S = the refresher runs S s before the units are released)
+          # rehearsal: -lin<S> = DRAIN_LINGER S, -drill = only loadtest/L-drill-* units (DRAIN_MATCH)
+          case "$GITHUB_REF_NAME" in *-drill*) export DRAIN_MATCH='L-drill-[a-z0-9-]+';; esac
+          r=${GITHUB_REF_NAME%-drill*}
+          case "$r" in *-lin[0-9]*) export DRAIN_LINGER=${r##*-lin}; r=${r%-lin*};; esac
+          case "$r" in *-warm[0-9]*) export DRAIN_WARM_S=${r##*-warm};; esac
+          b=${r%-warm*}
+          case "$b" in *-w[0-9]*) export DRAIN_WORKERS=${b##*-w};; esac
+          echo "warm $DRAIN_WARM_S linger $DRAIN_LINGER match ${DRAIN_MATCH:-all}"
+          echo "workers $DRAIN_WORKERS slots $DRAIN_PR_SLOTS"
+          nproc; free -m | head -2
+          vmstat -n 2 > cpu.log &
+          vm=$!
+          # what the CPU is spent on: every 0.5 s, the running (R) processes by command name
+          ( while :; do ps -eo stat=,comm= | awk '$1 ~ /^R/ {print $2}'; echo "--"; sleep 0.5; done ) > run.log &
+          ps_loop=$!
+          t0=$(date +%s)
+          python3 -I "$SRC/.github/cloud-pr/drain.py" 2>&1 | tee drain.log
+          rc=${PIPESTATUS[0]}
+          kill $vm $ps_loop 2>/dev/null
+          echo "drain rc=$rc wall=$(( $(date +%s) - t0 )) s"
+          python3 - <<'EOF'
+          import re, statistics as st
+          L = open("drain.log").read().splitlines()
+          def pct(v, q):
+              v = sorted(v); return v[min(len(v) - 1, int(q * len(v)))] if v else float("nan")
+          prep = [float(m.group(1)) for l in L for m in [re.search(r"prep=([\d.]+)", l)] if m and " TIMES " in l]
+          tot = [float(m.group(1)) for l in L for m in [re.search(r" total=([\d.]+)", l)] if m and " TIMES " in l]
+          snap = [float(m.group(1)) for l in L for m in [re.search(r"snap_age=([\d.]+)", l)] if m]
+          res = {}
+          for l in L:
+              m = re.search(r"DONE \S+ (\S+)", l)
+              if m: res[m.group(1)] = res.get(m.group(1), 0) + 1
+          cpu = []
+          for l in open("cpu.log").read().splitlines():
+              p = l.split()
+              if len(p) >= 17 and p[0].isdigit():
+                  cpu.append(100 - int(p[14]))          # 100 - idle
+          rq = [int(l.split()[0]) for l in open("cpu.log").read().splitlines() if l.split() and l.split()[0].isdigit()]
+          print(f"LOADCANARY units={len(prep)} results={res}")
+          print(f"LOADCANARY prep p50={pct(prep, .5):.1f}s p95={pct(prep, .95):.1f}s  submit total p50={pct(tot, .5):.1f}s p95={pct(tot, .95):.1f}s")
+          import collections
+          cnt = collections.Counter(l.strip() for l in open("run.log") if l.strip() and l.strip() != "--")
+          tot_r = sum(cnt.values()) or 1
+          print("LOADCANARY cpu by command (share of running-process samples): " +
+                ", ".join(f"{k} {100 * v / tot_r:.0f}%" for k, v in cnt.most_common(8)))
+          print(f"LOADCANARY snap_age max={max(snap) if snap else float('nan'):.1f}s  cpu busy avg={st.mean(cpu) if cpu else float('nan'):.0f}% max={max(cpu) if cpu else 0}%  run-queue max={max(rq) if rq else 0}")
+          EOF
+          grep -i "refresher" drain.log | head -3
+          echo "refresher log: $(grep -c 'rival snapshot:' "$W/refresher.log" 2>/dev/null) builds"; grep 'rival snapshot:' "$W/refresher.log" 2>/dev/null | sed -n '1,3p;$p'
+          grep -v 'rival snapshot:' "$W/refresher.log" 2>/dev/null | tail -5
+          exit $rc

@@ -43,6 +43,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: watcher-backup
@@ -75,7 +76,7 @@ jobs:
           PR_TOKEN: ${{ secrets.PR_TOKEN }}
         run: |
           set -uo pipefail
-          [ -n "${PR_TOKEN:-}" ] || { echo "no PR_TOKEN secret"; echo "run=0" >> "$GITHUB_OUTPUT"; exit 0; }
+          [ -n "${PR_TOKEN:-}" ] || { echo "::error::no PR_TOKEN secret"; echo "run=0" >> "$GITHUB_OUTPUT"; exit 1; }
           printf '%s' "$HBREF" | grep -Eqx '[A-Za-z0-9._/-]+' || { echo "bad hbref"; echo "run=0" >> "$GITHUB_OUTPUT"; exit 0; }
           mkdir -p "$W"
           git config --global http.https://github.com/.extraheader "AUTHORIZATION: basic $(printf 'x-access-token:%s' "$PR_TOKEN" | base64 -w0)"
@@ -229,6 +230,11 @@ jobs:
           GH_TOKEN: ${{ secrets.PR_TOKEN }}
         shell: bash
         run: |
-          [ -n "${GH_TOKEN:-}" ] || exit 0
+          [ -n "${GH_TOKEN:-}" ] || { echo "::error::no PR_TOKEN secret: no next run"; exit 1; }
           for i in 1 2 3 4 5; do gh workflow run backup.yml --repo "$GITHUB_REPOSITORY" --ref main -f chain=true -f dry=false -f force=false && exit 0; sleep $((i * 10)); done
           echo "could not start the next run"; exit 1
+      - name: Queue delay (B13, measurement only, never fails the job)
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: curl -sfL --max-time 20 "https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/.github/cloud-pr/qdelay.py" -o "$RUNNER_TEMP/qdelay.py" && python3 -I "$RUNNER_TEMP/qdelay.py" run || true
