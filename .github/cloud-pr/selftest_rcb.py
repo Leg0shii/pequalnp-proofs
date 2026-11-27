@@ -374,6 +374,70 @@ if have and hasattr(D, "stall_tick"):
     D.stall_tick(0); D.stall_tick(0)
     case("16.12-SNAP-SLOW-alert-once", [k for k, m in sent] == ["snapslow"], f"(alerts {sent})")
 
+# ---- 16.13 (Lead 07:25): GitHub's refusal protocol for creates
+if hasattr(S, "bucket_refusal") and hasattr(S, "parse_create"):
+    G = tempfile.mkdtemp(); now = 3_000_000_000.0
+    k, w, r = S.bucket_refusal(G, {"retry-after": "30"}, "secondary rate limit", now)
+    case("16.13-retry-after-honoured", (k, w, r) == (1, 30.0, 35) and S.bucket_wait(G, now + 29) > 0 and S.bucket_wait(G, now + 30.5) == 0,
+         f"(refusal {k} wait {w} rate {r})")
+    G = tempfile.mkdtemp()
+    k, w, r = S.bucket_refusal(G, {"x-ratelimit-remaining": "0", "x-ratelimit-reset": str(int(now) + 200)}, "", now)
+    case("16.13-ratelimit-reset-when-remaining-0", k == 1 and 200 <= w <= 202, f"(wait {w})")
+    G = tempfile.mkdtemp()
+    seq = [S.bucket_refusal(G, {}, "", now + i * 1000) for i in range(3)]
+    case("16.13-doubling-60-120-240", [x[1] for x in seq] == [60.0, 120.0, 240.0], f"({[x[1] for x in seq]})")
+    case("16.13-rate-halved-70-35-17", [x[2] for x in seq] == [35, 17, 10], f"(rates {[x[2] for x in seq]})")
+    k4 = S.bucket_refusal(G, {}, "", now + 4000)
+    case("16.13-fourth-refusal-gives-up", k4[0] == 4 and S.bucket_wait(G, now + 99999) == float("inf"), f"({k4})")
+    # through create_pr: a REST 403 with headers stops ALL creates (no second request while limited) and is logged
+    Gd = tempfile.mkdtemp(); creates = []; logs = []
+    os.environ["PR_GATE_DIR"] = Gd; os.environ["PR_GATE_N"] = "2"
+    R403 = "HTTP/2.0 403 Forbidden\r\nRetry-After: 45\r\nX-Ratelimit-Remaining: 4000\r\nX-Ratelimit-Limit: 5000\r\n\r\n" \
+        '{"message":"You have exceeded a secondary rate limit"}'
+    R201 = "HTTP/2.0 201 Created\r\nX-Ratelimit-Remaining: 3999\r\n\r\n" + '{"html_url":"https://github.com/open-goat/pequalnp-proofs/pull/7","number":7}'
+    sv = (S.run, S.filing_halted, S.rival_now, S.stopped, S.site_closed_now, S.log, S.pr_body)
+    CL = [now]
+    S.time.time = lambda: CL[0]
+    S.time.sleep = lambda x: CL.__setitem__(0, CL[0] + x)
+    def frun(cmd, timeout=300, env=None, cwd=None):
+        creates.append(CL[0])
+        return cp(R403 if len(creates) == 1 else R201, 1 if len(creates) == 1 else 0, "gh: (HTTP 403)" if len(creates) == 1 else "")
+    S.run = frun; S.filing_halted = lambda *a: (False, ""); S.rival_now = lambda *a: None; S.stopped = lambda: False
+    S.site_closed_now = lambda: None; S.log = lambda *a: logs.append(" ".join(map(str, a))); S.pr_body = lambda l: "body"
+    try:
+        url, why = S.create_pr("L-meta-1", "lease-x")
+        gap = creates[1] - creates[0] if len(creates) > 1 else 0
+        case("16.13-no-request-while-limited", url and len(creates) == 2 and gap >= 45, f"(creates {len(creates)}, second {gap:.0f} s after the 403)")
+        ln = next((l for l in logs if l.startswith("CREATE ")), "")
+        case("16.13-non-2xx-logged-with-headers", "http 403" in ln and "retry-after=45" in ln and "x-ratelimit-remaining=4000" in ln, f"({ln[:120]})")
+        case("16.13-new-rate-logged", any("rate now 35/min" in l for l in logs), "")
+        acc = open(os.path.join(Gd, "accepted.log")).read().split() if os.path.exists(os.path.join(Gd, "accepted.log")) else []
+        case("07:27-accepted-create-recorded", len(acc) == 1, f"({acc})")
+        for i in range(3):
+            S.bucket_refusal(Gd, {}, "", CL[0])
+        creates.clear()
+        url, why = S.create_pr("L-meta-2", "lease-y")
+        case("16.13-giveup-no-create", url is None and why.startswith("stall-giveup") and not creates, f"({why[:60]}, creates {len(creates)})")
+    finally:
+        S.run, S.filing_halted, S.rival_now, S.stopped, S.site_closed_now, S.log, S.pr_body = sv
+        S.time.time, S.time.sleep = REAL_TIME, REAL_SLEEP
+        os.environ.pop("PR_GATE_DIR", None)
+    if D is not None:
+        sent.clear(); D.ALERTED.clear(); D.W = Gd; D.LAST_DONE[0] = time.time(); D.T0 = time.time()
+        D.stall_tick(0); D.stall_tick(0)
+        dr = open(os.path.join(os.path.dirname(D.__file__), "drain.py")).read()
+        case("16.13-PR-STALL-GIVEUP-alert-once", [k for k, m in sent if k == "prstall-giveup"] == ["prstall-giveup"], f"({[k for k, m in sent]})")
+        case("16.13-giveup-units-unseen", '"site-closed", "stall-giveup"' in dr, "")
+        if hasattr(D, "creates_tick"):
+            Gc = tempfile.mkdtemp(); D.W = Gc; D._CW[0] = 0.0; t0 = 3_000_000_000.0
+            open(os.path.join(Gc, "accepted.log"), "w").write("".join(f"{t0 + i * 0.9:.3f}\n" for i in range(12)))
+            l1 = D.creates_tick(t0 + 15); l2 = D.creates_tick(t0 + 16); l3 = D.creates_tick(t0 + 25)
+            case("07:27-creates-per-10s-logged", l1 and "accepted 12" in l1 and l2 is None and l3 is None, f"({l1})")
+        else:
+            case("07:27-creates-per-10s-logged", False, "(no creates_tick)")
+else:
+    case("16.13-refusal-protocol", False, "(no bucket_refusal in this submit.py)")
+
 bad = [n for n, ok in res if not ok]
 print(f"RCB SELFTEST OK {len(res)}" if not bad else "RCB SELFTEST FAIL " + " ".join(bad))
 sys.exit(1 if bad else 0)

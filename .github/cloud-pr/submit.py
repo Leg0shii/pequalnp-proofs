@@ -1037,8 +1037,10 @@ def bucket_wait(d, now):
             ts = [float(x) for x in open(f).read().split() if now - float(x) < 3600]
         except Exception:
             ts = []
+        if os.path.exists(os.path.join(d, "giveup")):
+            return float("inf")                      # 16.13: four refusals in this drain: no create any more
         last_min = [t for t in ts if now - t < 60]
-        if len(last_min) >= PR_PER_MIN:
+        if len(last_min) >= gate_rate(d):
             return 60 - (now - min(last_min)) + 0.05
         if len(ts) >= PR_PER_HOUR:
             return 3600 - (now - min(ts)) + 0.05
@@ -1047,6 +1049,66 @@ def bucket_wait(d, now):
             o.write("\n".join(f"{t:.3f}" for t in ts))
         os.replace(f + ".tmp", f)
         return 0.0
+
+
+PR_RATE_FLOOR = 10
+RL_HDRS = ("retry-after", "x-ratelimit-limit", "x-ratelimit-remaining", "x-ratelimit-used", "x-ratelimit-reset",
+           "x-ratelimit-resource")
+
+
+def refusals(d):
+    try:
+        return int(open(os.path.join(d, "refusals")).read().strip() or 0)
+    except (OSError, ValueError):
+        return 0
+
+
+def gate_rate(d):
+    """HARDENING 16.13 (Lead 07:25) (2): the drain's create rate, halved after every refusal (70, 35, 17, floor 10)"""
+    k = refusals(d)
+    return max(PR_RATE_FLOOR, PR_PER_MIN >> k) if k else PR_PER_MIN
+
+
+def refusal_wait(k, hdr, now):
+    """16.13 (1): retry-after if present, else until x-ratelimit-reset when x-ratelimit-remaining is 0, else 60 s;
+    the k-th refusal of a drain waits at least 60 * 2^(k-1) s (60, 120, 240)"""
+    ra, rem, rs = (str(hdr.get(x) or "").strip() for x in ("retry-after", "x-ratelimit-remaining", "x-ratelimit-reset"))
+    if ra.isdigit():
+        base = float(ra)
+    elif rem == "0" and rs.isdigit():
+        base = max(0.0, float(rs) - now) + 1.0
+    else:
+        base = 60.0
+    return max(base, 60.0 * 2 ** (k - 1)) if k > 1 else base
+
+
+def bucket_refusal(d, hdr, why, now=None):
+    """16.13: GitHub refused a create (403/429/secondary limit). Every worker of the drain stops creating for
+    refusal_wait(); the rate is halved; the 4th refusal ends the drain's creates (PR_GATE_DIR/giveup, PR-STALL-GIVEUP).
+    Returns (k, wait, rate)."""
+    now = time.time() if now is None else now
+    with open(os.path.join(d, "creates.lock"), "w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        k = refusals(d) + 1
+        with open(os.path.join(d, "refusals"), "w") as o:
+            o.write(str(k))
+        wait = refusal_wait(k, hdr, now)
+        try:
+            until = float(open(os.path.join(d, "stall")).read())
+        except Exception:
+            until = 0.0
+        with open(os.path.join(d, "stall"), "w") as o:
+            o.write(str(max(until, now + wait)))
+        if k >= 4:
+            with open(os.path.join(d, "giveup"), "w") as o:
+                o.write(f"{now:.0f} {why[:200]}".replace("\n", " "))
+    rate = gate_rate(d)
+    hs = " ".join(f"{x}={hdr.get(x, '')}" for x in RL_HDRS)
+    if k >= 4:
+        log(f"PR-STALL-GIVEUP refusal {k} in this drain: no more creates in this drain (units stay unseen) ({hs})")
+    else:
+        log(f"PR-STALL refusal {k}/4: every worker stops creating for {wait:.0f} s, rate now {rate}/min ({hs})")
+    return k, wait, rate
 
 
 def bucket_stall(d, seconds, why):
@@ -1077,8 +1139,12 @@ class pr_gate:
                 break
             time.sleep(0.2)
         t0 = time.time()
+        self.giveup = False
         while d:
             w = bucket_wait(d, time.time())
+            if w == float("inf"):
+                self.giveup = True               # 16.13: four refusals: this drain creates nothing more
+                break
             if w <= 0:
                 break
             time.sleep(min(w, 5))
@@ -1140,9 +1206,54 @@ def submit(gid, lease):
     return create_pr(gid, lease)
 
 
+def pr_create_cmd(gid, body):
+    """16.13 (3): the create through REST with the response headers (gh api -i), so a refusal's retry-after and
+    x-ratelimit headers are seen and logged (gh pr create shows neither)"""
+    return ["gh", "api", "-i", "-X", "POST", f"repos/{UP}/pulls", "-f", f"title={gid}", "-f", f"head={HANDLE}:{gid}",
+            "-f", "base=main", "-f", f"body={body}"]
+
+
+def parse_create(r):
+    """(code, headers, url, text) from a create's CompletedProcess: `gh api -i` output (status line, headers, JSON),
+    or the plain shape (a URL on stdout, "HTTP 403: ..." / "already exists" on stderr). Never the request body."""
+    out, err = r.stdout or "", r.stderr or ""
+    hdr, code, url, text = {}, 0, None, ""
+    if out.startswith("HTTP/"):
+        head, _, body = out.replace("\r\n", "\n").partition("\n\n")
+        m = re.match(r"HTTP/\S+ (\d{3})", head)
+        code = int(m.group(1)) if m else 0
+        for ln in head.split("\n")[1:]:
+            k, _, v = ln.partition(":")
+            if k.strip().lower() in RL_HDRS:
+                hdr[k.strip().lower()] = v.strip()
+        try:
+            j = json.loads(body)
+            url = j.get("html_url") if 200 <= code < 300 else None
+            text = " ".join([str(j.get("message", ""))] + [str(e.get("message", e) if isinstance(e, dict) else e)
+                                                         for e in (j.get("errors") or [])])
+        except Exception:
+            text = body.strip()[:200]
+    else:
+        url = (re.findall(r"https://github\.com/\S+/pull/\d+", out) or [None])[0] if r.returncode == 0 else None
+        m = re.search(r"HTTP (\d{3})", err + out)
+        code = 201 if url else (int(m.group(1)) if m else (422 if "already exists" in err + out else 0))
+        text = err.strip()[:300]
+        for x in RL_HDRS:
+            mm = re.search(r"(?i)%s:?\s*(\d+|\w+)" % re.escape(x), err + out)
+            if mm:
+                hdr[x] = mm.group(1)
+        if code == 422 and not url:
+            url = (re.findall(r"https://github\.com/\S+/pull/\d+", err + out) or [None])[0]
+    return code, hdr, url, (text + " " + err.strip()[:120]).strip()
+
+
+REFUSED = re.compile(r"secondary rate limit|submitted too quickly|abuse detection", re.I)
+
+
 def create_pr(gid, lease):
     r = None
     t_pr = time.time()
+    url, ctext = None, ""
     for att in range(5):
         if stopped():                    # STOP may appear while this PR waited for a retry
             return None, "STOP file on upstream main"
@@ -1151,7 +1262,10 @@ def create_pr(gid, lease):
             log("site-closed:", gid, sc, f"(before create attempt {att + 1}): held, retried when it reopens")
             return None, "site-closed: " + sc
         body = pr_body(lease)
-        with pr_gate():
+        with pr_gate() as g:
+            if getattr(g, "giveup", False):
+                log("PR-STALL-GIVEUP:", gid, "no create (four refusals in this drain): unit stays unseen")
+                return None, "stall-giveup: four create refusals in this drain"
             # Lead 06:12 a0 (w12 stall drill): before EVERY attempt, after any slot, bucket or backoff wait: the halt
             # switch, and for an unleased PR a rival snapshot at most SNAP_CREATE_AGE_S old (Lead 18:53)
             h, hwhy = filing_halted()
@@ -1166,22 +1280,44 @@ def create_pr(gid, lease):
                 if rv:
                     log("SKIP", gid, f"unleased PR not opened (attempt {att + 1}), rival", rv)
                     return None, "rival PR open: " + rv
-            r = run(["gh", "pr", "create", "--repo", UP, "--head", f"{HANDLE}:{gid}", "--base", "main",
-                     "--title", gid, "--body", body], timeout=120, env=dict(os.environ, GH_TOKEN=PR_TOKEN))
-        if re.search(r"https://\S+", r.stdout) or "already exists" in r.stderr:
-            break                                   # an existing PR for our branch is a success
-        m403 = re.search(r"HTTP (403|429)|secondary rate limit|submitted too quickly", r.stderr + r.stdout)
-        if m403 and os.environ.get("PR_GATE_DIR"):
-            ra = re.search(r"(?i)retry-after:?\s*(\d+)", r.stderr + r.stdout)
-            bucket_stall(os.environ["PR_GATE_DIR"], float(ra.group(1)) if ra else 60.0, (r.stderr + r.stdout).strip())
-        if not TRANSIENT.search(r.stderr + r.stdout) or att == 4:
+            t_c = time.time()
+            r = run(pr_create_cmd(gid, body), timeout=120, env=dict(os.environ, GH_TOKEN=PR_TOKEN))
+        lat = time.time() - t_c
+        code, hdr, url, ctext = parse_create(r)
+        if url and code == 201 and os.environ.get("PR_GATE_DIR"):
+            try:                                    # Lead 07:27: accepted creates, counted per 10 s by drain.py
+                with open(os.path.join(os.environ["PR_GATE_DIR"], "accepted.log"), "a") as o:
+                    o.write(f"{time.time():.3f}\n")
+            except OSError:
+                pass
+        if url:
+            break                                   # created, or GitHub named our existing PR
+        if code == 422 and "already exists" in ctext:
+            try:                                    # REST does not name the existing PR: look it up (READ_TOKEN)
+                op = our_prs_on_branch(gid, "open")
+            except RuntimeError:
+                op = []
+            url = op[0] if op else None
+            if url:
+                break                               # an existing PR for our branch is a success
+        hs = " ".join(f"{x}={hdr.get(x, '')}" for x in RL_HDRS)
+        log(f"CREATE {gid} attempt {att + 1}: http {code} latency {lat:.2f} s {hs} {ctext[:160]!r}")
+        refused = code in (403, 429) or (not 200 <= code < 300 and REFUSED.search(ctext))
+        if refused and os.environ.get("PR_GATE_DIR"):
+            k, wait, rate = bucket_refusal(os.environ["PR_GATE_DIR"], hdr, ctext)
+            if k >= 4:
+                STG["pr"] = round(time.time() - t_pr, 1)
+                return None, "stall-giveup: four create refusals in this drain"
+            if att == 4:
+                break
+            continue                                # the next attempt waits in pr_gate until the stall ends
+        if not (refused or TRANSIENT.search(ctext)) or att == 4:
             break
-        log("PR retry in", 30 * 2 ** att, "s:", r.stderr.strip()[:150])
+        log("PR retry in", 30 * 2 ** att, "s:", ctext[:150])
         time.sleep(30 * 2 ** att)
-    url = (re.findall(r"https://github\.com/\S+/pull/\d+", r.stdout + r.stderr) or [None])[0]
     STG["pr"] = round(time.time() - t_pr, 1)
     LEASE[0] = lease
-    return url, ("ok" if url else r.stderr.strip()[:300])
+    return url, ("ok" if url else (ctext or (r.stderr if r else "")).strip()[:300])
 
 
 def delete_ready():
@@ -1406,6 +1542,8 @@ def main():
         finish("race", why2)
     if not url and why2.startswith("STOP"):
         finish("stopped", why2 + " (branch kept)")
+    if not url and why2.startswith("stall-giveup: "):
+        finish("stall-giveup", why2[14:] + " (branch kept, unit unseen)")
     if not url and why2.startswith("site-closed: "):
         finish("site-closed", why2[13:] + " (branch kept)")
     if not url and why2.startswith("halted: "):

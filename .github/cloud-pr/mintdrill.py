@@ -159,11 +159,11 @@ def child_submit(src, w):
     S.git = git
 
     def run(cmd, timeout=300, env=None, cwd=None):
-        if cmd[:3] == ["gh", "pr", "create"]:
+        if (cmd[:3] == ["gh", "pr", "create"] or (cmd[:2] == ["gh", "api"] and "POST" in cmd and any(str(x).endswith("/pulls") for x in cmd))):
             out["creates"] = out.get("creates", 0) + 1
             if out["creates"] <= w.get("create_fail", 0):  # a0: GitHub refuses the first attempts (secondary limit)
                 return cp("", 1, "HTTP 403: You have exceeded a secondary rate limit")
-            body = cmd[cmd.index("--body") + 1]
+            body = cmd[cmd.index("--body") + 1] if "--body" in cmd else next(x[5:] for x in cmd if str(x).startswith("body="))
             out["prs"].append({"gid": gid, "lease": "Lease:" in body, "body": body})
             return cp("https://github.com/open-goat/pequalnp-proofs/pull/99999\n")
         if len(cmd) > 1 and cmd[0] == "bash" and cmd[1].endswith("checkcore.sh"):

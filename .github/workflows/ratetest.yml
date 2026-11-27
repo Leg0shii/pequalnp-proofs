@@ -1,14 +1,18 @@
 # CANARY R (Lead 07:23 / 07:24 UTC 27 Nov): the real PR-create rate ceiling of the PR_TOKEN account, INSIDE this fork
-# only (never upstream). HELD: runs only when the Lead's "CANARY R GO" is relayed and infra pushes the branch
-# canaryr/<x>-r<MAX_RATE> (the ramp 20, 30, 45, 60, 70 a minute in 30 s steps, capped at MAX_RATE, at most 115 creates,
+# only (never upstream). OFF (Lead 07:27): dispatch-only, never on push, and dispatched only on a new yes in the
+# owner's own words relayed by the Lead (input max_rate; the ramp 20, 30, 45, 60, 70 a minute in 30 s steps, capped at MAX_RATE, at most 115 creates,
 # stop at the first 403/429 with no retry). Scratch branches ratetest/base and ratetest/h-NNN are parentless commits
 # with no workflows (no pull_request runs); every PR is closed at 20 a minute and the branches are deleted at the end,
 # also when the ramp fails.
 name: ratetest
 
 on:
-  push:
-    branches: ['canaryr/**']
+  workflow_dispatch:
+    inputs:
+      max_rate:
+        description: MAX_RATE (creates a minute, 1..70); the ramp stops at this step
+        type: string
+        required: true
 
 permissions:
   contents: write          # the scratch branches (pushed and deleted with this run's own token)
@@ -44,7 +48,8 @@ jobs:
           set -euo pipefail
           [ "$FORK" != "open-goat/pequalnp-proofs" ] || { echo "::error::never upstream"; exit 1; }
           [ -n "${PR_TOKEN:-}" ] || { echo "::error::no PR_TOKEN secret"; exit 1; }
-          case "$GITHUB_REF_NAME" in *-r[0-9]*) MR=${GITHUB_REF_NAME##*-r};; *) echo "::error::branch must end in -r<MAX_RATE>"; exit 1;; esac
+          MR="${{ inputs.max_rate }}"
+          [[ "$MR" =~ ^[0-9]+$ ]] || { echo "::error::max_rate must be a number"; exit 1; }
           [ "$MR" -ge 1 ] && [ "$MR" -le 70 ] || { echo "::error::MAX_RATE $MR outside 1..70"; exit 1; }
           echo "MAX_RATE=$MR" >> "$GITHUB_ENV"; echo "MAX_RATE $MR"
           mkdir -p "$W"

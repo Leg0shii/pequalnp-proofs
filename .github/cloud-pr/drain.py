@@ -303,7 +303,7 @@ def work(sid, sha):
     except Exception as e:
         res, why = "error", repr(e)[:200]
     with LOCK:
-        if res not in ("paused", "halted", "site-closed") and not (res == "unleased" and "desk off or paused" in why):
+        if res not in ("paused", "halted", "site-closed", "stall-giveup") and not (res == "unleased" and "desk off or paused" in why):
             if res in RETRYABLE:                           # W6: retried up to RETRY_MAX times (submit.py is idempotent:
                 n = attempts(SEEN.get((sid, sha)))[1] + 1  # create-only head, our PR found, lease recovered)
                 SEEN[(sid, sha)] = (f"{res}#{n}", time.time())
@@ -371,6 +371,12 @@ def main():
     load_seen()
     log("drain start,", len(SEEN), "branches already done in the last 6 h",
         "(credit line set)" if os.environ["PNP_LINKEDIN"] else "(no credit line)")
+    try:                                   # 16.13: the run token's core limit, once per drain (docs: 1,000/h for GITHUB_TOKEN)
+        rl = sh("gh", "api", "rate_limit", "--jq", '.resources.core | "\\(.limit) \\(.remaining)"', timeout=30,
+                env=dict(os.environ, GH_TOKEN=os.environ.get("READ_TOKEN", "")))
+        log("RUN-TOKEN rate_limit core limit/remaining:", rl.stdout.strip() or ("rc %d" % rl.returncode))
+    except Exception as e:
+        log("RUN-TOKEN rate_limit unreadable:", repr(e)[:80])
     inflight = {}; idle = None
     rf = refresher_start()
     try:
@@ -471,6 +477,15 @@ def stall_tick(n_inflight):
         su = float(open(os.path.join(W, "stall")).read())
     except (OSError, ValueError):
         su = 0.0
+    try:                                   # 16.13: four create refusals ended this drain's creates
+        gv = open(os.path.join(W, "giveup")).read().strip()
+        if not ALERTED.get("prstall-giveup"):
+            ALERTED["prstall-giveup"] = time.time()
+            m = f"PR-STALL-GIVEUP four create refusals in this drain: no more creates, units stay unseen ({gv[:120]})"
+            ok = DRY or alert_ref(m, "prstall-giveup")
+            log(m, "(alert ref pushed)" if ok else "(alert ref push FAILED)")
+    except OSError:
+        pass
     for kind, msg in stall_alerts(time.time(), n_inflight, LAST_DONE[0], T0, su):
         ALERTED[kind] = time.time()
         ok = DRY or alert_ref(msg, kind)
@@ -554,6 +569,35 @@ def site_closed():
     return _SITE["closed"]
 
 
+_CW = [0.0]
+
+
+def creates_tick(now=None):
+    """Lead 07:27: accepted creates per 10 s window (W/accepted.log, written by submit.py on every 201), so the first
+    live minute shows the real create rate. One line per finished window that had a create; returns it."""
+    now = time.time() if now is None else now
+    ws = (now // 10) * 10 - 10
+    if ws <= _CW[0]:
+        return None
+    _CW[0] = ws
+    try:
+        ts = [float(x) for x in open(os.path.join(W, "accepted.log")).read().split()]
+    except (OSError, ValueError):
+        return None
+    n = sum(1 for t in ts if ws <= t < ws + 10)
+    if not n:
+        return None
+    try:
+        k = int(open(os.path.join(W, "refusals")).read().strip() or 0)
+    except (OSError, ValueError):
+        k = 0
+    cap = max(10, int(os.environ.get("PR_PER_MIN", "70")) >> k) if k else int(os.environ.get("PR_PER_MIN", "70"))
+    m = (f"CREATES-10S {time.strftime('%H:%M:%S', time.gmtime(ws))} accepted {n} ({n * 6}/min), "
+         f"last 60 s {sum(1 for t in ts if ws - 50 <= t < ws + 10)}, drain total {len(ts)}, cap {cap}/min, refusals {k}")
+    log(m)
+    return m
+
+
 def _loop(inflight, idle):
     with ThreadPoolExecutor(WORKERS) as ex:
         while time.time() - T0 < MAX_S:
@@ -561,7 +605,13 @@ def _loop(inflight, idle):
                 inflight.pop(k)
                 LAST_DONE[0] = time.time()
             stall_tick(len(inflight))
-            if halted():
+            creates_tick()
+            if os.path.exists(os.path.join(W, "giveup")):     # 16.13: no new unit; in-flight ones end unseen
+                todo = []
+                if not inflight:
+                    log("PR-STALL-GIVEUP: drain ends, remaining units stay for the next drain or the PC")
+                    break
+            elif halted():
                 log("halted: no new branch, in-flight ones stop before their PR,", _FH[2]); todo = []
                 if not inflight:
                     break

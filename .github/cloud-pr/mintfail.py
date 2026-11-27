@@ -76,10 +76,10 @@ def child_submit(src, w):
         md_run, md_gh, md_git, md_claim = S.run, S.gh, S.git, S.gate_claim
 
         def run(cmd, timeout=300, env=None, cwd=None):
-            if cmd[:3] == ["gh", "pr", "create"]:
+            if (cmd[:3] == ["gh", "pr", "create"] or (cmd[:2] == ["gh", "api"] and "POST" in cmd and any(str(x).endswith("/pulls") for x in cmd))):
                 cnt["pr_create"] += 1
                 s = st_load()
-                body = cmd[cmd.index("--body") + 1]
+                body = cmd[cmd.index("--body") + 1] if "--body" in cmd else next(x[5:] for x in cmd if str(x).startswith("body="))
                 old = [p for p in s["prs"] if p["head"] == gid and p["state"] == "open"]
                 if old and "pr_timeout_all" in faults:       # GitHub slow: even the "already exists" answer times out
                     return subprocess.CompletedProcess(cmd, 1, "", "timeout")
