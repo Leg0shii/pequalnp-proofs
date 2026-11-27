@@ -105,7 +105,7 @@ jobs:
           }
           t0=$(date +%s)
           while :; do
-            all=$(busy 2>&1); n=$(printf '%s' "$all" | grep -c .); b=$(printf '%s' "$all" | head -3 | paste -sd';' -)
+            all=$(busy 2>&1); n=$(printf '%s' "$all" | { grep -c . || true; }); b=$(printf '%s' "$all" | head -3 | paste -sd';' -)
             [ "$n" -lt 3 ] && { echo "start: $n other canaries running after $(( $(date +%s) - t0 )) s ${b:+($b)}"; echo "go=true" >> "$GITHUB_OUTPUT"; exit 0; }
             [ $(( $(date +%s) - t0 )) -ge 2400 ] && break
             echo "$(date -u +%T) waiting, $n running: $b"; sleep 20
