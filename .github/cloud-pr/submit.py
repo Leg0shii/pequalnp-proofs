@@ -1768,9 +1768,11 @@ def submit(gid, lease):
     # trees written bottom-up with mktree --missing (treebuild.py); the same tree sha as read-tree/update-index/write-tree
     # (treebuild_test.py). Was: read-tree of the whole upstream tree per unit, 59.5 s p50 at w28.
     t = time.time()
+    tree = tree_from_prime(base, blob, t_cm)      # infra/Lead 10:58: the drain's prime of this base, in-process
     try:
-        tree = treebuild.tree_with_file(TREE, base, REL, blob)
-        STG["tree_src"] = "mktree"
+        if not tree:
+            tree = treebuild.tree_with_file(TREE, base, REL, blob)
+            STG["tree_src"] = "mktree"
     except Exception as e:                   # never blocks a unit: the old index path, logged
         log("treebuild failed, index path:", str(e)[:120])
         idx = os.path.join(W, "submit.idx")
@@ -1797,21 +1799,14 @@ def submit(gid, lease):
         return None, "commit-tree failed"
     STG["commit"] = round(time.time() - t_cm, 3)     # whole stage, rev-parse to commit-tree (same span as before)
     # drain.py cuts each unit line at 200 chars, so the long TIMES line loses these: one short line of its own
-    log("COMMIT-STAGES", gid, " ".join(f"{k}={STG[k]}" for k in ("commit", "tree", "tree_src", "head", "halt2", "newbase", "base_age", "g_revparse",
+    log("COMMIT-STAGES", gid, " ".join(f"{k}={STG[k]}" for k in ("commit", "tree", "tree_src", "tree_cache", "cbase_age", "head", "halt2", "newbase", "base_age", "g_revparse",
                                                                "g_catfile", "g_hashobj", "g_difftree", "g_committree") if k in STG))
     # lane movingmain (W7, Lead 09:20): the base may be up to DRAIN_BASE_MAX_S older than live main (no equality
     # any more). What equality protected, the unit's own file not yet in upstream main, is checked again here on the
     # newest base the drain's base refresher has (trees only: no blob read in the blobless shared repo)
-    t = time.time()
-    nb = newest_base()
-    if nb and nb["sha"] != base:
-        r = run(["git", "-C", nb["dir"], "ls-tree", "--name-only", nb["sha"], "--", REL], timeout=30)
-        STG["newbase"] = round(time.time() - t, 3)
-        if r.returncode == 0 and r.stdout.strip():
-            log("file already in upstream main on the newest base", nb["sha"][:12], f"(this unit's base {base[:12]})")
-            return None, "file already in upstream main"
-    if nb:
-        STG["base_age"] = round(time.time() - nb["t"], 1)
+    why = newest_base_check(base)
+    if why:
+        return None, why
     if DRY:
         tw = time.time()                 # rehearsal (Lead 08:12): the would-create time per unit, epoch to 0.001 s
         log(f"WOULD-CREATE {gid} {tw:.3f}"); log(sight_line(gid, tw))
@@ -1823,6 +1818,68 @@ def submit(gid, lease):
         return None, err if err.startswith(("halted: ", "stall-giveup: ")) else "push: " + err   # R3: finish halted/giveup
     log("pushed", c[:12], "to", f"{FORK}:{gid}")
     return create_pr(gid, lease)
+
+
+def tree_from_prime(base, blob, t_cm):
+    """infra/Lead 10:58 (SPEED r9 under move4: tree 11.4/20.9 s against 2.3/3.7 s quiet): the unit's tree from the
+    drain's prime of its base (SNAP_DIR/treeprime/<base>.bin, written once per adopted base) built in-process, or None
+    (a miss: the mktree lane as before). Logged per unit: tree_cache=hit|miss-<why>, tree_src=prime, and cbase_age =
+    seconds from the fetch that brought this base to the start of the commit stage."""
+    try:
+        pd = treebuild.load_prime(os.path.join(SNAP_DIR, "treeprime", base + ".bin"), base)
+    except FileNotFoundError:
+        STG["tree_cache"] = "miss-nofile"
+        pd = None
+    except Exception:
+        STG["tree_cache"] = "miss-bad"
+        pd = None
+    if pd and pd[0].get("t"):
+        STG["cbase_age"] = round(t_cm - pd[0]["t"], 1)
+    else:
+        try:
+            ub = json.load(open(os.path.join(SNAP_DIR, "upbase.json")))
+            if ub.get("adopted") == base and ub.get("adopted_fetch_t"):
+                STG["cbase_age"] = round(t_cm - ub["adopted_fetch_t"], 1)
+        except Exception:
+            pass
+    if not pd:
+        return None
+    try:
+        tree = treebuild.tree_from_prime(TREE, pd, REL, blob)
+    except Exception as e:
+        STG["tree_cache"] = "miss-build"
+        log("tree prime: build failed, mktree lane:", str(e)[:120])
+        return None
+    STG["tree_cache"] = "hit"
+    STG["tree_src"] = "prime"
+    return tree
+
+
+def newest_base_check(base, rel=None):
+    """lane movingmain + Lead F1 (10:29, fail closed): None when the unit's path is not on the drain's newest upstream
+    base, else why not: "file already in upstream main" (finish race), or "newest-base check failed: ..." (submitfail,
+    the drain retries the unit) when the ls-tree fails or times out, or when inside a drain (PR_GATE_DIR) the drain's
+    W/upbase.json is missing or unreadable. Outside a drain (one run per branch: a fresh clone) there is no newer base."""
+    rel = rel or REL
+    t = time.time()
+    nb = newest_base()
+    if nb is None:
+        if os.environ.get("PR_GATE_DIR"):
+            log("newest-base check: the drain's upbase.json is missing or unreadable (fail closed, the unit is retried)")
+            return "newest-base check failed: upbase.json missing or unreadable"
+        return None
+    if nb["sha"] != base:
+        r = run(["git", "-C", nb["dir"], "ls-tree", "--name-only", nb["sha"], "--", rel], timeout=30)
+        STG["newbase"] = round(time.time() - t, 3)
+        if r.returncode != 0:
+            err = ((r.stderr or "") + (r.stdout or "")).strip()[:100]
+            log("newest-base check: ls-tree on", nb["sha"][:12], f"failed (rc {r.returncode}): {err} (fail closed, retried)")
+            return f"newest-base check failed: ls-tree rc {r.returncode}"
+        if r.stdout.strip():
+            log("file already in upstream main on the newest base", nb["sha"][:12], f"(this unit's base {base[:12]})")
+            return "file already in upstream main"
+    STG["base_age"] = round(time.time() - nb["t"], 1)
+    return None
 
 
 def newest_base():

@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import claimallow                                      # lane leases L1: the live claim list, ONE reader per drain
 import haltrule                                        # rule 16.1 (w9's haltrule.py): the same rule as submit.py and the closer
 import warm as wd                                      # RC-c always-warm drain in the wave window (warm.py)
+import treebuild                                       # tree prime per adopted base (W7, infra 10:58)
 from concurrent.futures import ThreadPoolExecutor
 
 SRC = os.environ["SRC"]; W = os.environ.get("W") or tempfile.mkdtemp()
@@ -331,7 +332,8 @@ def fetch_ready(sid, prefix, lref):
 # What the old equality protected: the unit's file must not already be in upstream main (proved first and merged).
 # That is kept as a check of the unit's own path on the newest base: submit.py checks HEAD:<file> on its copy and,
 # right before the create, again on the newest base sha (W/upbase.json, read from the shared repo, trees only).
-# Guards (checkcore.sh) read the copy, i.e. main as of at most BASE_FETCH_S + one fetch before the copy.
+# Guards (checkcore.sh) read the copy, i.e. the adopted base: main as of at most BASE_ADOPT_S + BASE_FETCH_S + one fetch
+# before the copy (the unit's own path is checked again on the NEWEST sha before the create, fail closed).
 BASE_MAX_S = float(os.environ.get("DRAIN_BASE_MAX_S", "60"))
 BASE_FETCH_S = float(os.environ.get("DRAIN_BASE_FETCH_S", "2"))
 BASE_IDLE_S = float(os.environ.get("DRAIN_BASE_IDLE_S", "15"))
@@ -340,7 +342,7 @@ UPSTREAM_REF = os.environ.get("DRAIN_UPSTREAM_REF", "main")      # loadcanary -m
 SPARSE = ["/.github/", "/STOP", "/CONTRIBUTING.md", "/lean/PEqualNP/", "!/lean/PEqualNP/Outside/"]
 BASE_LOCK = threading.Lock(); _FETCH_LOCK = threading.Lock()
 _BASE = {"dir": None, "t": 0.0, "sha": None, "newest": None, "adopted_t": 0.0, "seen": 0, "clones": 0, "copies": 0,
-         "fetches": 0, "fetch_fail": 0, "moves": 0,
+         "fetches": 0, "fetch_fail": 0, "moves": 0, "sha_t": 0.0, "primes": 0, "prime_fail": 0, "prime_s": [],
          "asked": 0.0, "thread": None, "fetch_s": []}
 
 
@@ -360,10 +362,38 @@ def _clone_upstream(tree, outs=()):
 def _base_note():
     try:
         with open(os.path.join(W, "upbase.json.t"), "w") as o:
-            json.dump({"sha": _BASE["newest"] or _BASE["sha"], "t": _BASE["t"], "dir": _BASE["dir"], "adopted": _BASE["sha"]}, o)
+            json.dump({"sha": _BASE["newest"] or _BASE["sha"], "t": _BASE["t"], "dir": _BASE["dir"], "adopted": _BASE["sha"],
+                       "adopted_fetch_t": _BASE["sha_t"]}, o)
         os.replace(os.path.join(W, "upbase.json.t"), os.path.join(W, "upbase.json"))
     except OSError:
         pass
+
+
+PRIME_KEEP = 8      # prime files kept (bases adopted at most every BASE_ADOPT_S: about 2 min of copies still in flight)
+
+
+def _prime_base(sha, t):
+    """infra/Lead 10:58 (SPEED r9: tree 11.4/20.9 s under move4, 2.3/3.7 s quiet): the trees along lean/PEqualNP/Outside
+    of a base are read ONCE, when the base is adopted, into W/treeprime/<sha>.bin; each unit builds its own trees from
+    it in-process (submit.py, treebuild.tree_from_prime). A failure here costs nothing but the speed: units miss and
+    take the mktree lane as before."""
+    t0 = time.time()
+    try:
+        d = os.path.join(W, "treeprime")
+        os.makedirs(d, exist_ok=True)
+        treebuild.write_prime(os.path.join(d, sha + ".bin"), treebuild.prime(_BASE["dir"], sha, extra={"t": t}))
+        _BASE["primes"] += 1
+        _BASE["prime_s"].append(round(time.time() - t0, 3))
+        old = sorted((os.path.getmtime(os.path.join(d, f)), f) for f in os.listdir(d) if f.endswith(".bin"))
+        for _, f in old[:-PRIME_KEEP]:
+            try:
+                os.remove(os.path.join(d, f))
+            except OSError:
+                pass
+    except Exception as e:
+        _BASE["prime_fail"] += 1
+        if _BASE["prime_fail"] <= 3:
+            log("upstream base: tree prime of", sha[:12], "failed (units take the mktree lane):", repr(e)[:120])
 
 
 def base_fetch(adopt_now=False):
@@ -386,18 +416,22 @@ def base_fetch(adopt_now=False):
             if _BASE["fetch_fail"] <= 3 or _BASE["fetch_fail"] % 30 == 0:
                 log("upstream base: fetch failed", f"({_BASE['fetch_fail']} so far):", (r.stderr or "").strip()[:120])
             return False
+        if sha != _BASE["newest"]:
+            _BASE["seen"] += 1
+        _BASE.update(newest=sha, t=t)          # published before the lock: a burst of copies holds BASE_LOCK for seconds
+        _base_note()                           # (canary 45979631397: base_age p50 7.7 s when this waited for it)
+        if sha == _BASE["sha"] or not (adopt_now or time.time() - _BASE["adopted_t"] >= BASE_ADOPT_S):
+            return True
+        _prime_base(sha, t)                    # before the adoption, outside BASE_LOCK: copies of the new base find it
         with BASE_LOCK:
-            if sha != _BASE["newest"]:
-                _BASE["seen"] += 1
-            if sha != _BASE["sha"] and (adopt_now or time.time() - _BASE["adopted_t"] >= BASE_ADOPT_S):
+            if sha != _BASE["sha"]:
                 if sh("git", "-C", b, "checkout", "-q", "--detach", sha, timeout=120).returncode:
                     _BASE["fetch_fail"] += 1
                     log("upstream base: checkout of", sha[:12], "failed (base kept at", (_BASE["sha"] or "?")[:12] + ")")
                     return False
                 _BASE["moves"] += 1
-                _BASE.update(sha=sha, adopted_t=time.time())
-            _BASE.update(newest=sha, t=t)
-            _base_note()
+                _BASE.update(sha=sha, adopted_t=time.time(), sha_t=t)
+                _base_note()
         return True
 
 
@@ -424,7 +458,8 @@ def upstream_tree(tree, outs):
             for k, v in (("gc.auto", "0"), ("maintenance.auto", "false"), ("fetch.writeCommitGraph", "false")):
                 sh("git", "-C", nb, "config", k, v)       # no repack or prune under a copy
             hd = sh("git", "-C", nb, "rev-parse", "HEAD").stdout.strip()
-            _BASE.update(dir=nb, t=t, sha=hd, newest=hd, adopted_t=time.time(), clones=1)
+            _BASE.update(dir=nb, t=t, sha=hd, newest=hd, adopted_t=time.time(), sha_t=t, clones=1)
+            _prime_base(hd, t)
             _base_note()
         if _BASE["thread"] is None:
             _BASE["thread"] = threading.Thread(target=_base_loop, daemon=True, name="base-refresher")
@@ -453,9 +488,11 @@ def upstream_tree(tree, outs):
 def _base_summary():
     if _BASE["copies"]:
         fs = sorted(_BASE["fetch_s"]) or [0.0]
+        ps = sorted(_BASE["prime_s"]) or [0.0]
         log("upstream base:", _BASE["clones"], "clones for", _BASE["copies"], "units;", _BASE["fetches"], "fetches,",
             _BASE["seen"], "main moves seen,", _BASE["moves"], "bases adopted,", _BASE["fetch_fail"], "failed,", _BASE.get("copy_retry", 0), "copies redone; fetch p50",
-            fs[len(fs) // 2], "s max", fs[-1], "s")
+            fs[len(fs) // 2], "s max", fs[-1], "s;", _BASE["primes"], "tree primes", f"(p50 {ps[len(ps) // 2]} s max {ps[-1]} s),",
+            _BASE["prime_fail"], "prime failures")
 
 
 atexit.register(_base_summary)

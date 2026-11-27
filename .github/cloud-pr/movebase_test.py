@@ -4,11 +4,12 @@ A local bare depth-1 clone of upstream (UPSTREAM arg: a repo or URL, BRANCH) mov
 N units (threads, as drain workers) take upstream_tree() copies over DURATION s. Pass if: 0 failed, 1 clone, the
 refresher fetched and moved, every copy is at a sha main had at most BASE_MAX_S before the copy, and a stuck refresher
 (base older than BASE_MAX_S) is refreshed inline, and with the upstream gone and the base too old: fail closed.
-  python3 movebase_test.py UPSTREAM [BRANCH] (default: HEAD of UPSTREAM) -> "MOVEBASE PASS" / "MOVEBASE FAIL: <why>" """
+  python3 movebase_test.py [UPSTREAM [BRANCH]] (default: the current directory's repo, its HEAD) -> "MOVEBASE PASS" / "MOVEBASE FAIL: <why>" """
 import os, subprocess, sys, tempfile, threading, time
 
 here = os.path.dirname(os.path.abspath(__file__))
-src, br = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else "")      # no BRANCH: the source's HEAD (CI checkout)
+src = sys.argv[1] if len(sys.argv) > 1 else os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))  # infra 10:27: no argument = this checkout (from any cwd)
+br = sys.argv[2] if len(sys.argv) > 2 else ""                              # no BRANCH: the source's HEAD (CI checkout)
 d = tempfile.mkdtemp(prefix="movebase-")
 up = os.path.join(d, "up.git")
 url = src if "://" in src else "file://" + os.path.abspath(src)
@@ -104,6 +105,57 @@ if not (hit and hit.returncode == 0 and hit.stdout.strip() == mvf[-1] and miss.r
     bad.append(f"newest-base path check: hit {hit and hit.stdout.strip()!r} miss {miss.stdout.strip()!r} {miss.stderr[:80]!r}")
 else:
     print(f"newest-base path check: {mvf[-1]} found on {nb['sha'][:12]}, an absent path not found (remote cut)")
+# Lead F1 (10:29): submit.py's newest-base check FAILS CLOSED (the real function, in process)
+os.environ.update(ID="L-meta-1", MOD="L_meta_1", PROOF="/dev/null", TREE="/tmp", RIVAL_SNAP_DIR=os.environ["W"],
+                  PR_GATE_DIR=os.environ["W"], GHCOND_DIR=tempfile.mkdtemp())
+import submit as S
+S.log = lambda *a: None
+upj = os.path.join(os.environ["W"], "upbase.json")
+f1 = {}
+if hasattr(S, "newest_base_check") and mvf:
+    f1["present"] = S.newest_base_check("0" * 40, rel=mvf[-1])
+    f1["absent"] = S.newest_base_check("0" * 40, rel="lean/PEqualNP/Outside/L_meta_999999.lean")
+    json.dump(dict(nb, sha="f" * 40), open(upj, "w"))                       # a sha the shared repo does not have
+    f1["lstree_fails"] = S.newest_base_check("0" * 40, rel=mvf[-1])
+    os.remove(upj)
+    f1["no_upbase_in_drain"] = S.newest_base_check("0" * 40, rel=mvf[-1])
+    os.environ.pop("PR_GATE_DIR")
+    f1["no_upbase_no_drain"] = S.newest_base_check("0" * 40, rel=mvf[-1])
+want = {"present": "file already in upstream main", "absent": None, "lstree_fails": "newest-base check failed: ls-tree",
+        "no_upbase_in_drain": "newest-base check failed: upbase.json", "no_upbase_no_drain": None}
+for k, w in want.items():
+    got = f1.get(k, "missing")
+    if not (got is None if w is None else isinstance(got, str) and got.startswith(w)):
+        bad.append(f"F1 {k}: {got!r}, want {w!r}")
+print("F1 fail closed:", ", ".join(f"{k}={v!r}" for k, v in f1.items()) or "no newest_base_check in submit.py")
+# infra/Lead 10:58 (SPEED r9): one tree prime per adopted base (W/treeprime/<sha>.bin); a unit copy of a kept base
+# builds its tree in-process (submit.tree_from_prime) with the same sha as the mktree lane; an older base is a miss
+import treebuild
+kept = {f[:-4] for f in os.listdir(os.path.join(os.environ["W"], "treeprime")) if f.endswith(".bin")} \
+    if os.path.isdir(os.path.join(os.environ["W"], "treeprime")) else set()
+tp = {"hit": 0, "miss": 0, "same": 0, "wrong": []}
+for i in range(N):
+    t = os.path.join(d, f"u{i}")
+    base = subprocess.run(["git", "-C", t, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    if not base:
+        continue
+    blob = subprocess.run(["git", "-C", t, "hash-object", "-w", "--stdin"], input=f"proof {i}", capture_output=True, text=True).stdout.strip()
+    S.TREE = t; S.STG.clear()
+    a = S.tree_from_prime(base, blob, time.time())
+    if a is None:
+        tp["miss"] += 1
+        if base in kept or S.STG.get("tree_cache") != "miss-nofile":
+            tp["wrong"].append(f"u{i} {base[:8]} {S.STG.get('tree_cache')} (kept {base in kept})")
+        continue
+    tp["hit"] += 1
+    b = treebuild.tree_with_file(t, base, S.REL, blob)
+    tp["same"] += a == b
+    if a != b or S.STG.get("tree_src") != "prime" or "cbase_age" not in S.STG:
+        tp["wrong"].append(f"u{i} {a[:8]} != {b[:8]} or {S.STG}")
+if not tp["hit"] or tp["wrong"] or D._BASE["prime_fail"] or D._BASE["primes"] != D._BASE["moves"] + 1:
+    bad.append(f"tree prime: {tp}, primes {D._BASE['primes']} for {D._BASE['moves']} adoptions + 1 clone, {D._BASE['prime_fail']} failed")
+print(f"tree prime: {D._BASE['primes']} primes for {D._BASE['moves']} adoptions + 1 clone (p50 {sorted(D._BASE['prime_s'])[len(D._BASE['prime_s']) // 2]} s), "
+      f"unit copies: {tp['hit']} hits ({tp['same']} same sha as mktree), {tp['miss']} misses (base no longer kept)")
 subprocess.run(["rm", "-rf", d])
 print("MOVEBASE PASS" if not bad else "MOVEBASE FAIL: " + "; ".join(bad), flush=True)
 os._exit(1 if bad else 0)          # no drain.py atexit lines after the verdict (mintdrill reads the last line)
