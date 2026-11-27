@@ -205,6 +205,13 @@ jobs:
           ba = [float(m.group(1)) for l in L for m in [re.search(r"base_age=([\d.]+)", l)] if m and " TIMES " in l]
           if ba:          # lane movingmain (Lead 09:31): the upstream base's age at the would-create, units over 15 s
               print(f"LOADCANARY base_age p50={pct(ba, .5):.1f}s p95={pct(ba, .95):.1f}s max={max(ba):.1f}s over15s={sum(1 for x in ba if x > 15)} of {len(ba)}")
+          tc = [m.group(1) for l in L for m in [re.search(r" tree_cache=(\S+)", l)] if m and " TIMES " in l]
+          if tc:          # infra 10:58 (SPEED r9): tree prime per adopted base, hits and misses, and the tree stage per lane
+              import collections as _c
+              tv = {k: [float(m.group(2)) for l in L for m in [re.search(r" tree_src=(\S+) tree=([\d.]+)", l)] if m and " TIMES " in l and m.group(1) == k]
+                    for k in ("prime", "mktree", "index")}
+              print("LOADCANARY tree_cache " + " ".join(f"{k}={v}" for k, v in sorted(_c.Counter(tc).items())) + " | " +
+                    " ".join(f"{k} n={len(v)} p50={pct(v, .5):.3f}s p95={pct(v, .95):.3f}s" for k, v in tv.items() if v))
           import collections
           cnt = collections.Counter(l.strip() for l in open("run.log") if l.strip() and l.strip() != "--")
           tot_r = sum(cnt.values()) or 1

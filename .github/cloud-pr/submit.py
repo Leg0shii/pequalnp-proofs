@@ -1709,9 +1709,11 @@ def submit(gid, lease):
     # trees written bottom-up with mktree --missing (treebuild.py); the same tree sha as read-tree/update-index/write-tree
     # (treebuild_test.py). Was: read-tree of the whole upstream tree per unit, 59.5 s p50 at w28.
     t = time.time()
+    tree = tree_from_prime(base, blob, t_cm)      # infra/Lead 10:58: the drain's prime of this base, in-process
     try:
-        tree = treebuild.tree_with_file(TREE, base, REL, blob)
-        STG["tree_src"] = "mktree"
+        if not tree:
+            tree = treebuild.tree_with_file(TREE, base, REL, blob)
+            STG["tree_src"] = "mktree"
     except Exception as e:                   # never blocks a unit: the old index path, logged
         log("treebuild failed, index path:", str(e)[:120])
         idx = os.path.join(W, "submit.idx")
@@ -1738,7 +1740,7 @@ def submit(gid, lease):
         return None, "commit-tree failed"
     STG["commit"] = round(time.time() - t_cm, 3)     # whole stage, rev-parse to commit-tree (same span as before)
     # drain.py cuts each unit line at 200 chars, so the long TIMES line loses these: one short line of its own
-    log("COMMIT-STAGES", gid, " ".join(f"{k}={STG[k]}" for k in ("commit", "tree", "tree_src", "head", "halt2", "newbase", "base_age", "g_revparse",
+    log("COMMIT-STAGES", gid, " ".join(f"{k}={STG[k]}" for k in ("commit", "tree", "tree_src", "tree_cache", "cbase_age", "head", "halt2", "newbase", "base_age", "g_revparse",
                                                                "g_catfile", "g_hashobj", "g_difftree", "g_committree") if k in STG))
     # lane movingmain (W7, Lead 09:20): the base may be up to DRAIN_BASE_MAX_S older than live main (no equality
     # any more). What equality protected, the unit's own file not yet in upstream main, is checked again here on the
@@ -1757,6 +1759,41 @@ def submit(gid, lease):
         return None, err if err.startswith(("halted: ", "stall-giveup: ")) else "push: " + err   # R3: finish halted/giveup
     log("pushed", c[:12], "to", f"{FORK}:{gid}")
     return create_pr(gid, lease)
+
+
+def tree_from_prime(base, blob, t_cm):
+    """infra/Lead 10:58 (SPEED r9 under move4: tree 11.4/20.9 s against 2.3/3.7 s quiet): the unit's tree from the
+    drain's prime of its base (SNAP_DIR/treeprime/<base>.bin, written once per adopted base) built in-process, or None
+    (a miss: the mktree lane as before). Logged per unit: tree_cache=hit|miss-<why>, tree_src=prime, and cbase_age =
+    seconds from the fetch that brought this base to the start of the commit stage."""
+    try:
+        pd = treebuild.load_prime(os.path.join(SNAP_DIR, "treeprime", base + ".bin"), base)
+    except FileNotFoundError:
+        STG["tree_cache"] = "miss-nofile"
+        pd = None
+    except Exception:
+        STG["tree_cache"] = "miss-bad"
+        pd = None
+    if pd and pd[0].get("t"):
+        STG["cbase_age"] = round(t_cm - pd[0]["t"], 1)
+    else:
+        try:
+            ub = json.load(open(os.path.join(SNAP_DIR, "upbase.json")))
+            if ub.get("adopted") == base and ub.get("adopted_fetch_t"):
+                STG["cbase_age"] = round(t_cm - ub["adopted_fetch_t"], 1)
+        except Exception:
+            pass
+    if not pd:
+        return None
+    try:
+        tree = treebuild.tree_from_prime(TREE, pd, REL, blob)
+    except Exception as e:
+        STG["tree_cache"] = "miss-build"
+        log("tree prime: build failed, mktree lane:", str(e)[:120])
+        return None
+    STG["tree_cache"] = "hit"
+    STG["tree_src"] = "prime"
+    return tree
 
 
 def newest_base_check(base, rel=None):

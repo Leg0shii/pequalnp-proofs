@@ -1136,7 +1136,8 @@ def main():
                                  ("ghcond.py", ["selftest"], "GHCOND SELFTEST OK", "16.7"),
                                  ("pushtest.py", [], "PUSH SELFTEST OK", "push"),           # Lead 09:08 push refusal
                                  ("rttest.py", [], "RT SELFTEST OK", "runtoken"),          # Lead 09:38 closer RUN-TOKEN-EMPTY
-                                 ("movebase_test.py", [src], "MOVEBASE PASS", "movingmain")):
+                                 ("movebase_test.py", [src], "MOVEBASE PASS", "movingmain"),
+                                 ("treeprime_test.py", [], "TREEPRIME PASS", "treeprime")):      # infra 10:58 tree prime
         tp = os.path.join(src, ".github", "cloud-pr", tool)
         if os.path.exists(tp):
             rr = subprocess.run([sys.executable, "-I", tp] + (args or [os.path.dirname(tp)]), capture_output=True, text=True, timeout=600)
