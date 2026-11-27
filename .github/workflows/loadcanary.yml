@@ -93,13 +93,18 @@ jobs:
           # workers from the branch name loadcanary/<x>-w<N> (Lead 07:14: runs at 14, 20, 28)
           # branch loadcanary/<x>-w<N>[-warm<S>] (Lead 08:12: WARM_S = the refresher runs S s before the units are released)
           # rehearsal: -lin<S> = DRAIN_LINGER S, -drill = only loadtest/L-drill-* units (DRAIN_MATCH)
-          case "$GITHUB_REF_NAME" in *-drill*) export DRAIN_MATCH='L-drill-[0-9]+';; esac
+          # -drill-<tag>: only L-drill-<tag>-<n> units, listing from fork ref loadtest-gaps/<tag> (plain -drill: any
+          # L-drill unit, ref loadtest-gaps/drill). The drill driver force-pushes that ref (tree: gaps.json) per export.
+          case "$GITHUB_REF_NAME" in
+            *-drill-*) t=${GITHUB_REF_NAME##*-drill-}; export DRAIN_MATCH="L-drill-$t-[0-9]+" DRILL_GAPS_REF="loadtest-gaps/$t";;
+            *-drill) export DRAIN_MATCH='L-drill-[a-z0-9-]+' DRILL_GAPS_REF='loadtest-gaps/drill';;
+          esac
           r=${GITHUB_REF_NAME%-drill*}
           case "$r" in *-lin[0-9]*) export DRAIN_LINGER=${r##*-lin}; r=${r%-lin*};; esac
           case "$r" in *-warm[0-9]*) export DRAIN_WARM_S=${r##*-warm};; esac
           b=${r%-warm*}
           case "$b" in *-w[0-9]*) export DRAIN_WORKERS=${b##*-w};; esac
-          echo "warm $DRAIN_WARM_S linger $DRAIN_LINGER match ${DRAIN_MATCH:-all}"
+          echo "warm $DRAIN_WARM_S linger $DRAIN_LINGER match ${DRAIN_MATCH:-all} drill gaps ${DRILL_GAPS_REF:-none}"
           echo "workers $DRAIN_WORKERS slots $DRAIN_PR_SLOTS"
           nproc; free -m | head -2
           vmstat -n 2 > cpu.log &
