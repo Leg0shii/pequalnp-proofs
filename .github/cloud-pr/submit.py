@@ -21,6 +21,7 @@ READ_TOKEN (the run's GITHUB_TOKEN, for reads), PR_TOKEN (secret, for the push a
 push, no PR, no branch delete). Prints RESULT=<...> and writes result=<...> to $GITHUB_OUTPUT.
 """
 import base64, fcntl, json, os, re, subprocess, sys, tempfile, threading, time
+from concurrent.futures import ThreadPoolExecutor
 REAL_SLEEP = time.sleep      # 16.14 refresher heartbeat thread (tests patch time.sleep)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # drain runs submit.py with -I (no script dir on the path)
 import ghcond, haltrule                                              # RC-b: 16.7 conditional reads, 16.1 halt rule
@@ -741,7 +742,6 @@ def _build_snapshot(files):
         need = sorted({(n, key) for n, _, _, key in todo if key not in files})
         if need:
             nfr[0] += len(need)
-            from concurrent.futures import ThreadPoolExecutor
             with ThreadPoolExecutor(min(8, len(need))) as ex:
                 got = list(ex.map(lambda nk: (nk[1], sorted({u for u in map(file_unit, pr_files(nk[0])) if u})), need))
             files.update(dict(got))
