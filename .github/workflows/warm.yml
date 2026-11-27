@@ -1,0 +1,60 @@
+# RC-c ALWAYS-WARM DRAIN (Lead 08:10 UTC 27 Nov, SPEED FIRST10.md section c). The same drain job as cloud-pr.yml, in the
+# same concurrency group cloud-pr-drain (one drain at a time, repo-wide), started by dispatch instead of a ready/ push.
+# Inside the window (variable WARM_WINDOW, UTC "HHMM-HHMM") it lingers up to the input `linger` (at most 1200 s, never
+# past the window end) polling ready/ every 2 s, and REARM_S before its DRAIN_MAX_S it dispatches the next warm run,
+# which waits in the group and starts when this one ends (schedules do not fire on this fork). Outside the window, with
+# WARM=0, or while filing is halted, a run drains what is pending and ends after 30 s idle, and starts no next run.
+# Arm at the window start:  gh workflow run warm.yml --repo Leg0shii/pequalnp-proofs-fork --ref main
+# (any ready/ push inside the window arms it too). Stop:  gh variable set WARM --body 0  (the chain ends at the next link).
+name: warm-drain
+
+on:
+  workflow_dispatch:
+    inputs:
+      linger:
+        description: Idle linger in seconds inside the wave window (at most 1200)
+        required: false
+        type: string
+        default: '1200'
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+
+jobs:
+  drain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    concurrency:
+      group: cloud-pr-drain
+      cancel-in-progress: false
+    steps:
+      - name: Check out fork main (drain.py, submit.py, guards)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: src
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Warm drain (waits on ready/ refs inside the window)
+        env:
+          SRC: ${{ github.workspace }}/src
+          W: ${{ github.workspace }}/work
+          READ_TOKEN: ${{ github.token }}
+          PR_TOKEN: ${{ secrets.PR_TOKEN }}
+          PNP_LINKEDIN: ${{ secrets.PNP_LINKEDIN || vars.PNP_LINKEDIN }}
+          DRAIN_WORKERS: ${{ vars.DRAIN_WORKERS || '14' }}
+          DRAIN_PR_SLOTS: ${{ vars.DRAIN_PR_SLOTS || '8' }}
+          DRAIN_REFRESHER: ${{ vars.DRAIN_REFRESHER || '1' }}
+          PR_PER_MIN: ${{ vars.PR_PER_MIN || '70' }}
+          PR_PER_HOUR: ${{ vars.PR_PER_HOUR || '480' }}
+          WARM: ${{ vars.WARM || '1' }}
+          WARM_WINDOW: ${{ vars.WARM_WINDOW || '' }}
+          WARM_LINGER: ${{ inputs.linger || vars.WARM_LINGER || '1200' }}
+        run: python3 -I "$GITHUB_WORKSPACE/src/.github/cloud-pr/drain.py"
+      - name: Queue delay (B13, measurement only, never fails the job)
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -I "$GITHUB_WORKSPACE/src/.github/cloud-pr/qdelay.py" run || true

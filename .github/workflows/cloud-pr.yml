@@ -73,6 +73,10 @@ jobs:
           DRAIN_REFRESHER: ${{ vars.DRAIN_REFRESHER || '1' }}
           PR_PER_MIN: ${{ vars.PR_PER_MIN || '70' }}
           PR_PER_HOUR: ${{ vars.PR_PER_HOUR || '480' }}
+          # RC-c always-warm drain (warm.py): in WARM_WINDOW (UTC HHMM-HHMM) the drain lingers and re-arms warm.yml
+          WARM: ${{ vars.WARM || '1' }}
+          WARM_WINDOW: ${{ vars.WARM_WINDOW || '' }}
+          WARM_LINGER: ${{ vars.WARM_LINGER || '1200' }}
         run: python3 -I "$GITHUB_WORKSPACE/src/.github/cloud-pr/drain.py"
       - name: Queue delay (B13, measurement only, never fails the job)
         if: always()

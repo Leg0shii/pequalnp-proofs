@@ -11,6 +11,7 @@ Env: SRC (fork main checkout), W, PR_TOKEN, READ_TOKEN, GITHUB_REPOSITORY."""
 import base64, json, os, re, subprocess, sys, tempfile, threading, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import haltrule                                        # rule 16.1 (w9's haltrule.py): the same rule as submit.py and the closer
+import warm                                            # RC-c always-warm drain in the wave window (warm.py)
 from concurrent.futures import ThreadPoolExecutor
 
 SRC = os.environ["SRC"]; W = os.environ.get("W") or tempfile.mkdtemp()
@@ -515,11 +516,11 @@ def main():
     except Exception as e:
         log("RUN-TOKEN rate_limit unreadable:", repr(e)[:80])
     inflight = {}; idle = None
-    rf = refresher_start()
+    rf = warm.track(refresher_start(), refresher_start, refresher_stop, log)
     try:
         _loop(inflight, idle)
     finally:
-        refresher_stop(rf)
+        warm.stop_refresher()
     try:                                   # 16.12: live newest-page read duration of this drain
         ds = sorted(float(l.split()[1]) for l in open(os.path.join(W, "snapd.log")) if len(l.split()) == 2)
         if ds:
@@ -768,11 +769,12 @@ def _loop(inflight, idle):
                 log("START", x[0], x[1][:8], f"({len(todo)} pending)")
             if not inflight and not todo:
                 idle = idle or time.time()
-                if time.time() - idle > LINGER:
+                if time.time() - idle > warm.linger(LINGER, idle):
                     break
             else:
                 idle = None
-            time.sleep(1 if inflight else 3)
+            warm.tick(bool(inflight or todo), idle, T0, MAX_S, _FH[1], LINGER)
+            time.sleep(1 if inflight else warm.poll(3))
 
 
 if __name__ == "__main__":

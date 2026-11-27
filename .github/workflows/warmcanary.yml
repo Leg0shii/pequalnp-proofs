@@ -1,0 +1,97 @@
+# WARM CANARY (lane warm, W11, 27 Nov): the real drain.py of the pushed commit on a real runner, DRY over the test refs
+# loadtest/<ID> (state drain-state-loadtest, same group as loadcanary), with the warm window open. The job starts, waits
+# idle WARM_S, then pushes ONE new commit to loadtest/L-meta-24191 (test ref, DRY, never filed) and measures what a ready/
+# push during a warm drain gets: push -> START and push -> first "would push" (DONE dry-run). It then idles WARM_LINGER s
+# more and prints the refresher's counted reads (304s on unchanged pages do not count, 16.7a).
+# Start: push the candidate sha as branch warmcanary/<sha8>. Delete the branch after the run.
+name: warmcanary
+
+on:
+  push:
+    branches: ['warmcanary/**']
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+
+concurrency:
+  group: loadcanary
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  warm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the candidate (drain.py, submit.py, guards, warm.py)
+        uses: actions/checkout@v4
+        with:
+          path: src
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Warm drain, DRY, one test push during the wait
+        env:
+          SRC: ${{ github.workspace }}/src
+          W: ${{ github.workspace }}/work
+          READ_TOKEN: ${{ github.token }}
+          PR_TOKEN: ${{ secrets.PR_TOKEN }}
+          DRAIN_PREFIX: loadtest
+          DRAIN_WORKERS: '28'
+          DRAIN_PR_SLOTS: '8'
+          DRAIN_REFRESHER: '1'
+          DRAIN_LINGER: '20'
+          DRAIN_MAX_S: '600'
+          WARM: '1'
+          WARM_LINGER: '150'
+          WARM_S: '90'
+          UNIT: L-meta-24191
+        run: |
+          set -uo pipefail
+          [ -n "${PR_TOKEN:-}" ] || { echo "::error::no PR_TOKEN secret: stop"; exit 1; }
+          export WARM_WINDOW="$(date -u +%H%M)-2359"
+          echo "window $WARM_WINDOW workers $DRAIN_WORKERS"
+          H="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$PR_TOKEN" | base64 -w0)"
+          U="https://github.com/$GITHUB_REPOSITORY.git"
+          mkdir -p pusher && git -C pusher init -q
+          (
+            sleep "$WARM_S"
+            g() { git -C pusher -c "http.https://github.com/.extraheader=$H" "$@"; }
+            g fetch -q --depth 1 "$U" "refs/heads/loadtest/$UNIT" || { echo "PUSHER fetch failed"; exit 0; }
+            tree=$(git -C pusher rev-parse 'FETCH_HEAD^{tree}')
+            c=$(git -C pusher -c user.name=Leg0shii -c user.email=46093332+Leg0shii@users.noreply.github.com commit-tree "$tree" \
+                -m "load canary input $UNIT $(date +%s) (DRY, never filed; warm canary)")
+            g push -q -f "$U" "$c:refs/heads/loadtest/$UNIT" && echo "$(date +%s.%N) $c" > pushed.txt && echo "PUSHER pushed $c at $(date -u +%H:%M:%S.%N)"
+          ) &
+          t0=$(date +%s)
+          python3 -I "$SRC/.github/cloud-pr/drain.py" 2>&1 | tee drain.log
+          rc=${PIPESTATUS[0]}
+          wait
+          echo "drain rc=$rc wall=$(( $(date +%s) - t0 )) s"
+          python3 - <<'PY'
+          import re, time
+          L = open("drain.log").read().splitlines()
+          try:
+              tp, sha = open("pushed.txt").read().split()
+          except Exception:
+              print("WARMCANARY no push recorded"); raise SystemExit
+          tp = float(tp); day = tp - tp % 86400
+          def at(l):
+              h, m, s = map(int, l.split()[0].split(":")); return day + h * 3600 + m * 60 + s
+          unit = __import__("os").environ["UNIT"]
+          st = [at(l) for l in L if f" START {unit} {sha[:8]}" in l]
+          dn = [(at(l), l) for l in L if f" DONE {unit} " in l and at(l) >= tp - 1]
+          busy = [l for l in L if " START " in l and at(l) < tp and at(l) > tp - 60]
+          print(f"WARMCANARY push->START {st[0] - tp:+.1f} s (1 s log resolution)" if st else "WARMCANARY no START for the pushed unit")
+          if dn:
+              print(f"WARMCANARY push->first would-push (DONE) {dn[0][0] - tp:+.1f} s :: {dn[0][1][:160]}")
+          print(f"WARMCANARY drain busy in the 60 s before the push: {len(busy)} STARTs (0 = it was idle-warm)")
+          for l in L:
+              if "refresher stopped" in l or "RUN-TOKEN" in l or "SNAP-READ" in l or " TIMES " in l and unit in l:
+                  print("WARMCANARY", l[:220])
+          PY
+          exit $rc
