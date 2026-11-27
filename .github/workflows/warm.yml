@@ -56,9 +56,9 @@ jobs:
           DRAIN_REFRESHER: ${{ vars.DRAIN_REFRESHER || '1' }}
           PR_PER_MIN: ${{ vars.PR_PER_MIN || '60' }}
           PR_PER_HOUR: ${{ vars.PR_PER_HOUR || '400' }}
-          PUSH_BATCH_S: ${{ vars.PUSH_BATCH_S || '10' }}   # BURST (Lead 20:15 27 Nov): heads in one multi-ref push every 10 s (owner card 09:04)
+          PUSH_BATCH_S: ${{ vars.PUSH_BATCH_S || '20' }}   # BURST (Lead 20:15 27 Nov): heads in one multi-ref push every 20 s = 3 pushes a minute (the w12 gate takes the other 3 of the repo's 6)
           ACCT_CAP: ${{ vars.ACCT_CAP || '1' }}   # BURST: minute and hour caps count the account's PRs (search), not only this drain
-          DRAIN_SAVE_EVERY_S: ${{ vars.DRAIN_SAVE_EVERY_S || '60' }}
+          DRAIN_SAVE_EVERY_S: ${{ vars.DRAIN_SAVE_EVERY_S || '120' }}   # BURST 20:26: 0.5 state pushes a minute (6 pushes a minute per repo in total)
           WARM: ${{ vars.WARM || '1' }}
           WARM_WINDOW: ${{ inputs.window || vars.WARM_WINDOW || '' }}
           WARM_LINGER: ${{ inputs.linger || vars.WARM_LINGER || '18000' }}

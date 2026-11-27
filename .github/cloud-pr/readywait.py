@@ -11,7 +11,7 @@ import json, os, re, subprocess, sys, threading, time
 
 FORK = os.environ.get("GITHUB_REPOSITORY", "Leg0shii/pequalnp-proofs-fork")
 END = time.time() + float(os.environ.get("MINUTES", "58")) * 60
-MIN_AGE = 60
+MIN_AGE = int(os.environ.get("RW_MIN_AGE", "300"))   # BURST (Lead 20:25): 60 s re-pushed refs the busy warm drain had not reached yet (duplicate shas, submitfail)
 PACE = float(os.environ.get("PACE_S", "4"))
 G = os.path.join(os.environ.get("W", "/tmp"), "rw.git")
 FORK_URL = os.environ.get("FORK_URL", f"https://github.com/{FORK}.git")   # test: a local bare repo
@@ -199,6 +199,20 @@ def no_run_check(gid, commits, wait=None):
     return True
 
 
+# BURST (Lead 20:26): never re-push a unit the drain already has in drain-state seen.txt (read every 30 s; unreadable =
+# the last list). The re-push made a second sha for a unit whose first sha was in flight or submitted (submitfail).
+SEEN = {"t": 0.0, "ids": set()}
+
+
+def drain_seen(now):
+    if now - SEEN["t"] >= 30:
+        SEEN["t"] = now
+        if run(["git", "-C", G, "fetch", "-q", "--depth=1", FORK_URL, "+refs/heads/drain-state:refs/drain/state"], 60).returncode == 0:
+            t = run(["git", "-C", G, "show", "refs/drain/state:seen.txt"]).stdout
+            SEEN["ids"] = {l.split()[0] for l in t.splitlines() if l.strip()}
+    return SEEN["ids"]
+
+
 run(["git", "init", "-q", "--bare", G])
 n = 0; last_l = 0; ids = set()
 T0 = time.time(); listed_at = {}     # gid -> first time seen listed in this job (ids listed at the start count as old)
@@ -218,8 +232,9 @@ while time.time() < END:
         k, t = TRIES.get(g, (0, 0))
         if g in br and k < MAX_TRIES and now - t >= RETRY_S:
             done.discard(g)
+    sn = drain_seen(now)
     todo = [(g, s) for g, s in br.items() if g not in done and g in ids and now - first_seen[(g, s)] >= MIN_AGE
-            and re.fullmatch(r"L-[a-z0-9]+(-[a-z0-9]+)*", g)]
+            and g not in sn and re.fullmatch(r"L-[a-z0-9]+(-[a-z0-9]+)*", g)]
     todo.sort(key=lambda x: (-listed_at.get(x[0], T0), first_seen[x]))
     if todo:
         t1 = time.time()
