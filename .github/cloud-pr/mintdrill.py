@@ -276,9 +276,42 @@ def child_close(src, w):
     def updated(p):
         return max([tt(p["closed_at"]) or 0] + [tt(c["created_at"]) for c in cmts(p) if c.get("created_at")])
 
+    FORKB = {}                            # 16.5 rule 4: fork head branches <ID> -> sha (each of our PRs' head, newest wins)
+    for p in sorted(allp, key=lambda p: p["number"]):
+        if p["user"]["login"] == HANDLE and (p.get("head") or {}).get("sha"):
+            FORKB[p["head"]["ref"]] = p["head"]["sha"]
+    FORKB.update(w.get("fork_branches", {}))
+    out["deleted"] = []
+
     def sh(*a, timeout=120, env=None):
         a = list(a)
         s = " ".join(a)
+        if a[0] == "git" and "pequalnp-proofs-fork" in s and "ls-remote" in a:
+            ref = a[-1].replace("refs/heads/", "")
+            return subprocess.CompletedProcess(a, 0, f"{FORKB[ref]}\trefs/heads/{ref}\n" if ref in FORKB else "", "")
+        if a[0] == "git" and "pequalnp-proofs-fork" in s and "push" in a:
+            ref = a[-1].split(":refs/heads/", 1)[1]
+            lease = next((x.split(":", 1)[1] for x in a if x.startswith("--force-with-lease=")), None)
+            if not a[-1].startswith(":") or lease is None or FORKB.get(ref) != lease:
+                return subprocess.CompletedProcess(a, 1, "", "! [rejected] (stale info)")
+            FORKB.pop(ref)
+            out["deleted"].append(ref)
+            for p in allp:                     # GitHub closes an open PR whose head branch is deleted
+                if (p.get("head") or {}).get("ref") == ref and not state_at(p).get("closed_at"):
+                    out.setdefault("closed_by_delete", []).append(p["number"])
+            return subprocess.CompletedProcess(a, 0, "", "")
+        if a[0] == "gh" and "state=all&head=" in s:
+            ref = re.search(r"head=Leg0shii:([^&\s]+)", s).group(1)
+            rc = w.get("race_create", {}).get(ref)
+            if rc and ref not in out.setdefault("raced", []):   # an opener pushes + creates right after our read
+                out["raced"].append(ref)
+                res = [state_at(p) for p in allp if visible(p) and (p.get("head") or {}).get("ref") == ref]
+                FORKB[ref] = rc["sha"]
+                allp.append(dict(our_pr(rc["n"], ref, created=0), head={"ref": ref, "sha": rc["sha"],
+                                 "repo": {"full_name": "Leg0shii/pequalnp-proofs-fork"}}, created_at=iso(clock[0])))
+                return subprocess.CompletedProcess(a, 0, json.dumps(res), "")
+            res = [state_at(p) for p in allp if visible(p) and (p.get("head") or {}).get("ref") == ref]
+            return subprocess.CompletedProcess(a, 0, json.dumps(res), "")
         if a[0] == "gh" and "state=closed" in s:
             out["closed_reads"] = out.get("closed_reads", 0) + 1
             if PASS[0] in w.get("closed_fail_passes", []):
@@ -482,7 +515,7 @@ def body_bad(prs, ex):
     return bad
 
 
-def judge_close(name, w, r, must_close, must_keep=(), must_push=None, no_push=False, max_reads=None, go_count=None, last_stop=None, halted=None, stop_count=None, cache_max=None, self_halted=None):
+def judge_close(name, w, r, must_close, must_keep=(), must_push=None, no_push=False, max_reads=None, go_count=None, last_stop=None, halted=None, stop_count=None, cache_max=None, self_halted=None, must_delete=None, keep_branch=()):
     if r.get("crash"):
         return False, "crash " + " | ".join(r["crash"])
     bad = []
@@ -508,6 +541,13 @@ def judge_close(name, w, r, must_close, must_keep=(), must_push=None, no_push=Fa
             bad.append(f"caches over cap {big}")
     if halted is not None and r.get("halted") != halted:
         bad.append("filing " + ("NOT halted" if halted else "still halted") + " at the end")
+    if must_delete is not None and sorted(r.get("deleted") or []) != sorted(must_delete):
+        bad.append(f"deleted branches {r.get('deleted')} (want {must_delete})")
+    kb = [b for b in keep_branch if b in (r.get("deleted") or [])]
+    if kb:
+        bad.append(f"deleted a kept branch {kb}")
+    if r.get("closed_by_delete"):
+        bad.append(f"a branch delete closed open PR(s) {r['closed_by_delete']}")
     if self_halted is not None and r.get("self_halted") != self_halted:
         bad.append(f"closer halted_now() = {r.get('self_halted')} (want {self_halted})")
     if r.get("push_collisions"):
@@ -535,7 +575,8 @@ def unit(gid, tpl="tl6c-not-search", **k):
 
 
 def our_pr(n, gid, lease=False, created=-300, title=None):
-    return {"number": n, "title": title or gid, "user": {"login": HANDLE}, "head": {"ref": gid}, "files": [],
+    return {"number": n, "title": title or gid, "user": {"login": HANDLE}, "head": {"ref": gid, "sha": "%040x" % n,
+                                                                              "repo": {"full_name": "Leg0shii/pequalnp-proofs-fork"}}, "files": [],
             "body": "desc" + ("\n\nLease: lid-%d" % n if lease else ""), "created_at": iso(T0 + created),
             "merged_at": None, "closed_at": None}
 
@@ -706,6 +747,23 @@ def cases():
                                                     "toolkit_refs": [{"ref": "refs/heads/filing/stop/%d-blind" % (T0 - 100), "msg": "filing stop: BLIND closed-read go=0", "born": -100},
                                                                      {"ref": "refs/heads/filing/go/%d" % (T0 - 50), "msg": "filing go: Lead", "born": -50}]}, **extra),
                     {"must_close": [], "no_push": True, "go_count": 0, "halted": True, "self_halted": True}))
+    # 16.5 rule 4 + 16.8 O3/O7 (Lead 06:26): head branch <ID> deleted only when MERGED or closed BY US, never while open
+    mg = our_pr(50400, "L-meta-93400", created=-900); mg.update(merged_at=iso(T0 - 100), closed_at=iso(T0 - 100))
+    out.append(("hostile/D1", "close", {"closed_pulls": [ours_closed(50401, "L-meta-93401", -60, by="makers-bot", comments=pf)], "passes": [0, 60, 120]},
+                {"must_close": [], "must_delete": [], "keep_branch": ["L-meta-93401"]}))
+    out.append(("hostile/D2", "close", {"closed_pulls": [mg, ours_closed(50402, "L-meta-93402", -60, by=HANDLE)], "passes": [0, 60, 120]},
+                {"must_close": [], "no_push": True, "must_delete": ["L-meta-93400", "L-meta-93402"]}))
+    out.append(("hostile/D3", "close", {"closed_pulls": [ours_closed(50403, "L-meta-93403", -60, by=HANDLE)], "passes": [0, 60, 120],
+                                        "race_create": {"L-meta-93403": {"sha": "f" * 40, "n": 50490}}},
+                {"must_close": [], "no_push": True, "must_delete": [], "keep_branch": ["L-meta-93403"]}))
+    # D4: our close, but an earlier PR on the same head was closed by the makers -> the never-again mark stays
+    old_mk = ours_closed(50404, "L-meta-93404", -3000, by="makers-bot"); old_mk["head"] = dict(old_mk["head"], sha="%040x" % 50405)
+    out.append(("hostile/D4", "close", {"closed_pulls": [old_mk, ours_closed(50405, "L-meta-93404", -60, by=HANDLE)], "passes": [0, 60, 120]},
+                {"must_close": [], "no_push": True, "must_delete": [], "keep_branch": ["L-meta-93404"]}))
+    # D5: our duplicate closed by the closer itself this run (behind a rival's lower PR) -> its branch deleted next pass
+    r5, o5 = rival_pr(50406, "L-meta-93406", created=-400), our_pr(50407, "L-meta-93406", created=-300)
+    out.append(("hostile/D5", "close", {"open_pulls": [r5, o5], "taken_map": {"L-meta-93406": (50406, "rival1")}, "passes": [0, 60, 120, 180]},
+                {"must_close": [50407], "no_push": True, "must_delete": ["L-meta-93406"]}))
     # B9 partial failures. B9a: gh pr close times out AFTER the close happened (our own duplicate, CI comment) -> no halt
     d1, d2 = our_pr(50300, "L-meta-93300", created=-200), our_pr(50301, "L-meta-93300", created=-100)
     d2["comments"] = [{"body": "CI: build started", "user": {"login": "ci-bot"}, "created_at": iso(T0 - 50)}]

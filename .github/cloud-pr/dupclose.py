@@ -401,10 +401,92 @@ def heartbeat(n, d, fresh):
     # 19:50: PR_TOKEN (Leg0shii, shared with PR creation and the PC) hit 0; rate_limit calls are free
     rlp = sh("gh", "api", "rate_limit", "--jq", r'"\(.resources.core.remaining)/\(.resources.core.reset)"', env=ghenv(), timeout=30).stdout.strip() or "?"
     msg = (f"dupclose {int(time.time())} open={n} dups={d} closed={len(CLOSED)} taken={'fresh' if fresh else 'stale'} "
-           f"{SPLIT['txt']} pages={OPEN.get('pages', '-')} rej10={REJ.get('n', '-')} rl={rl} rl_pr={rlp} tok={'read' if os.environ.get('READ_TOKEN') else 'pr'} "
+           f"{SPLIT['txt']} br={BR['deleted']}/{len(BR['cand'])}/{BR['kept']} pages={OPEN.get('pages', '-')} rej10={REJ.get('n', '-')} rl={rl} rl_pr={rlp} tok={'read' if os.environ.get('READ_TOKEN') else 'pr'} "
            f"run={os.environ.get('GITHUB_RUN_ID', '-')}")
     c = subprocess.run(["git", "-C", g, "commit-tree", tree, "-m", msg], capture_output=True, text=True, env=env).stdout.strip()
     sh("git", *auth(), "-C", g, "push", "-q", "-f", TK, f"{c}:refs/heads/status/dupclose", timeout=60)
+
+
+FORK = "https://github.com/Leg0shii/pequalnp-proofs-fork.git"
+FORK_REPO = "Leg0shii/pequalnp-proofs-fork"
+BR = {"cand": {}, "deleted": 0, "kept": 0, "seen": set()}      # n -> (head ref, head sha, why); counters for the heartbeat
+BR_MAX = 5                                       # deletes tried per pass (each: 1 ls-remote + 1-2 REST reads)
+
+
+def branch_cands(rows):
+    """16.5 rule 4 as amended by 16.8 (O3, O7): our PR MERGED, or closed BY US (a duplicate behind a rival) -> its head
+    branch Leg0shii:<ID> on the fork may be deleted. A PR closed by the makers (or by anyone we cannot name) keeps its
+    branch for good: the branch is the never-again mark for the unit."""
+    for x in rows:
+        if (x.get("user") or {}).get("login") != HANDLE or not x.get("closed_at") or x["number"] in BR["cand"]:
+            continue
+        h = x.get("head") or {}
+        ref, sha = h.get("ref") or "", h.get("sha") or ""
+        if (h.get("repo") or {}).get("full_name") != FORK_REPO or not UNIT_RX.fullmatch(ref) or not re.fullmatch(r"[0-9a-f]{40}", sha):
+            continue                                  # only <ID> branches of the fork, never main, ready/, stage/
+        n_ = x["number"]
+        if x.get("merged_at"):
+            why = "merged"
+        elif n_ in CLOSED or CLOSER.get(n_) == HANDLE:
+            why = "closed by us"
+        else:
+            continue                                  # makers' close or closer unknown: the branch stays
+        if n_ not in BR["seen"]:
+            BR["cand"][n_] = (ref, sha, why)
+
+
+def prune_branches():
+    """Delete the queued head branches, each only if, right before the delete: the fork branch still points at the
+    closed PR's head sha; no PR on head Leg0shii:<ID> is open; every closed unmerged PR on that head was closed by us.
+    The delete is a lease push (--force-with-lease=<ref>:<sha>): a create that moved the branch meanwhile wins."""
+    if DRY:
+        return 0
+    n_del = 0
+    g = os.path.join(W, "taken.git")
+    if not os.path.isdir(g):
+        sh("git", "init", "-q", "--bare", g)
+    for n_, (ref, sha, why) in list(BR["cand"].items())[:BR_MAX]:
+        r = sh("git", *auth(), "ls-remote", FORK, f"refs/heads/{ref}", timeout=60)
+        if r.returncode:
+            continue                                  # unreadable: try again next pass
+        cur = (r.stdout.split() or [None])[0]
+        keep = None
+        if cur is None:
+            keep = "already gone"
+        elif cur != sha:
+            keep = f"branch moved to {cur[:8]} (a new create)"
+        else:
+            q = sh("gh", "api", f"repos/{UP}/pulls?state=all&head=Leg0shii:{ref}&per_page=100", env=rdenv(), timeout=60)
+            if q.returncode:
+                continue
+            try:
+                ps = json.loads(q.stdout or "[]")
+            except ValueError:
+                continue
+            for p in ps:
+                m = p.get("number")
+                if not p.get("closed_at"):
+                    keep = f"PR {m} open on the head"; break
+                if p.get("merged_at") or m in CLOSED or CLOSER.get(m) == HANDLE:
+                    continue
+                c = sh("gh", "api", f"repos/{UP}/issues/{m}", "--jq", ".closed_by.login // empty", env=rdenv(), timeout=60)
+                if c.returncode == 0 and c.stdout.strip():
+                    CLOSER[m] = c.stdout.strip()
+                if CLOSER.get(m) != HANDLE:
+                    keep = f"PR {m} on the head closed by {CLOSER.get(m) or 'unknown'} (never-again mark)"; break
+        BR["cand"].pop(n_, None)
+        BR["seen"].add(n_)
+        if keep:
+            BR["kept"] += 1
+            log("branch kept", ref, "of", n_, keep)
+            continue
+        d = sh("git", *auth(), "-C", g, "push", "-q", f"--force-with-lease=refs/heads/{ref}:{sha}", FORK, f":refs/heads/{ref}", timeout=60)
+        if d.returncode == 0:
+            BR["deleted"] += 1; n_del += 1
+            log("branch deleted", ref, "of", n_, why)
+        else:
+            log("branch delete refused", ref, "of", n_, d.stderr.strip()[-100:])
+    return n_del
 
 
 def rej_burst():
@@ -482,6 +564,7 @@ def rej_burst():
                     CMT[n_] = (closed_s > CMT_FINAL_S, json.loads(c.stdout or "[]"))
             prs.append({"number": n_, "closedAt": ca, "mergedAt": None, "comments": (CMT.get(n_) or (False, []))[1],
                         "closedBy": CLOSER.get(n_)})
+        branch_cands(rows)                            # 16.5 rule 4 / 16.8 O3 O7: head branches we may delete
     now = time.time()
 
     def t(x):
@@ -656,6 +739,10 @@ def one_pass():
         alert_ref(f"DUP-OPEN {len(dups)}", "dupopen")
         log("DUP-OPEN", len(dups))
     rb = rej_burst()
+    try:
+        prune_branches()
+    except Exception as e:
+        log("branch prune failed:", repr(e)[:120])
     if rb:
         log("rejections of ours in the last 10 min:", rb)
     return len(prs), len(dups), tk is not None
