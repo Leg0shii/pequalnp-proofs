@@ -1195,12 +1195,21 @@ def push_branch(c, gid):
             git("fetch", "-q", "--depth=1", url, f"{nums[0][1]}:refs/fork/tip", timeout=180)
     refused = 0
     for att in range(4):
-        if push_gate_wait(gid):                    # Lead 09:08 (16.13 ext.): a drain stall stops pushes too
-            return "stall-giveup: four refusals in this drain, no push"
+        if push_gate_wait(gid):                    # 16.13: four CREATE refusals ended the drain's creates
+            return "stall-giveup: four create refusals in this drain, no push"
+        h, hwhy = filing_halted()                  # R3 (red team 09:38): a fresh halt read before every push attempt,
+        if h:                                      # also after a stall sleep: a halted drain pushes no head
+            push_first_done(gid)
+            return "halted: " + hwhy
         # create-only (Lead 06:12): the ref must not exist yet; an existing head is never rewritten
         r = run(["git"] + auth_cfg() + ["-C", TREE, "push", "-q", f"--force-with-lease=refs/heads/{gid}:", url,
                                         f"{c}:refs/heads/{gid}"], timeout=600)
-        if r.returncode and push_refused(r.stderr):
+        kind = push_refusal_kind(r.stderr) if r.returncode else None
+        if kind == "denied":                       # R5: a permission failure is not a rate refusal: fail at once
+            push_first_done(gid)
+            push_denied(gid, r.stderr)
+            return "PUSH-DENIED: " + r.stderr.strip()[:250]
+        if kind == "refused":
             refused += 1
             push_refusal(gid, r.stderr, last=refused > 1)
             if refused > 1:                        # the one retry after the stall was refused too: the drain retries
@@ -1216,17 +1225,47 @@ def push_branch(c, gid):
     return r.stderr.strip()[:300]
 
 
-# Lead 09:08 (HARDENING 16.13 extended): GitHub recommends at most 6 pushes a minute per repository; pushes to the fork
-# got a 429 (08:49:57, "The requested URL returned error: 429") and a 403 inside bursts. A 403 or 429 on a head push is
-# a REFUSAL: the same drain stall as a create refusal (PR_GATE_DIR/stall, ladder 60/120/240, 4th = giveup), alert
-# PUSH-REFUSED, the refused unit pushes once more after the stall and FIRST (PR_GATE_DIR/pushfirst): no other worker
-# pushes or creates before it. A push rejected because the ref exists is not a refusal.
-PUSH_REFUSED_RE = re.compile(r"(?<![\w/-])(403|429)(?![\w-])|Too Many Requests|secondary rate limit", re.I)  # not L-meta-403
+# Lead 09:08/09:22 (HARDENING 16.13 extended; red team REVIEW-RCB-REAL R1, R3, R5): GitHub recommends at most 6 pushes
+# a minute per repository; pushes to the fork got a 429 (08:49:57, "The requested URL returned error: 429") and a bare
+# 403 (r5) inside bursts. Such a push is a PUSH REFUSAL: its OWN counter PR_GATE_DIR/pushrefusals and ladder (60, 120,
+# then 240 s), the drain's stall file (no push and no create by any worker meanwhile), the create rate halved per
+# refusal, alert PUSH-REFUSED; NEVER the create giveup (only create refusals count toward PR-STALL-GIVEUP). The refused
+# unit pushes once more after the stall and FIRST (PR_GATE_DIR/pushfirst). A 403 that names a permission ("Permission",
+# "denied") is PUSH-DENIED: no stall, the unit fails at once, own alert. A ref-exists rejection is neither.
+PUSH_429_RE = re.compile(r"(?<![\w/-])429(?![\w-])|Too Many Requests|rate limit|secondary", re.I)   # not L-meta-429
+PUSH_403_RE = re.compile(r"returned error: 403(?![\w-])|(?<![\w/-])HTTP 403(?![\w-])")
+PUSH_DENIED_RE = re.compile(r"permission|denied", re.I)
 PUSH_FIRST_S = 120             # a pushfirst token older than its stall + this is stale (its worker died)
 
 
+def push_refusal_kind(stderr):
+    """'refused' (429, rate limit, secondary, or a bare 403: no remote: line), 'denied' (a 403 naming a permission),
+    None (anything else, ref-exists rejections included)"""
+    t = stderr or ""
+    is403 = bool(PUSH_403_RE.search(t))
+    if is403 and PUSH_DENIED_RE.search(t):
+        return "denied"
+    if PUSH_429_RE.search(t):
+        return "refused"
+    if is403 and not re.search(r"^remote:", t, re.M):
+        return "refused"
+    return None
+
+
 def push_refused(stderr):
-    return bool(PUSH_REFUSED_RE.search(stderr or ""))
+    return push_refusal_kind(stderr) == "refused"
+
+
+def push_refusals(d):
+    try:
+        return int(open(os.path.join(d, "pushrefusals")).read().strip() or 0)
+    except (OSError, ValueError):
+        return 0
+
+
+def push_refusal_wait(k):
+    """R1: the k-th push refusal of a drain stalls 60, 120, then 240 s (no giveup, so the ladder stops at 240)"""
+    return 60.0 * 2 ** (min(k, 3) - 1)
 
 
 def _push_first():
@@ -1241,7 +1280,7 @@ def _push_first():
 
 def push_gate_wait(gid):
     """before every head push: wait out a drain stall and another unit's push-first turn. True = give up (the drain's
-    4th refusal). No drain (PR_GATE_DIR unset): no wait."""
+    4th CREATE refusal). No drain (PR_GATE_DIR unset): no wait."""
     d = os.environ.get("PR_GATE_DIR")
     if not d:
         return False
@@ -1263,9 +1302,27 @@ def push_gate_wait(gid):
     return False
 
 
+def push_bucket_refusal(d, why, now=None):
+    """R1: a push refusal: own counter, stall for every push and create, rate halved; never giveup. (k, wait, rate)"""
+    now = time.time() if now is None else now
+    with open(os.path.join(d, "creates.lock"), "w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        k = push_refusals(d) + 1
+        with open(os.path.join(d, "pushrefusals"), "w") as o:
+            o.write(str(k))
+        wait = push_refusal_wait(k)
+        try:
+            until = float(open(os.path.join(d, "stall")).read())
+        except Exception:
+            until = 0.0
+        with open(os.path.join(d, "stall"), "w") as o:
+            o.write(str(max(until, now + wait)))
+    return k, wait, gate_rate(d)
+
+
 def push_refusal(gid, stderr, last=False):
-    """a 403/429 on gid's head push: the drain stall (bucket_refusal, same ladder and giveup), PR_GATE_DIR/pushrefused
-    for the drain's PUSH-REFUSED alert, and the push-first token for gid (cleared when last). No drain: wait 60 s."""
+    """a rate refusal on gid's head push: push_bucket_refusal, PR_GATE_DIR/pushrefused for the drain's PUSH-REFUSED
+    alert, the push-first token for gid (cleared when last). No drain: wait 60 s."""
     txt = " ".join((stderr or "").split())[:200]
     d = os.environ.get("PR_GATE_DIR")
     if not d:
@@ -1273,7 +1330,7 @@ def push_refusal(gid, stderr, last=False):
         if not last:
             time.sleep(60)
         return
-    k, wait, rate = bucket_refusal(d, {}, "PUSH-REFUSED " + txt, kind="PUSH-REFUSED")
+    k, wait, rate = push_bucket_refusal(d, txt)
     now = time.time()
     try:
         with open(os.path.join(d, "pushrefused.tmp"), "w") as o:
@@ -1287,8 +1344,23 @@ def push_refusal(gid, stderr, last=False):
             os.replace(os.path.join(d, "pushfirst.tmp"), os.path.join(d, "pushfirst"))
     except OSError:
         pass
-    log("PUSH-REFUSED", gid, f"refusal {k}/4: every worker stops pushing and creating for {wait:.0f} s,",
-        "this unit pushes once more first" if not last else "second refusal: unit left for the drain's retry", f"({txt})")
+    log(f"PUSH-REFUSED {gid} push refusal {k} in this drain: every worker stops pushing and creating for {wait:.0f} s, "
+        f"rate now {rate}/min,", "this unit pushes once more first" if not last else "second refusal: unit left for the drain's retry",
+        f"({txt})")
+
+
+def push_denied(gid, stderr):
+    """R5: a 403 naming a permission: no stall, PR_GATE_DIR/pushdenied for the drain's PUSH-DENIED alert"""
+    txt = " ".join((stderr or "").split())[:200]
+    log("PUSH-DENIED", gid, "(permission, not a rate limit: no stall, unit fails now)", txt)
+    d = os.environ.get("PR_GATE_DIR")
+    if d:
+        try:
+            with open(os.path.join(d, "pushdenied.tmp"), "w") as o:
+                o.write(f"{time.time():.0f} {gid} {txt}\n")
+            os.replace(os.path.join(d, "pushdenied.tmp"), os.path.join(d, "pushdenied"))
+        except OSError:
+            pass
 
 
 def push_first_done(gid):
@@ -1352,7 +1424,7 @@ def refusals(d):
 
 def gate_rate(d):
     """HARDENING 16.13 (Lead 07:25) (2): the drain's create rate, halved after every refusal (70, 35, 17, floor 10)"""
-    k = refusals(d)
+    k = refusals(d) + push_refusals(d)          # R1: push refusals halve the rate too (but never give up)
     return max(PR_RATE_FLOOR, PR_PER_MIN >> k) if k else PR_PER_MIN
 
 
@@ -1518,7 +1590,7 @@ def submit(gid, lease):
     err = push_branch(c, gid)
     STG["push"] = round(time.time() - t, 1)
     if err:
-        return None, "push: " + err
+        return None, err if err.startswith(("halted: ", "stall-giveup: ")) else "push: " + err   # R3: finish halted/giveup
     log("pushed", c[:12], "to", f"{FORK}:{gid}")
     return create_pr(gid, lease)
 

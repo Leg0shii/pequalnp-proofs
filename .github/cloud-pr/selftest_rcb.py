@@ -569,7 +569,9 @@ if hasattr(S, "push_branch"):
         S.upbase_ref = lambda b: "upbase/x"
     t0c = CLK[0]
     e = S.push_branch("c" * 40, "L-meta-1")
-    k = int(open(os.path.join(PD, "refusals")).read()) if os.path.exists(os.path.join(PD, "refusals")) else 0
+    # Lead 09:22 R1: a push refusal has its own counter (pushrefusals) and never counts toward the create giveup
+    k = int(open(os.path.join(PD, "pushrefusals")).read()) if os.path.exists(os.path.join(PD, "pushrefusals")) else 0
+    k = k if not os.path.exists(os.path.join(PD, "refusals")) else -1
     case("09:10-push-429-is-a-refusal", e is None and len(calls) == 2 and k == 1 and CLK[0] - t0c >= 59,
          f"(err {e}, pushes {len(calls)}, refusals {k}, waited {CLK[0] - t0c:.0f} s)")
     S.run, S.git = sv[0], sv[1]
