@@ -8,7 +8,8 @@
 first_would_push: the first "DONE ... would push" line, counted from the release ("units released now", WARM_S) or, when
 the drain logs no release, from START (the same rule SPEED's parse.py uses). race/guards/tree/total: p95 over the dry
 units' TIMES lines ("-" when the stage is not logged). alerts: every ALERT kind with its count. reads: GitHub core used,
-from the run token and PR_TOKEN rate_limit before and after the drain (PR_TOKEN is shared by the account: an upper bound).
+from the run token and PR_TOKEN rate_limit before and after the drain (both are upper bounds: the run token's limit is
+shared by every job of the repo running meanwhile, PR_TOKEN's by the whole account). tree: the TIMES key tree=, else commit=.
 verdict: BAD = a lost unit (fewer would-push than units) or REFRESHER-DEAD / PR-STALL; SLOW = first_would_push or race_p95
 worse than the signed baseline (team/infra/preflight.baseline, line "canary first_would_push=<s> race_p95=<s>") by more
 than 15% (+1 s); otherwise ok. The baseline is read only when --baseline FILE is given (preflight.sh does that).
@@ -38,6 +39,7 @@ def main(a):
             T[u] = {k: float(v) for k, v in re.findall(r"(\w+)=([\d.]+)", l)}
     du = [re.search(r"DONE (\S+)", l).group(1) for l in dry]
     g = lambda k: [T[u][k] for u in du if u in T and k in T[u]]
+    tree = g("tree") or g("commit")     # submit.py logs the tree build (read-tree of the upstream tree) as commit=
     first = (min(off(l) for l in dry) - t0) if dry else None
     res = {}
     for l in L:
@@ -83,7 +85,7 @@ def main(a):
             "tree_p95=%s total_p95=%s results=%s alerts=%s reads run=%s pr=%s run=%s verdict=%s%s") % (
         (a.sha or "?")[:8], (a.head or a.sha or "?")[:8], a.workers or "?", a.slots or "?", a.warm or "0",
         "-" if first is None else first, "release" if rel else "START", len(du), units, f(pct(g("race"), .95)),
-        f(pct(g("guards"), .95)), f(pct(g("tree"), .95)), f(pct(g("total"), .95)),
+        f(pct(g("guards"), .95)), f(pct(tree, .95)), f(pct(g("total"), .95)),
         ",".join("%s:%d" % kv for kv in sorted(res.items())) or "none",
         ",".join("%s:%d" % kv for kv in sorted(al.items())) or "none", used(a.reads_run), used(a.reads_pr), a.run or "?",
         verdict, (" (" + "; ".join(why) + ")") if why else "")
