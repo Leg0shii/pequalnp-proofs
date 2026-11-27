@@ -605,8 +605,19 @@ else:
 
 # ---- Lead 09:10: a refused head push (429/403) is a 16.13 refusal (stall for every worker, alert), then pushed again
 if hasattr(S, "push_branch"):
+    # hermetic (infra 10:09, flaked 1 of 3 under the full parallel mintdrill): its own PR_GATE_DIR and RIVAL_SNAP_DIR
+    # (no halt.json, refresher heartbeat or pushfirst/stall file of another case), no halt read (R3 reads
+    # filing_halted() before every push; leftover refresher threads of the 16.14 cases may still write the shared
+    # copy), and its own fake clock (no other case's CLK, no real sleep).
     PD = tempfile.mkdtemp(); svd = os.environ.get("PR_GATE_DIR"); os.environ["PR_GATE_DIR"] = PD
+    PRD = tempfile.mkdtemp(); svrd = os.environ.get("RIVAL_SNAP_DIR"); os.environ["RIVAL_SNAP_DIR"] = PRD
     sv = (S.run, S.git, getattr(S, "upbase_ref", None))
+    svh, svclk = getattr(S, "filing_halted", None), (S.time.time, S.time.sleep)
+    if svh:
+        S.filing_halted = lambda *a, **k: (False, "")
+    PCLK = [1_900_000_000.0]
+    S.time.time = lambda: PCLK[0]
+    S.time.sleep = lambda x: PCLK.__setitem__(0, PCLK[0] + max(x, 0.0))
     calls = []
     def prun(a, **k):
         if "push" in a:
@@ -617,20 +628,25 @@ if hasattr(S, "push_branch"):
     S.run = prun; S.git = lambda *a, **k: subprocess.CompletedProcess(a, 0, "abc\n", "")
     if sv[2]:
         S.upbase_ref = lambda b: "upbase/x"
-    t0c = CLK[0]
+    t0c = PCLK[0]
     e = S.push_branch("c" * 40, "L-meta-1")
+    waited = PCLK[0] - t0c
     # Lead 09:22 R1: a push refusal has its own counter (pushrefusals) and never counts toward the create giveup
     k = int(open(os.path.join(PD, "pushrefusals")).read()) if os.path.exists(os.path.join(PD, "pushrefusals")) else 0
     k = k if not os.path.exists(os.path.join(PD, "refusals")) else -1
-    case("09:10-push-429-is-a-refusal", e is None and len(calls) == 2 and k == 1 and CLK[0] - t0c >= 59,
-         f"(err {e}, pushes {len(calls)}, refusals {k}, waited {CLK[0] - t0c:.0f} s)")
+    S.time.time, S.time.sleep = svclk
+    case("09:10-push-429-is-a-refusal", e is None and len(calls) == 2 and k == 1 and 59 <= waited <= 70,
+         f"(err {e}, pushes {len(calls)}, refusals {k}, waited {waited:.0f} s)")
     S.run, S.git = sv[0], sv[1]
     if sv[2]:
         S.upbase_ref = sv[2]
-    if svd is None:
-        os.environ.pop("PR_GATE_DIR", None)
-    else:
-        os.environ["PR_GATE_DIR"] = svd
+    if svh:
+        S.filing_halted = svh
+    for var, old in (("PR_GATE_DIR", svd), ("RIVAL_SNAP_DIR", svrd)):
+        if old is None:
+            os.environ.pop(var, None)
+        else:
+            os.environ[var] = old
 else:
     case("09:10-push-429-is-a-refusal", False, "(no push_branch)")
 
