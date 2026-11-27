@@ -662,7 +662,7 @@ def pr_files(n):
 SNAP_MAX_AGE_S = 5       # A19: one snapshot shared by every drain worker
 SNAP_CREATE_AGE_S = float(os.environ.get("SNAP_CREATE_AGE_S", "2"))   # Lead 06:12: at gh pr create at most 2 s old
 SNAP_DIR = os.environ.get("RIVAL_SNAP_DIR") or os.environ.get("PR_GATE_DIR") or W
-SNAP_PAGE, SNAP_MAX_PAGES = 20, 50      # 16.7: 20 newest PRs a page (fewer changes = more 304s), up to 1,000 since the header
+SNAP_PAGE, SNAP_MAX_PAGES = 100, 10     # w12 07:16: 100 a page = one read per build in a wave (40 PRs a minute); 304 when unchanged
 FILE_UNIT_RX = re.compile(r"lean/PEqualNP/Outside/(L_[a-z0-9]+(?:_[a-z0-9]+)*_\d+|V_[a-z0-9]+(?:_[a-z0-9]+)*_\d+__k\d+)\.lean")
 
 
@@ -688,15 +688,17 @@ def _build_snapshot(files):
     full = not TL_COMPLETE[0]               # A3: partial list -> every open PR (100 a page), not only the newest
     cut = -1e18 if full else TL_HDR[0] - 30
     size, maxp = (100, 60) if full else (SNAP_PAGE, SNAP_MAX_PAGES)
-    recent = []
-    for k in range(1, maxp + 1):
-        if k == 1:
-            t_build = time.time()
-        # 16.7: small pages (only PRs since the header are needed) read with If-None-Match: an unchanged page is a
-        # 304 and costs nothing of the run token's hourly limit; any failed read raises (fail closed)
+    recent, seen_n = [], set()
+    dur = {}
+
+    def page(k):
+        # 16.7: read with If-None-Match: an unchanged page is a 304 and costs nothing of the run token's hourly
+        # limit; any failed read raises (fail closed)
+        t_rd = time.time()
         try:
             pulls, counted, rem = ghcond.get(f"repos/{UP}/pulls?state=open&sort=created&direction=desc&per_page={size}&page={k}",
                                              gh=gh_cond)
+            dur[k] = time.time() - t_rd
         except ghcond.ReadFail as e:
             raise RuntimeError(f"open pulls page {k}: {e}")
         if not isinstance(pulls, list):
@@ -708,8 +710,9 @@ def _build_snapshot(files):
                 old = True
                 continue
             who = (p.get("user") or {}).get("login") or "?"
-            if who == HANDLE:
+            if who == HANDLE or p["number"] in seen_n:
                 continue
+            seen_n.add(p["number"])
             us = set(UNIT_TOKEN.findall(p.get("title") or "")) | \
                 set(UNIT_TOKEN.findall(((p.get("head") or {}).get("ref") or "").replace("_", "-")))
             key = f"{p['number']}:{(p.get('head') or {}).get('sha') or ''}"
@@ -717,20 +720,53 @@ def _build_snapshot(files):
                 files[key] = sorted({u for u in map(file_unit, pr_files(p["number"])) if u})
             recent.append({"n": p["number"], "who": who, "units": sorted(us | set(files[key])),
                            "by_file": sorted(set(files[key]) - us)})
-        if old or len(pulls) < size:
-            return {"t": t_build, "hdr": TL_HDR[0], "taken": tl, "recent": recent, "files": files,
-                    "rl": ghcond.STATS["remaining"], "full": full}
+        return old or len(pulls) < size
+
+    for k in range(1, maxp + 1):
+        if k == 1:
+            t_build = time.time()
+        if page(k):
+            if k > 1:           # w12 07:16: several pages took time; page 1 (the newest PRs) is read again last and
+                t_build = time.time()     # the snapshot is stamped at THAT request (usually a 304)
+                page(1)
+            return {"t": t_build, "d": round(dur.get(1, 0.0), 3), "hdr": TL_HDR[0], "taken": tl, "recent": recent,
+                    "files": files, "rl": ghcond.STATS["remaining"], "full": full}
     raise RuntimeError(f"more than {maxp} pages of open PRs since the taken list (fail closed)")
 
 
+SNAP_READ_MAX_S = 6.0    # HARDENING 16.12: a newest-page read slower than this is thrown away (SNAP-SLOW)
+
+
+def snap_fresh(snap, bound, now=None):
+    """HARDENING 16.12 (Lead 07:18): what must be fresh is the newest-page read (the taken list covers everything before
+    its header). Fresh = that read STARTED at most max(bound, d + 1 s) ago, d its own duration, and d <= 6 s."""
+    now = time.time() if now is None else now
+    d = float(snap.get("d") or 0.0)
+    return d <= SNAP_READ_MAX_S and 0 <= now - snap["t"] <= max(bound, d + 1.0)
+
+
+def _snap_note(snap):
+    """one line per build in SNAP_DIR/snapd.log (newest-page read duration), read by drain.py for the per-drain
+    p50/p95/max; a read over 6 s also leaves SNAP_DIR/snapslow for the drain's SNAP-SLOW alert"""
+    try:
+        with open(os.path.join(SNAP_DIR, "snapd.log"), "a") as o:
+            o.write(f"{snap['t']:.1f} {snap.get('d', 0):.3f}\n")
+        if float(snap.get("d") or 0) > SNAP_READ_MAX_S:
+            with open(os.path.join(SNAP_DIR, "snapslow"), "w") as o:
+                o.write(f"{time.time():.0f} {snap.get('d', 0):.1f}\n")
+    except OSError:
+        pass
+
+
 def rival_snapshot(max_age=None):
-    """the shared snapshot, at most max_age (default SNAP_MAX_AGE_S) old (flock in SNAP_DIR; one builder at a time)"""
+    """the shared snapshot, fresh by snap_fresh() for max_age (default SNAP_MAX_AGE_S) (flock in SNAP_DIR; one builder
+    at a time)"""
     max_age = SNAP_MAX_AGE_S if max_age is None else max_age
     os.makedirs(SNAP_DIR, exist_ok=True)
     f = os.path.join(SNAP_DIR, "rival_snap.json")
     try:                    # RC-b 1: a fresh copy (kept fresh by the drain's refresher) is read WITHOUT the lock, so a
         old = json.load(open(f))       # worker holding a PR slot never waits on a build in progress
-        if 0 <= time.time() - old["t"] <= max_age:
+        if max_age > 0 and snap_fresh(old, max_age):
             return old
     except Exception:
         pass
@@ -739,19 +775,22 @@ def rival_snapshot(max_age=None):
         old = {}
         try:
             old = json.load(open(f))
-            if 0 <= time.time() - old["t"] <= max_age:
+            if max_age > 0 and snap_fresh(old, max_age):
                 return old
         except Exception:
             pass
         snap = _build_snapshot(dict(old.get("files") or {}))
+        _snap_note(snap)
         bound = max_age if max_age > 0 else SNAP_CREATE_AGE_S     # 0 = forced rebuild (refresher): the create bound
-        for _ in range(3):     # Lead 06:52: slow reads (new PRs' files) made it older than the bound: again, files cached
-            if time.time() - snap["t"] <= bound:
+        for _ in range(3):     # 16.12: not fresh (slow newest-page read, or slow files reads after it): read again
+            if snap_fresh(snap, bound):
                 break
             snap = _build_snapshot(dict(snap.get("files") or {}))
+            _snap_note(snap)
         else:
-            if time.time() - snap["t"] > bound:
-                raise RuntimeError(f"snapshot {time.time() - snap['t']:.1f} s old after 4 builds (over {bound} s)")
+            if not snap_fresh(snap, bound):
+                raise RuntimeError(f"snapshot {time.time() - snap['t']:.1f} s old, newest-page read {snap.get('d', 0):.1f} s, "
+                                   f"after 4 builds (16.12 bound max({bound}, d + 1), d <= {SNAP_READ_MAX_S:.0f})")
         with open(f + ".tmp", "w") as o:
             json.dump(snap, o)
         os.replace(f + ".tmp", f)

@@ -377,6 +377,13 @@ def main():
         _loop(inflight, idle)
     finally:
         refresher_stop(rf)
+    try:                                   # 16.12: live newest-page read duration of this drain
+        ds = sorted(float(l.split()[1]) for l in open(os.path.join(W, "snapd.log")) if len(l.split()) == 2)
+        if ds:
+            log(f"SNAP-READ newest-page read over {len(ds)} builds: p50 {ds[len(ds) // 2]:.2f} s, "
+                f"p95 {ds[min(len(ds) - 1, int(.95 * len(ds)))]:.2f} s, max {ds[-1]:.2f} s")
+    except OSError:
+        pass
     log("drain end", STATS)
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
@@ -451,6 +458,15 @@ def alert_ref(msg, kind):
 
 
 def stall_tick(n_inflight):
+    try:                                   # 16.12: a newest-page read over 6 s (thrown away by submit.py)
+        sl = open(os.path.join(W, "snapslow")).read().split()
+        if time.time() - ALERTED.get("snapslow", 0) >= 300 and time.time() - float(sl[0]) < 300:
+            ALERTED["snapslow"] = time.time()
+            m = f"SNAP-SLOW newest-page read took {sl[1]} s (over 6 s): thrown away, no PR on it"
+            ok = DRY or alert_ref(m, "snapslow")
+            log(m, "(alert ref pushed)" if ok else "(alert ref push FAILED)")
+    except (OSError, ValueError, IndexError):
+        pass
     try:
         su = float(open(os.path.join(W, "stall")).read())
     except (OSError, ValueError):

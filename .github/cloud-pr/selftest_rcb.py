@@ -345,6 +345,35 @@ if D is not None and hasattr(D, "site_verdict"):
 else:
     case("16.11-site-status", False, "(no site_verdict in this drain.py)")
 
+# ---- 16.12 (Lead 07:18): fresh = the newest-page read started at most max(2 s, d + 1 s) ago, d <= 6 s
+def page_lat(sec):
+    def g(args, write=False, timeout=120):
+        if "/pulls?" in args[1]:
+            REQ.append(CLK[0]); CLK[0] += sec
+        return orig(args, write, timeout)
+    return g
+reset_snap(); PULLS.clear(); add_pr(73001, CLK[0] - 5, "Prove L-meta-73001")
+REQ = []; S.gh = page_lat(3.0)
+try:
+    r = S.rival_now("L-meta-73999", 2)
+    case("16.12-3s-read-files-once", r is None and len(REQ) == 1, f"(rival={r}, page reads {len(REQ)})")
+except Exception as e:
+    case("16.12-3s-read-files-once", False, repr(e)[:100])
+reset_snap(); REQ.clear(); S.gh = page_lat(0.5)
+json.dump({"t": CLK[0] - 4.5, "d": 3.0, "hdr": CLK[0] - 20, "taken": {}, "recent": [], "files": {}},
+          open(os.path.join(SNAPD, "rival_snap.json"), "w"))
+S.rival_now("L-meta-73999", 2)
+case("16.12-never-on-read-older-than-d+1", len(REQ) >= 1, f"(a 3 s read started 4.5 s ago was read again: {len(REQ)} reads)")
+reset_snap(); REQ.clear(); S.gh = page_lat(7.0)
+r = S.rival_now("L-meta-73999", 2)
+slow = os.path.exists(os.path.join(SNAPD, "snapslow"))
+case("16.12-7s-read-files-nothing", bool(r) and r.startswith("rival check failed") and slow, f"(rival={str(r)[:60]}, snapslow file {slow})")
+S.gh = orig
+if have and hasattr(D, "stall_tick"):
+    sent.clear(); D.ALERTED.clear(); D.W = SNAPD; D.LAST_DONE[0] = time.time(); D.T0 = time.time()
+    D.stall_tick(0); D.stall_tick(0)
+    case("16.12-SNAP-SLOW-alert-once", [k for k, m in sent] == ["snapslow"], f"(alerts {sent})")
+
 bad = [n for n, ok in res if not ok]
 print(f"RCB SELFTEST OK {len(res)}" if not bad else "RCB SELFTEST FAIL " + " ".join(bad))
 sys.exit(1 if bad else 0)
