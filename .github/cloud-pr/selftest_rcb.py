@@ -306,6 +306,11 @@ if have:
     case("6-PR-STALL-noprogress-61s", any(k == "prstall-noprogress" for k, m in D.stall_alerts(1000.0, 3, 939.0, 800.0, 0)), "")
     case("6-no-alert-at-59s", not D.stall_alerts(1000.0, 3, 941.0, 800.0, 0), "")
     case("6-no-alert-when-idle", not D.stall_alerts(1000.0, 0, 100.0, 50.0, 0), "")
+    if "last_idle" in D.stall_alerts.__code__.co_varnames:   # Lead 09:02 (r3): 14 units, 60 s nothing, 97 units = no PR-STALL
+        case("6-idle-gap-no-stall", not D.stall_alerts(1000.0, 97, 900.0, 800.0, 0, 998.0), "")
+        case("6-stuck-after-gap-alerts", any(k == "prstall-noprogress" for k, m in D.stall_alerts(1000.0, 97, 900.0, 800.0, 0, 935.0)), "")
+    else:
+        case("6-idle-gap-no-stall", bool(D.stall_alerts(1000.0, 97, 900.0, 800.0, 0)) is False, "(old drain: the idle gap counts as a stall)")
     sent = []
     D.alert_ref = lambda m, k: sent.append((k, m)) or True
     D.W = tempfile.mkdtemp(); open(os.path.join(D.W, "stall"), "w").write(str(time.time() + 60))   # time = the case clock

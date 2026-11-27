@@ -593,17 +593,19 @@ TK = "https://github.com/Leg0shii/pnp-toolkit.git"
 STALL_S = float(os.environ.get("PR_STALL_S", "60"))
 ALERTED = {}             # kind -> epoch of the last alert (at most one per kind per 5 min)
 LAST_DONE = [0.0]
+LAST_IDLE = [0.0]        # Lead 09:02 (r3 false PR-STALL): last loop tick with nothing in flight
 
 
-def stall_alerts(now, n_inflight, last_done, t_start, stall_until):
+def stall_alerts(now, n_inflight, last_done, t_start, stall_until, last_idle=0.0):
     """RC-b 6 (Lead 06:22): PR-STALL by name within 60 s. (kind, message) list for this drain loop tick:
     prstall-bucket   GitHub refused a create (403/429): every worker stops creating until stall_until
     prstall-noprogress  units in flight and none finished for STALL_S seconds (the drain is stuck)"""
     out = []
     if stall_until > now:
         out.append(("prstall-bucket", f"PR-STALL bucket: GitHub refused a create, no PR for {stall_until - now:.0f} s"))
-    if n_inflight and now - max(last_done, t_start) > STALL_S:
-        out.append(("prstall-noprogress", f"PR-STALL no unit finished for {now - max(last_done, t_start):.0f} s, {n_inflight} in flight"))
+    busy = max(last_done, t_start, last_idle)   # an idle gap (nothing in flight, e.g. between mint slices) is no stall
+    if n_inflight and now - busy > STALL_S:
+        out.append(("prstall-noprogress", f"PR-STALL no unit finished for {now - busy:.0f} s, {n_inflight} in flight"))
     return [(k, m) for k, m in out if now - ALERTED.get(k, 0) >= 300]
 
 
@@ -653,7 +655,9 @@ def stall_tick(n_inflight):
             log(m, "(alert ref pushed)" if ok else "(alert ref push FAILED)")
     except OSError:
         pass
-    for kind, msg in stall_alerts(time.time(), n_inflight, LAST_DONE[0], T0, su):
+    if not n_inflight:
+        LAST_IDLE[0] = time.time()
+    for kind, msg in stall_alerts(time.time(), n_inflight, LAST_DONE[0], T0, su, LAST_IDLE[0]):
         ALERTED[kind] = time.time()
         ok = DRY or alert_ref(msg, kind)
         log(msg.split(":")[0] if kind == "prstall-bucket" else "PR-STALL", msg, "(alert ref pushed)" if ok else "(alert ref push FAILED)")
