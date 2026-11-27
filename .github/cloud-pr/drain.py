@@ -81,21 +81,122 @@ def load_seen():
     UNLEASED.extend(l for l in sh("git", "-C", SRC, "show", "refs/drain/state:unleased.txt").stdout.splitlines() if l.strip())
 
 
-def save_seen():
-    """one commit with seen.txt on drain-state (force: this run is the only writer)"""
-    txt = "".join(f"{k[0]} {k[1]} {v[0]} {v[1]:.0f}\n" for k, v in sorted(SEEN.items(), key=lambda kv: kv[1][1]))
+def save_seen(seen=None, grants=None, unleased=None):
+    """one commit with seen.txt on drain-state (force: this run is the only writer). w12 speed fix 1: called by the
+    saver thread with copies taken under LOCK (never while LOCK is held); raises when the push fails."""
+    seen = SEEN if seen is None else seen
+    grants = GRANTS if grants is None else grants
+    unleased = UNLEASED if unleased is None else unleased
+    txt = "".join(f"{k[0]} {k[1]} {v[0]} {v[1]:.0f}\n" for k, v in sorted(seen.items(), key=lambda kv: kv[1][1]))
     blob = sh("git", "-C", SRC, "hash-object", "-w", "--stdin", input=txt).stdout.strip()
     ents = f"100644 blob {blob}\tseen.txt\n"
-    for name, lines in (("grants.tsv", GRANTS[-5000:]), ("unleased.txt", UNLEASED[-5000:])):
+    for name, lines in (("grants.tsv", grants[-5000:]), ("unleased.txt", unleased[-5000:])):
         b = sh("git", "-C", SRC, "hash-object", "-w", "--stdin", input="".join(l + "\n" for l in lines)).stdout.strip()
         ents += f"100644 blob {b}\t{name}\n"
     tree = sh("git", "-C", SRC, "mktree", input=ents).stdout.strip()
     env = dict(os.environ, GIT_AUTHOR_NAME="Leg0shii", GIT_COMMITTER_NAME="Leg0shii",
                GIT_AUTHOR_EMAIL="46093332+Leg0shii@users.noreply.github.com",
                GIT_COMMITTER_EMAIL="46093332+Leg0shii@users.noreply.github.com")
-    c = sh("git", "-C", SRC, "commit-tree", tree, "-m", f"drain state {len(SEEN)}", env=env).stdout.strip()
-    if c and not DRY:
-        sh("git", *auth(), "-C", SRC, "push", "-q", "-f", URL, f"{c}:refs/heads/{STATE_REF}", timeout=120)
+    c = sh("git", "-C", SRC, "commit-tree", tree, "-m", f"drain state {len(seen)}", env=env).stdout.strip()
+    if not c:
+        raise RuntimeError("state commit failed")
+    if not DRY:
+        r = sh("git", *auth(), "-C", SRC, "push", "-q", "-f", URL, f"{c}:refs/heads/{STATE_REF}", timeout=120)
+        if r.returncode:
+            raise RuntimeError("state push rc=%d %s" % (r.returncode, r.stderr.strip()[-100:]))
+
+
+# w12 speed fix 1 (Lead 06:30): the drain-state push (2-5 s) ran inside LOCK once per finished unit, so every worker
+# queued on it: about 17 units a minute whatever DRAIN_WORKERS said (mintload, dc6a46de 28x6: 18.1 a minute; with the
+# push free: 41.3). Now ONE saver thread pushes at most every SAVE_EVERY_S from copies taken under LOCK; a final save
+# runs at drain end (atexit) and on SIGTERM/SIGINT. A failed push is logged and retried at the next tick; 3 failures
+# in a row or a dead saver raise an ::error:: annotation; workers never wait for a push and filing continues. A unit
+# finished after the last save runs again in the next drain: submit.py is idempotent there (create-only head; our
+# open PR on the existing branch = "exists", W6 23cf0eb9).
+SAVE_EVERY_S = float(os.environ.get("DRAIN_SAVE_EVERY_S", "10"))
+_SV = {"dirty": False, "fails": 0, "saves": 0, "restarts": 0, "thread": None, "stop": threading.Event(), "final": False}
+_SAVE_ONE = threading.Lock()          # one push at a time (saver tick, final save)
+
+
+def _alert(msg):
+    log("ALERT", msg)
+    print(f"::error::drain {msg}", flush=True)
+    if os.environ.get("GITHUB_STEP_SUMMARY"):
+        try:
+            with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+                f.write(f"**drain ALERT**: {msg}\n")
+        except Exception:
+            pass
+
+
+def save_now(why="tick"):
+    """take copies under LOCK, push outside it; True when saved or nothing to save"""
+    with _SAVE_ONE:
+        with LOCK:
+            if not _SV["dirty"]:
+                return True
+            snap = (dict(SEEN), list(GRANTS), list(UNLEASED)); _SV["dirty"] = False
+        try:
+            save_seen(*snap)
+            _SV["fails"] = 0; _SV["saves"] += 1
+            return True
+        except Exception as e:
+            with LOCK:
+                _SV["dirty"] = True                   # retried at the next tick
+            _SV["fails"] += 1
+            log("state save failed", f"({why}, {_SV['fails']} in a row)", repr(e)[:120])
+            if _SV["fails"] == 3:
+                _alert("drain-state push failed 3 times in a row (filing continues; a re-run is idempotent)")
+            return False
+
+
+def _saver():
+    try:
+        while not _SV["stop"].wait(SAVE_EVERY_S):
+            save_now()
+    except BaseException as e:                        # never silent: the next work() sees it and restarts the saver
+        _alert("state saver died: " + repr(e)[:120])
+
+
+def saver_ensure():
+    """start the saver on first use; restart it (at most 3 times) if it died. Called from work()."""
+    t = _SV["thread"]
+    if (t is not None and t.is_alive()) or _SV["stop"].is_set():   # stopped by the final save: no restart
+        return
+    if t is not None:
+        if _SV["restarts"] >= 3:
+            return
+        _SV["restarts"] += 1
+        _alert(f"state saver not running: restart {_SV['restarts']} of 3")
+    _SV["thread"] = threading.Thread(target=_saver, name="drain-state-saver", daemon=True)
+    _SV["thread"].start()
+
+
+def saver_final(why="drain end"):
+    if _SV["final"]:
+        return
+    _SV["final"] = True
+    _SV["stop"].set()
+    for k in range(3):
+        if save_now(why):
+            break
+        time.sleep(2)
+    log("state saver:", _SV["saves"], "saves,", why)
+
+
+def _on_term(signum, frame):
+    saver_final(f"signal {signum}")
+    signal.signal(signum, signal.SIG_DFL)
+    os.kill(os.getpid(), signum)
+
+
+import atexit, signal
+atexit.register(saver_final)
+for _sig in (signal.SIGTERM, signal.SIGINT):
+    try:
+        signal.signal(_sig, _on_term)
+    except ValueError:                                 # imported off the main thread (tests): atexit still saves
+        pass
 
 
 RETRYABLE = ("failed", "submitfail", "error")     # W6 mintfail: a child that died or failed half way is tried again
@@ -209,10 +310,8 @@ def work(sid, sha):
             else:
                 SEEN[(sid, sha)] = (res, time.time())      # paused ones run again after the pause
         STATS[res] = STATS.get(res, 0) + 1
-        try:
-            save_seen()
-        except Exception as e:
-            log("state save failed", repr(e)[:120])
+        _SV["dirty"] = True                            # w12 fix 1: the saver thread pushes it (no push under LOCK)
+    saver_ensure()
     log("DONE", sid, res, f"{time.time() - t:.0f}s", why)
     return sid
 
