@@ -1940,7 +1940,9 @@ def refresher():
             log("refresher: snapshot failed (workers read inline)", str(e)[:120])
         n += 1
         prog[0] = time.time()
-        time.sleep(max(0.05, REFRESH_S - (time.time() - t)))
+        # Lead 09:37: on PR_TOKEN (run token empty) the refresher reads at most once a second (304s are free, but the
+        # account limit is shared by the PC and every create)
+        time.sleep(max(0.05, (max(REFRESH_S, 1.0) if runtoken_empty() else REFRESH_S) - (time.time() - t)))
     done[0] = True
 
 
