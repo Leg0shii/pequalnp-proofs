@@ -56,6 +56,8 @@ jobs:
           DRAIN_REFRESHER: ${{ vars.DRAIN_REFRESHER || '1' }}
           PR_PER_MIN: ${{ vars.PR_PER_MIN || '60' }}
           PR_PER_HOUR: ${{ vars.PR_PER_HOUR || '400' }}
+          PUSH_BATCH_S: ${{ vars.PUSH_BATCH_S || '10' }}   # BURST (Lead 20:15 27 Nov): heads in one multi-ref push every 10 s (owner card 09:04)
+          ACCT_CAP: ${{ vars.ACCT_CAP || '1' }}   # BURST: minute and hour caps count the account's PRs (search), not only this drain
           DRAIN_SAVE_EVERY_S: ${{ vars.DRAIN_SAVE_EVERY_S || '60' }}
           WARM: ${{ vars.WARM || '1' }}
           WARM_WINDOW: ${{ inputs.window || vars.WARM_WINDOW || '' }}

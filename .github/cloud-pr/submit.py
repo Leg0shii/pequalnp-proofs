@@ -1680,7 +1680,7 @@ def push_first_done(gid):
 # GIT_ALTERNATE_OBJECT_DIRECTORIES. A 403/429 on the push is a 16.13 refusal (bucket_refusal: stall for the whole
 # drain, rate halved, 4th ends the drain's creates); waiting heads stay queued until the stall ends.
 # PUSH_BATCH_S=0 (default) = the per-unit push above, unchanged.
-PUSH_BATCH_S = float(os.environ.get("PUSH_BATCH_S", "0") or 0)
+PUSH_BATCH_S = float(os.environ.get("PUSH_BATCH_S", "0") or 0)   # BURST (Lead 20:15): warm.yml and cloud-pr.yml set 10 (code default there)
 PUSH_WAIT_MAX_S = float(os.environ.get("PUSH_WAIT_MAX_S", "300"))
 PUSH_BATCH_MAX = int(os.environ.get("PUSH_BATCH_MAX", "25"))   # heads per push
 PUSH_REFS_MAX = int(os.environ.get("PUSH_REFS_MAX", "50"))     # refs per push, heads + deletes (w12: a 93-ref push got a bare 403)
@@ -1899,6 +1899,60 @@ PR_PER_MIN = int(os.environ.get("PR_PER_MIN", "70"))       # Lead 06:12: GitHub 
 PR_PER_HOUR = int(os.environ.get("PR_PER_HOUR", "480"))
 
 
+# BURST (Lead 20:15 UTC 27 Nov): the hour cap (PR_PER_HOUR) and the minute cap hold for the ACCOUNT, not only this
+# drain: every ACCT_EVERY_S one search read (whoever finds the cache stale, under the creates lock) counts Leg0shii's
+# PRs upstream created in the last hour (total_count) and in the last 60 s (newest 100 items). Search lags by seconds,
+# so this drain's own creates.log stays the exact floor. A failed read keeps the last value up to ACCT_STALE_S, then
+# the drain's own counts alone (as before this change), logged once per stale period.
+ACCT_EVERY_S = float(os.environ.get("ACCT_EVERY_S", "20"))
+ACCT_STALE_S = 300.0
+
+
+def _acct_read(now):
+    since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - 3600))
+    r = run(["gh", "api", "-X", "GET", "search/issues", "-f", f"q=repo:{UP} is:pr author:{HANDLE} created:>={since}",
+             "-f", "sort=created", "-f", "order=desc", "-f", "per_page=100"], timeout=30,
+            env=dict(os.environ, GH_TOKEN=READ_TOKEN or PR_TOKEN or os.environ.get("GH_TOKEN", "")))
+    if r.returncode:
+        return None
+    j = json.loads(r.stdout or "{}")
+    mins = 0
+    for it in j.get("items") or []:
+        try:
+            if now - (time.mktime(time.strptime(it["created_at"][:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone) < 60:
+                mins += 1
+        except Exception:
+            pass
+    return mins, int(j.get("total_count") or 0)
+
+
+def acct_creates(d, now):
+    """(PRs of the account in the last 60 s, in the last hour) from the cache PR_GATE_DIR/acct.json; (0, 0) = unknown"""
+    if os.environ.get("ACCT_CAP", "0") != "1":       # warm.yml and cloud-pr.yml set 1; tests and single runs: off
+        return 0, 0
+    f = os.path.join(d, "acct.json")
+    try:
+        c = json.load(open(f))
+    except Exception:
+        c = {}
+    if now - float(c.get("t", 0)) >= ACCT_EVERY_S and now - float(c.get("try", 0)) >= ACCT_EVERY_S:
+        c["try"] = now
+        try:
+            v = _acct_read(now)
+        except Exception:
+            v = None
+        if v is not None:
+            c.update(t=now, min=v[0], hour=v[1])
+            log(f"account PRs: {v[0]} in 60 s, {v[1]} in 1 h (search)")
+        with open(f + ".tmp", "w") as o:
+            json.dump(c, o)
+        os.replace(f + ".tmp", f)
+    if now - float(c.get("t", 0)) > ACCT_STALE_S:
+        return 0, 0
+    own_since = now - float(c.get("t", now))      # creates of this drain after the read are in creates.log already
+    return int(c.get("min", 0)) if own_since < 60 else 0, int(c.get("hour", 0))
+
+
 def bucket_wait(d, now):
     """PR-create budget shared by every worker of a drain (file PR_GATE_DIR/creates.log under flock): 0 = take a
     create now (recorded), else the seconds to wait. A stall (PR_GATE_DIR/stall: epoch until) after a 403/429 blocks
@@ -1921,10 +1975,13 @@ def bucket_wait(d, now):
         if os.path.exists(os.path.join(d, "giveup")):
             return float("inf")                      # 16.13: four refusals in this drain: no create any more
         last_min = [t for t in ts if now - t < 60]
-        if len(last_min) >= gate_rate(d):
-            return 60 - (now - min(last_min)) + 0.05
+        a_min, a_hour = acct_creates(d, now)         # BURST (Lead 20:15): the ACCOUNT's PRs (PC watcher too), search-based
+        if max(len(last_min), a_min) >= gate_rate(d):
+            return (60 - (now - min(last_min)) + 0.05) if len(last_min) >= gate_rate(d) else ACCT_EVERY_S
         if len(ts) >= PR_PER_HOUR:
             return 3600 - (now - min(ts)) + 0.05
+        if a_hour >= PR_PER_HOUR:
+            return ACCT_EVERY_S
         ts.append(now)
         with open(f + ".tmp", "w") as o:
             o.write("\n".join(f"{t:.3f}" for t in ts))
