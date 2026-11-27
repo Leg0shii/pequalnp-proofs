@@ -528,7 +528,8 @@ def main():
             time.sleep(0.5)
         log(f"WARM {time.time() - t_w:.1f} s: refresher copies", "ready" if all(os.path.exists(os.path.join(W, x))
             for x in ("rival_snap.json", "halt.json")) else "NOT ready (released anyway)", "- units released now")
-        if PREFIX == "loadtest":           # rehearsal marker for the builder: toolkit ref drill/warm-<epoch>
+        if PREFIX == "loadtest" and os.environ.get("DRILL_GAPS_REF"):   # rehearsal marker for the builder: toolkit ref
+            # drill/warm-<epoch>, only in -drill runs (W8 08:36: a lane canary with warm must not look like a rehearsal)
             ok = alert_ref(f"WARM drain run {os.environ.get('GITHUB_RUN_ID', '?')} released units at {time.time():.0f}",
                            "warm", prefix="drill")
             log("WARM marker ref drill/warm-*", "pushed" if ok else "push FAILED")
