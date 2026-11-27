@@ -76,21 +76,39 @@ def next_ref_epoch(now, stop_epochs, go_epochs):
     return max([int(now)] + [int(e) + 1 for e in stop_epochs] + [int(e) + 1 for e in go_epochs])
 
 
-def closer_verdict(beat_msg, now, max_age=120):
-    """16.1 for the closer (Lead 07:53): (halted, why) from the commit message of toolkit ref status/dupclose
-    (`dupclose <epoch> loop=<s>|loop=STUCK<s> ...`). Unreadable, older than max_age, or loop=STUCK -> halted for
-    creates (a blind closer cannot close our duplicates). The age compares the beat's epoch with the reader's clock:
-    the only clock compare allowed here, a liveness age, never an order between refs."""
-    m = re.match(r"dupclose (\d+)\b", beat_msg or "")
+CLOSER_HOLD_S = 300
+
+
+def closer_beat(msg):
+    """(beat epoch, loop stuck seconds or 0) from the commit message of toolkit ref status/dupclose, None if unreadable"""
+    m = re.match(r"dupclose (\d+)\b", msg or "")
     if not m:
-        return True, "closer beat unreadable"
-    age = now - int(m.group(1))
-    if age > max_age:
-        return True, f"closer beat {int(age)}s old"
-    st = re.search(r"\bloop=STUCK(\d+)", beat_msg)
-    if st:
-        return True, f"closer loop stuck {st.group(1)}s"
+        return None
+    st = re.search(r"\bloop=STUCK(\d+)", msg)
+    return int(m.group(1)), int(st.group(1)) if st else 0
+
+
+def closer_hold(last_beat, stuck_s, ok_t, now, max_age=CLOSER_HOLD_S):
+    """Lead ruling 08:27 (a HOLD, not a stop): creates pause while the closer's newest beat is over max_age old, or the
+    beat says its loop has been stuck over max_age; they resume by themselves on a fresh beat. ok_t = when the beat
+    was last read fine (the reader's start until then): reads failing for over max_age hold, a failed read alone does
+    not (the beat's age is judged as of ok_t). Ages compare a beat's epoch with the reader's clock: a liveness age,
+    never an order between refs."""
+    if now - ok_t > max_age:
+        return True, f"HOLD closer-stale age={int(now - (last_beat or ok_t))} unread={int(now - ok_t)}"
+    if last_beat is not None and ok_t - last_beat > max_age:
+        return True, f"HOLD closer-stale age={int(now - last_beat)}"
+    if stuck_s and stuck_s > max_age:
+        return True, f"HOLD closer-stuck loop={int(stuck_s)}"
     return False, ""
+
+
+def closer_verdict(beat_msg, now, max_age=CLOSER_HOLD_S):
+    """(hold, why) from one beat message read now (readers without a refresher copy); unreadable = hold."""
+    b = closer_beat(beat_msg)
+    if b is None:
+        return True, "HOLD closer beat unreadable"
+    return closer_hold(b[0], b[1], now, now, max_age)
 
 
 def selftest():
@@ -123,9 +141,17 @@ def selftest():
     s = family_state(L("filing/stop/100", "filing/stop/90", "filing/go/95"))
     if [e for e, _ in s["live"]] != [100]:
         bad.append("live set")
-    cv = [(None, 1000, True), ("dupclose 990 loop=3 step=x", 1000, False), ("dupclose 800 loop=3", 1000, True),
-          ("dupclose 990 loop=STUCK200 in=200s", 1000, True), ("garbage", 1000, True), ("dupclose 990 open=1", 1000, False)]
+    cv = [(None, 1000, True), ("dupclose 990 loop=3 step=x", 1000, False), ("dupclose 701 loop=3", 1000, False),
+          ("dupclose 699 loop=3", 1000, True), ("dupclose 990 loop=STUCK301 in=301s", 1000, True),
+          ("dupclose 990 loop=STUCK299", 1000, False), ("garbage", 1000, True), ("dupclose 990 open=1", 1000, False)]
     bad += [f"closer {m!r}" for m, now, want in cv if closer_verdict(m, now)[0] != want]
+    ch = [((701, 0, 1000, 1000), False), ((699, 0, 1000, 1000), True),      # 299 s go, 301 s hold
+          ((None, 0, 800, 1000), False), ((None, 0, 699, 1000), True),      # never read: hold only after 300 s
+          ((900, 0, 950, 1200), False),                                     # reads failing 250 s, beat 50 s old then
+          ((900, 0, 950, 1251), True),                                      # reads failing 301 s
+          ((600, 0, 950, 1000), True),                                      # beat 350 s old at the last good read
+          ((990, 299, 1000, 1000), False), ((990, 301, 1000, 1000), True)]  # STUCK 299 go, 301 hold
+    bad += [f"closer_hold {a}" for a, want in ch if closer_hold(*a)[0] != want]
     if next_ref_epoch(50, [100], [100]) != 101 or next_ref_epoch(200, [100], [150]) != 200:
         bad.append("next_ref_epoch")
     return bad

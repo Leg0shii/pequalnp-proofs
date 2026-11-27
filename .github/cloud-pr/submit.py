@@ -1517,7 +1517,116 @@ def site_closed_now():
     return None
 
 
+_CS = {"alerted": 0.0, "sha": None, "sha_t": 0.0, "hold": False}   # sha/sha_t: status/dupclose as the halt read saw it
+
+
+def _closer_msg():
+    """the commit message of toolkit ref status/dupclose (the closer's beat), None if unreadable. Fetched only when the
+    halt read's ls-remote shows the ref at a new sha (one fetch per closer beat, about every 30 s). CLOSER_BEAT_FIXTURE
+    = the message ("" = unreadable)."""
+    if os.environ.get("CLOSER_BEAT_FIXTURE") is not None:
+        return os.environ["CLOSER_BEAT_FIXTURE"] or None
+    try:
+        repo = dg().REPO
+        if run(["git", "-C", repo, "fetch", "-q", "--no-write-fetch-head", "origin",
+                "+refs/heads/status/dupclose:refs/beat/dupclose"], timeout=20).returncode:
+            return None
+        r = run(["git", "-C", repo, "log", "-1", "--format=%B", "refs/beat/dupclose"], timeout=10)
+        return r.stdout.strip() if r.returncode == 0 else None
+    except Exception:
+        return None
+
+
+def closer_step(st, now):
+    """one pass of the closer reader over state st {ok, cb, cs, seen_sha, seen_t}: takes the newest status/dupclose
+    sha the halt read saw (_CS), reads the beat message only for a new sha, returns (hold, why) at `now`."""
+    sha, t = _CS["sha"], _CS["sha_t"]
+    if t > st["seen_t"]:
+        st["seen_t"] = t
+        if sha and sha == st["seen_sha"]:
+            st["ok"] = t
+        elif sha:
+            b = haltrule.closer_beat(_closer_msg())
+            if b is not None:
+                st["seen_sha"], st["ok"] = sha, t
+                if st["cb"] is None or b[0] >= st["cb"]:
+                    st["cb"], st["cs"] = b
+    return haltrule.closer_hold(st["cb"], st["cs"], st["ok"], now)
+
+
+def closer_reader(stop=lambda: False, every=0.2):
+    """the refresher's closer reader (Lead 08:27, a HOLD): the halt read's ls-remote (every refresher pass) also lists
+    status/dupclose; on a new sha this reads the beat once, and SNAP_DIR/closer.json = {t, ok (last good read), cb
+    (newest beat epoch), cs (its loop=STUCK seconds), hold, why}. Workers judge the hold from that copy
+    (closer_hold_now), never by an own read, so a fresh beat lifts the hold within one refresher pass. Logs "HOLD
+    closer-stale age=<s>" when a hold starts, alerts CLOSER-STALE once per 5 min while it stands."""
+    st = {"ok": time.time(), "cb": None, "cs": 0, "seen_sha": None, "seen_t": 0.0}
+    f = os.path.join(SNAP_DIR, "closer.json")
+    while not stop():
+        now = time.time()
+        seen = st["seen_sha"]
+        hold, why = closer_step(st, now)
+        if st["seen_sha"] != seen:
+            log("closer beat", st["cb"], f"age={now - st['cb']:.0f}s stuck={st['cs']}s read at halt pass {st['ok'] - now:+.1f}s")
+        try:
+            with open(f + ".tmp", "w") as o:
+                json.dump({"t": now, "ok": st["ok"], "cb": st["cb"], "cs": st["cs"], "hold": hold, "why": why}, o)
+            os.replace(f + ".tmp", f)
+        except OSError:
+            pass
+        if hold and not _CS["hold"]:
+            log(why, "(creates held until a fresh closer beat)")
+        elif _CS["hold"] and not hold:
+            log("HOLD lifted: closer beat", st["cb"], f"{now - (st['cb'] or now):.0f}s old")
+        _CS["hold"] = hold
+        if hold and now - _CS["alerted"] >= 300:
+            _CS["alerted"] = now
+            log("CLOSER-STALE:", why)
+            _closer_alert(f"CLOSER-STALE {why}: creates held until a fresh closer beat")
+        REAL_SLEEP(every)
+
+
+def _closer_alert(msg):
+    """alert ref alert/closerstale-<epoch> on the toolkit (one per 5 min at most, the reader's limit)."""
+    if DRY or os.environ.get("CLOSER_BEAT_FIXTURE") is not None:
+        return False
+    try:
+        repo = dg().REPO
+        tree = run(["git", "-C", repo, "mktree"], timeout=10).stdout.strip() or "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+        env = dict(os.environ, GIT_AUTHOR_NAME="drain", GIT_AUTHOR_EMAIL="drain@localhost",
+                   GIT_COMMITTER_NAME="drain", GIT_COMMITTER_EMAIL="drain@localhost")
+        c = subprocess.run(["git", "-C", repo, "commit-tree", tree, "-m", msg], capture_output=True, text=True, env=env,
+                           timeout=10).stdout.strip()
+        return bool(c) and run(["git", "-C", repo, "push", "-q", "origin", f"{c}:refs/heads/alert/closerstale-{int(time.time())}"],
+                               timeout=30).returncode == 0
+    except Exception:
+        return False
+
+
+def closer_hold_now(now=None):
+    """(hold, why) from the refresher's closer copy, judged at the caller's clock (a dead reader stops advancing ok, so
+    it holds after 300 s). No drain (RIVAL_SNAP_DIR unset) or no copy yet = no hold."""
+    if not os.environ.get("RIVAL_SNAP_DIR"):
+        return False, ""
+    c = _load(os.path.join(SNAP_DIR, "closer.json"))
+    if not c:
+        return False, ""
+    try:
+        return haltrule.closer_hold(c.get("cb"), c.get("cs") or 0, float(c["ok"]), time.time() if now is None else now)
+    except Exception:
+        return False, ""
+
+
 def filing_halted(max_age=None):
+    """the halt switch (below) plus the closer HOLD (Lead 08:27): halted refs stop, a stale closer holds."""
+    hv, why = _filing_halted_copy(max_age)
+    if hv or (max_age == 0):
+        return hv, why
+    h2, w2 = closer_hold_now()
+    return (True, w2) if h2 else (hv, why)
+
+
+def _filing_halted_copy(max_age=None):
     """RC-b 1 (Lead 06:22): the halt switch, shared by every drain worker like the rival snapshot: one read at most
     HALT_MAX_AGE_S old in SNAP_DIR/halt.json (stamped at read START), kept fresh by the drain's refresher. A fresh copy
     is read without the lock; a stale or missing one (refresher dead, or no drain) means an inline read under the
@@ -1565,6 +1674,7 @@ def filing_halted(max_age=None):
 def _filing_halted_read():
     """Lead 05:10 HALT ON ONE REJECTION, rule 16.1 (haltrule.py): (halted, why) from the toolkit filing/stop/<n> and
     filing/go/<n> refs; unreadable = halted. FILING_FIXTURE = ls-remote text."""
+    t0 = time.time()
     if os.environ.get("FILING_FIXTURE") is not None:
         txt, rc = os.environ["FILING_FIXTURE"], 0
     else:
@@ -1573,14 +1683,23 @@ def _filing_halted_read():
         txt, rc = "", 1
         for k in range(3):
             try:
-                r = run(["git", "-C", dg().REPO, "ls-remote", "origin", "refs/heads/filing/*"], timeout=30)
+                r = run(["git", "-C", dg().REPO, "ls-remote", "origin", "refs/heads/filing/*",
+                         "refs/heads/status/dupclose"], timeout=30)
                 txt, rc = r.stdout, r.returncode
             except Exception:
                 txt, rc = "", 1
             if rc == 0:
                 break
             time.sleep(2)
+    _closer_sha(txt, rc, t0)
     return haltrule.verdict(txt, rc)
+
+
+def _closer_sha(txt, rc, t0):
+    """Lead 08:27: the closer's beat ref rides on the halt read (same ls-remote, no extra call); closer_reader reads it."""
+    if rc == 0:
+        m = re.search(r"^(\S+)\s+refs/heads/status/dupclose\s*$", txt or "", re.M)
+        _CS["sha"], _CS["sha_t"] = (m.group(1) if m else None), t0
 
 
 T_START = time.time()
@@ -1762,6 +1881,11 @@ def refresher():
             hprog[0] = time.time()
             REAL_SLEEP(max(0.05, REFRESH_S - (time.time() - t)))
     threading.Thread(target=halts, daemon=True).start()
+    try:
+        os.remove(os.path.join(SNAP_DIR, "closer.json"))   # an earlier drain's copy is not this drain's
+    except OSError:
+        pass
+    threading.Thread(target=closer_reader, args=(lambda: done[0] or os.getppid() != ppid,), daemon=True).start()
     while os.getppid() == ppid and not os.path.exists(os.path.join(SNAP_DIR, "refresh.stop")):
         t = time.time()
         try:
