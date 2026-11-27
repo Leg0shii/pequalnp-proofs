@@ -582,6 +582,55 @@ if hasattr(S, "push_branch"):
 else:
     case("09:10-push-429-is-a-refusal", False, "(no push_branch)")
 
+# ---- Lead 09:29: RUN-TOKEN-EMPTY: a read refused for the run token's primary limit goes to PR_TOKEN until its reset
+if hasattr(S, "runtoken_empty"):
+    RD = tempfile.mkdtemp(); svd = os.environ.get("RIVAL_SNAP_DIR"); os.environ["RIVAL_SNAP_DIR"] = RD
+    svr, svt = S.run, (S.READ_TOKEN, S.PR_TOKEN)
+    S.READ_TOKEN, S.PR_TOKEN = "RT", "PT"
+    used = []
+    def rrun(a, **k):
+        tok = (k.get("env") or {}).get("GH_TOKEN")
+        if a[:3] == ["gh", "api", "rate_limit"]:
+            return subprocess.CompletedProcess(a, 0, str(int(REAL_TIME()) + 900), "")
+        used.append(tok)
+        if tok == "RT" and "sec" in a:
+            return subprocess.CompletedProcess(a, 1, "", "HTTP 403: You have exceeded a secondary rate limit")
+        if tok == "RT":
+            return subprocess.CompletedProcess(a, 1, "", "HTTP 403: API rate limit exceeded for installation ID 1")
+        return subprocess.CompletedProcess(a, 0, "[]", "")
+    S.run = rrun; svgh = S.gh; S.gh = REAL_GH
+    svtime = S.time.time; S.time.time = REAL_TIME
+    try:
+        r1 = S.gh(["api", "repos/x/pulls"]); u1 = list(used); used.clear()
+        r2 = S.gh(["api", "repos/x/pulls"]); u2 = list(used); used.clear()
+        S.gh(["api", "repos/x/w"], write=True); u3 = list(used); used.clear()
+        os.remove(os.path.join(RD, "runtoken-empty"))
+        try:
+            S.gh(["api", "sec"]); u4 = list(used)
+        except RuntimeError:
+            u4 = list(used)
+        sec_ok = not os.path.exists(os.path.join(RD, "runtoken-empty")) and "PT" not in u4
+    finally:
+        S.run = svr; S.gh = svgh; S.READ_TOKEN, S.PR_TOKEN = svt; S.time.time = svtime
+        if svd is None:
+            os.environ.pop("RIVAL_SNAP_DIR", None)
+        else:
+            os.environ["RIVAL_SNAP_DIR"] = svd
+    S.run = lambda a, **k: (used.append((k.get("env") or {}).get("GH_TOKEN")) or subprocess.CompletedProcess(
+        a, 0, "HTTP/2.0 200 OK\nX-Ratelimit-Remaining: 150\nX-Ratelimit-Reset: %d\n\n[]" % (int(REAL_TIME()) + 900), ""))
+    S.gh = REAL_GH; S.READ_TOKEN, S.PR_TOKEN = "RT", "PT"; os.environ["RIVAL_SNAP_DIR"] = RD; S.time.time = REAL_TIME
+    used.clear(); S.gh(["api", "-i", "p"]); S.gh(["api", "-i", "p"]); u5 = list(used)
+    S.run = svr; S.gh = svgh; S.READ_TOKEN, S.PR_TOKEN = svt; S.time.time = svtime
+    if svd is None:
+        os.environ.pop("RIVAL_SNAP_DIR", None)
+    else:
+        os.environ["RIVAL_SNAP_DIR"] = svd
+    case("09:34-runtoken-under-200-switches", u5 == ["RT", "PT"], f"({u5})")
+    case("09:29-runtoken-empty-reads-go-to-PR_TOKEN", u1 == ["RT", "PT"] and u2 == ["PT"] and u3 == ["PT"] and sec_ok,
+         f"(first {u1}, next {u2}, write {u3}, secondary {u4})")
+else:
+    case("09:29-runtoken-empty-reads-go-to-PR_TOKEN", False, "(no fallback: an empty run token = every read fails closed)")
+
 bad = [n for n, ok in res if not ok]
 print(f"RCB SELFTEST OK {len(res)}" if not bad else "RCB SELFTEST FAIL " + " ".join(bad))
 sys.exit(1 if bad else 0)

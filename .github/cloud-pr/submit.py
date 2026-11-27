@@ -297,17 +297,90 @@ def gate_claim(gid):
     return cls, (p[3] if cls == "ok" and len(p) >= 4 else None)
 
 
+# Lead 09:29 (RUN-TOKEN-EMPTY, RC-b): the run token's hourly limit is per REPOSITORY (5000 here), shared by every run of
+# the fork (canaries, lane-ci, the closer). At 0 every read failed closed = zero filing at mint time. Now a read refused
+# for the PRIMARY rate limit is sent again with PR_TOKEN, and until the run token's reset epoch every read of the drain
+# goes to PR_TOKEN directly (shared file SNAP_DIR/runtoken-empty: "<reset epoch> <when> <what>"); drain.py alerts
+# RUN-TOKEN-EMPTY. Writes and the create path are unchanged; RUNTOKEN_FALLBACK=0 turns it off.
+def primary_rl(r):
+    """the run token's PRIMARY rate limit refused this call (not a secondary limit, not a 304 at 0 remaining)"""
+    t = (r.stdout or "") + "\n" + (r.stderr or "")
+    if "secondary" in t.lower():
+        return False
+    if re.search(r"API rate limit exceeded", t, re.I):
+        return True
+    return bool(re.match(r"HTTP/\S+\s+(403|429)\b", r.stdout or "")
+                and re.search(r"^x-ratelimit-remaining:\s*0\s*$", r.stdout or "", re.I | re.M))
+
+
+RUNTOKEN_FLOOR = int(os.environ.get("RUNTOKEN_FLOOR", "200"))
+
+
+def _rt_empty_file():
+    return os.path.join(os.environ.get("RIVAL_SNAP_DIR") or os.environ.get("PR_GATE_DIR") or W, "runtoken-empty")
+
+
+def runtoken_empty(now=None):
+    try:
+        return (time.time() if now is None else now) < float(open(_rt_empty_file()).read().split()[0])
+    except (OSError, ValueError, IndexError):
+        return False
+
+
+def _mark_runtoken_empty(r, args):
+    reset = None
+    m = re.search(r"^x-ratelimit-reset:\s*(\d+)", r.stdout or "", re.I | re.M)
+    if m:
+        reset = float(m.group(1))
+    if reset is None:
+        try:                                   # rate_limit is free and answers even at 0
+            q = run(["gh", "api", "rate_limit", "--jq", ".resources.core.reset"], timeout=20,
+                    env=dict(os.environ, GH_TOKEN=READ_TOKEN))
+            reset = float(q.stdout.strip())
+        except (ValueError, Exception):
+            reset = time.time() + 600
+    try:
+        f = _rt_empty_file()
+        os.makedirs(os.path.dirname(f), exist_ok=True)
+        with open(f + ".%d.tmp" % os.getpid(), "w") as o:
+            o.write(f"{reset:.0f} {time.time():.0f} {' '.join(args[:2])[:80]}\n")
+        os.replace(f + ".%d.tmp" % os.getpid(), f)
+    except OSError:
+        pass
+    log(f"RUN-TOKEN-EMPTY: run token at its hourly limit until {time.strftime('%H:%M:%S', time.gmtime(reset))} UTC; "
+        "reads go to PR_TOKEN")
+
+
 def gh(args, write=False, timeout=120):
-    """gh with the run's own token for reads (falls back to PR_TOKEN), PR_TOKEN for writes. Retries transient errors."""
-    # reads use the run's own GITHUB_TOKEN only: never fall back to PR_TOKEN, whose API limit the PC and every PR
-    # creation share (20:27 UTC: the account hit its limit and gh pr create failed on a wave)
-    toks = [PR_TOKEN] if write else [READ_TOKEN or ("" if os.environ.get("GITHUB_ACTIONS") else PR_TOKEN)]
+    """gh with the run's own token for reads, PR_TOKEN for writes. Retries transient errors. A read refused for the
+    run token's primary rate limit goes to PR_TOKEN (RUN-TOKEN-EMPTY above)."""
+    # reads use the run's own GITHUB_TOKEN: PR_TOKEN's API limit is shared by the PC and every PR creation (20:27 UTC
+    # 26 Nov: the account hit its limit and gh pr create failed on a wave), so it takes reads only while the run token is
+    # empty
+    fb = not write and READ_TOKEN and PR_TOKEN and os.environ.get("RUNTOKEN_FALLBACK", "1") != "0"
+    if write:
+        toks = [PR_TOKEN]
+    elif fb and runtoken_empty():
+        toks = [PR_TOKEN]
+    else:
+        toks = [READ_TOKEN or ("" if os.environ.get("GITHUB_ACTIONS") else PR_TOKEN)]
     r = None
-    for t in [x for x in toks if x]:
+    toks = [x for x in toks if x]
+    i = 0
+    while i < len(toks):                        # a list that can grow by PR_TOKEN (run token empty)
+        t = toks[i]; i += 1
         for att in range(3):
             r = run(["gh"] + args, timeout=timeout, env=dict(os.environ, GH_TOKEN=t))
+            if fb and t == READ_TOKEN and (r.stdout or "").startswith("HTTP/"):   # Lead 09:34: under the floor = switch
+                m = re.search(r"^x-ratelimit-remaining:\s*(\d+)\s*$", r.stdout, re.I | re.M)   # before it is empty
+                if m and int(m.group(1)) < RUNTOKEN_FLOOR and not runtoken_empty():
+                    _mark_runtoken_empty(r, args)
             if r.returncode == 0:
                 return r
+            if fb and t == READ_TOKEN and primary_rl(r):
+                _mark_runtoken_empty(r, args)
+                toks.append(PR_TOKEN)
+                break
             if not TRANSIENT.search(r.stderr + r.stdout):
                 break
             time.sleep(5 * (att + 1))
@@ -1143,6 +1216,9 @@ def auth_cfg():
     return ["-c", f"http.https://github.com/.extraheader=AUTHORIZATION: basic {b}"]
 
 
+UPBASE_RETRY_S = float(os.environ.get("UPBASE_RETRY_S", "60"))
+
+
 def upbase_ref(base):
     """W6 push canary + infra (08:50 UTC 27 Nov): the push sends only the new objects when the fork ADVERTISES a ref at
     the commit's parent (the upstream base): git push then leaves out everything reachable from it (about 500 bytes).
@@ -1152,29 +1228,39 @@ def upbase_ref(base):
     Returns the ref name, or None (then the old fork-tip base is used)."""
     name = f"upbase/{base[:8]}"
     mark = os.path.join(SNAP_DIR, f"upbase-{base[:12]}.ok")
+    nomark = os.path.join(SNAP_DIR, f"upbase-{base[:12]}.no")     # red team R2: a refused create is not retried per unit
     if os.path.exists(mark):
         return name
     url = f"https://github.com/{FORK}.git"
+    try:
+        if time.time() - os.path.getmtime(nomark) < UPBASE_RETRY_S:
+            return None
+    except OSError:
+        pass
     try:
         os.makedirs(SNAP_DIR, exist_ok=True)
         with open(os.path.join(SNAP_DIR, "upbase.lock"), "w") as lk:
             fcntl.flock(lk, fcntl.LOCK_EX)
             if os.path.exists(mark):
                 return name
-            r = run(["git"] + auth_cfg() + ["ls-remote", url, f"refs/heads/{name}"], timeout=60)
+            try:
+                if time.time() - os.path.getmtime(nomark) < UPBASE_RETRY_S:
+                    return None
+            except OSError:
+                pass
+            r = run(["git"] + auth_cfg() + ["ls-remote", url, f"refs/heads/{name}"], timeout=15)
             have = r.returncode == 0 and r.stdout.split()[:1] == [base]
             if not have:
                 r = run(["gh", "api", "-X", "POST", f"repos/{FORK}/git/refs", "-f", f"ref=refs/heads/{name}", "-f", f"sha={base}"],
-                        timeout=60, env=dict(os.environ, GH_TOKEN=PR_TOKEN))
+                        timeout=15, env=dict(os.environ, GH_TOKEN=PR_TOKEN))
                 have = r.returncode == 0 or "Reference already exists" in (r.stdout + r.stderr)
-                if not have:
-                    log("upbase: REST ref create refused:", (r.stderr or r.stdout).strip()[:150], "- pushing the base once")
-                    r = run(["git"] + auth_cfg() + ["-C", TREE, "push", "-q", url, f"{base}:refs/heads/{name}"], timeout=600)
-                    have = r.returncode == 0
+                # red team R2 (Lead 09:22): NEVER push the whole base instead (182-228 MB under this lock, every worker
+                # waiting): a refused create means the old fork-tip base for UPBASE_RETRY_S
             if have:
                 open(mark, "w").write(f"{time.time():.0f}\n")
                 return name
-            log("upbase: no ref at the base:", (r.stderr or "").strip()[:150])
+            open(nomark, "w").write(f"{time.time():.0f}\n")
+            log("upbase: no ref at the base (fork-tip base for this unit):", (r.stderr or r.stdout or "").strip()[:150])
     except Exception as e:
         log("upbase failed:", repr(e)[:150])
     return None
@@ -1890,7 +1976,9 @@ def refresher():
             log("refresher: snapshot failed (workers read inline)", str(e)[:120])
         n += 1
         prog[0] = time.time()
-        time.sleep(max(0.05, REFRESH_S - (time.time() - t)))
+        # Lead 09:37: on PR_TOKEN (run token empty) the refresher reads at most once a second (304s are free, but the
+        # account limit is shared by the PC and every create)
+        time.sleep(max(0.05, (max(REFRESH_S, 1.0) if runtoken_empty() else REFRESH_S) - (time.time() - t)))
     done[0] = True
 
 

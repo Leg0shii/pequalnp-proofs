@@ -46,7 +46,12 @@ permissions:
 
 # W8 (Lead 08:36): one group PER BRANCH, so lanes and the rehearsal run side by side. A DRY drain only reads the
 # loadtest/* units (no claim, no push, no delete), so parallel runs cannot take each other's units; non-drill runs skip
-# the rehearsal's L-drill-* units (DRAIN_MATCH below). Lanes cap themselves at 3 canaries at once (lane-ci.yml "queue").
+# the rehearsal's L-drill-* units (DRAIN_MATCH below).
+# READ BUDGET (Lead 09:29): ONE canary at a time in the whole fork, first come first served, and none starts while the
+# run token (the repo's pool, shared with the wave drain's refresher) has under 1,000 left. Step "Canary slot": waits
+# while any older lane-ci or loadcanary run (created under 70 min ago) is not completed; rate_limit (free) first, then
+# one runs listing per 60 s. 30 min without a slot: FAIL, nothing read. Exempt (no wait, no floor): branch names
+# loadcanary/<x>-prio-w<N>... (the frozen-head canary and Canary C; infra names them).
 concurrency:
   group: loadcanary-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: false
@@ -58,7 +63,7 @@ defaults:
 jobs:
   load:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 60
     outputs:
       line: ${{ steps.lcsum.outputs.line }}
     steps:
@@ -73,6 +78,29 @@ jobs:
             echo "::error::wave is ON (wave/on-$on newer than wave/off-${off:-none}): no canary until the Lead says WAVE OFF"; exit 1
           fi
           echo "wave off (on-${on:-none} off-${off:-none}): go"
+      - name: Canary slot (one at a time in the fork, run token >= 1000 left; Lead 09:29)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          R: ${{ github.repository }}
+          ME: ${{ github.run_id }}
+        run: |
+          lim() { gh api rate_limit --jq '.resources.core|"\(.remaining) \(.reset)"' 2>/dev/null || echo "0 0"; }   # free
+          case "$GITHUB_REF_NAME" in loadcanary/*-prio-*) read left reset < <(lim)
+            echo "exempt branch $GITHUB_REF_NAME: no wait, run token left $left (reset $(date -u -d @$reset +%H:%M))"; exit 0;; esac
+          export MINE=$(gh api "repos/$R/actions/runs/$ME" --jq .created_at) CUT=$(date -u -d '-70 min' +%Y-%m-%dT%H:%M:%SZ)
+          t0=$(date +%s)
+          while :; do
+            read left reset < <(lim); why=""
+            if [ "${left:-0}" -lt 1000 ]; then why="run token left $left < 1000 (reset $(date -u -d @$reset +%H:%M) UTC)"
+            else
+              why=$(gh api "repos/$R/actions/runs?per_page=40" --jq '.workflow_runs[] | select((.name=="lane-ci" or .name=="loadcanary")
+                    and .status!="completed" and .id!=($ENV.ME|tonumber) and .created_at < $ENV.MINE and .created_at > $ENV.CUT)
+                    | "\(.name) \(.id) \(.status)"' 2>&1 | head -3 | paste -sd';' -)
+            fi
+            [ -z "$why" ] && { echo "slot free after $(( $(date +%s) - t0 )) s, run token left $left"; exit 0; }
+            [ $(( $(date +%s) - t0 )) -ge 1800 ] && { echo "::error::no canary slot in 30 min ($why): not started, re-run later"; exit 1; }
+            echo "$(date -u +%T) waiting: $why"; sleep 60
+          done
       - name: Check out the candidate (drain.py, submit.py, guards)
         uses: actions/checkout@v4
         with:
@@ -141,10 +169,13 @@ jobs:
           # what the CPU is spent on: every 0.5 s, the running (R) processes by command name
           ( while :; do ps -eo stat=,comm= | awk '$1 ~ /^R/ {print $2}'; echo "--"; sleep 0.5; done ) > run.log &
           ps_loop=$!
+          # READS by stage (Lead 09:29): run-token core remaining every 5 s ("<epoch> <remaining> <used>"; rate_limit is free)
+          ( while :; do echo "$(date +%s) $(GH_TOKEN=$READ_TOKEN gh api rate_limit --jq '.resources.core|"\(.remaining) \(.used)"' 2>/dev/null)"; sleep 5; done ) > rl.log &
+          rl_loop=$!
           t0=$(date +%s)
           python3 -I "$SRC/.github/cloud-pr/drain.py" 2>&1 | tee drain.log
           rc=${PIPESTATUS[0]}
-          kill $vm $ps_loop 2>/dev/null
+          kill $vm $ps_loop $rl_loop 2>/dev/null
           if [ -n "$mv" ]; then kill $mover 2>/dev/null; echo "fake upstream main: $(grep -c '^MOVE [0-9]* [0-9a-f]' move.log) moves, $(grep -c failed move.log) failed"; fi
           grep -E "upstream base:|upstream base behind" drain.log | tail -3
           echo "drain rc=$rc wall=$(( $(date +%s) - t0 )) s"
@@ -194,6 +225,7 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha || inputs.ref || github.sha }}
         run: |
           for t in RT PT; do GH_TOKEN=${!t} gh api rate_limit --jq .resources.core.remaining 2>/dev/null || echo "?"; done | paste -sd' ' > core.after
+          rst=$(GH_TOKEN=$RT gh api rate_limit --jq .resources.core.reset 2>/dev/null); rst=$(date -u -d "@${rst:-0}" +%H:%M 2>/dev/null || echo "?")
           read rb pb < core.before; read ra pa < core.after
           # the run token's first rate_limit answer can come from a fresh bucket (PR 3: 4999, drain 1 s later 3155):
           # take "before" from the drain's own RUN-TOKEN line, the same bucket as core.after
@@ -204,7 +236,7 @@ jobs:
           case "$r" in *-w[0-9]*) w=${r##*-w};; esac
           sha=$(git -C src rev-parse HEAD)
           line=$(python3 -I src/.github/cloud-pr/lcsummary.py drain.log --sha "$sha" --head "$HEAD_SHA" --workers "$w" --slots "$IN_S" \
-                 --warm "$warm" --run "$GITHUB_RUN_ID" --reads-run "$rb,$ra" --reads-pr "$pb,$pa") ; rc=$?
+                 --warm "$warm" --run "$GITHUB_RUN_ID" --reads-run "$rb,$ra" --reads-pr "$pb,$pa" --left "$ra" --reset "$rst") ; rc=$?
           [ -n "$line" ] || line="LANE-CI $(echo $sha | cut -c1-8) head=$(echo $HEAD_SHA | cut -c1-8) verdict=BAD (no drain.log or summary error)"
           echo "$line"; echo "$line" > canary.txt
           echo "line=$line" >> "$GITHUB_OUTPUT"
@@ -218,4 +250,5 @@ jobs:
           path: |
             canary.txt
             drain.log
+            rl.log
           retention-days: 14

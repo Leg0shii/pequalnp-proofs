@@ -45,7 +45,7 @@ LEASE_RX = re.compile(r"^Lease:\s*\S", re.M)
 TOKEN_RX = re.compile(r"(?<![A-Za-z0-9_-])(L-[a-z0-9]+(?:-[a-z0-9]+)*-\d+)(?![A-Za-z0-9_-])")
 FILE_RX = re.compile(r"lean/PEqualNP/Outside/(L_[a-z0-9]+(?:_[a-z0-9]+)*_\d+|V_[a-z0-9]+(?:_[a-z0-9]+)*_\d+__k\d+)\.lean")
 READS = {"n": 0, "req": 0}          # n: counted reads (a 304 is free), req: all requests
-RL = {"rem": None, "reset": None}
+RL = {"rem": None, "reset": None, "tok": "run"}
 LAST = {"date": None}               # GitHub Date of the newest answer
 PASS = {"date": None}               # GitHub Date of the first answer of the current pass
 ETAGS = {}                          # list path -> (etag, rows)
@@ -77,52 +77,114 @@ def _date(t):
         PASS["date"] = t
 
 
-def api(path):
-    """GET https://api.github.com/<path>; raises ReadFail on any error (fail closed). List pages are conditional."""
-    READS["req"] += 1
-    cache = "/files" not in path
-    old = ETAGS.get(path) if cache else None
+# Lead 09:38 (RC-b, via infra): takenpub must not go blind on an empty run token. The run token's hourly limit is per
+# REPOSITORY, shared by every run of the fork (09:29:58 it was at 0: every list read failed closed, the list went
+# stale, every reader stopped filing). When the run token answers with remaining < RT_LOW or is refused for its PRIMARY
+# rate limit (not a secondary limit), reads go to PR_TOKEN until the run token's reset (the refused read is sent again
+# at once). PR_TOKEN is shared with the PC and every PR create: below PR_FLOOR remaining it is not used (fail closed as
+# before). Alert line RUN-TOKEN-EMPTY at most once per 5 min. RUNTOKEN_FALLBACK=0 turns it off. Same rule as submit.py gh().
+PR_TOKEN = os.environ.get("PR_TOKEN", "")
+RT_LOW = int(os.environ.get("TAKEN_RT_LOW", "200"))
+PR_FLOOR = int(os.environ.get("TAKEN_PR_FLOOR", "1000"))
+FB = {"until": 0.0, "alert": 0.0, "pr_rem": None, "n": 0}     # fallback to PR_TOKEN until FB["until"] (epoch)
+
+
+def fb_on():
+    return bool(PR_TOKEN) and os.environ.get("RUNTOKEN_FALLBACK", "1") != "0"
+
+
+def _tok(now):
+    """("run", TOKEN) or ("pr", PR_TOKEN) for this read"""
+    if fb_on() and now < FB["until"] and (FB["pr_rem"] is None or FB["pr_rem"] >= PR_FLOOR):
+        return "pr", PR_TOKEN
+    return "run", TOKEN
+
+
+def primary_refusal(code, rem, body):
+    """the run token's PRIMARY rate limit refused this read (not a secondary limit)"""
+    t = (body or "").lower()
+    if "secondary" in t:
+        return False
+    return code in ("403", "429") and ("api rate limit exceeded" in t or rem == 0)
+
+
+def _empty(rem, reset, why, now):
+    FB["until"] = max(FB["until"], float(reset) if reset and reset > now else now + 600)
+    if now - FB["alert"] >= 300:
+        FB["alert"] = now
+        log(f"RUN-TOKEN-EMPTY ({why}): run token remaining {rem}; reads go to PR_TOKEN until "
+            f"{time.strftime('%H:%M:%S', time.gmtime(FB['until']))} UTC")
+
+
+def _get(path, tok, etag):
+    """one request: (code str, body or rows, etag, date epoch or None, remaining or None, reset or None)"""
     if FAKE:
-        if hasattr(FAKE, "cond"):
-            code, rows, tag = FAKE.cond(path, old[0] if old else None)
+        if hasattr(FAKE, "tok_cond"):
+            code, rows, tag, rem, reset = FAKE.tok_cond(path, etag, tok[0])
+        elif hasattr(FAKE, "cond"):
+            code, rows, tag = FAKE.cond(path, etag); rem, reset = 5000 - READS["n"] - 1, 0
         else:
-            code, rows, tag = 200, FAKE(path), None
-        _date(FAKE_DATE() if FAKE_DATE else time.time())
-        if code == 304 and old:
-            return old[1]
-        READS["n"] += 1
-        RL["rem"], RL["reset"] = 5000 - READS["n"], 0
-        if cache and tag:
-            ETAGS[path] = (tag, rows)
-        return rows
+            code, rows, tag, rem, reset = 200, FAKE(path), None, 5000 - READS["n"] - 1, 0
+        return str(code), rows, tag, (FAKE_DATE() if FAKE_DATE else time.time()), rem, reset
     r = subprocess.run(["curl", "-sS", "-m", "25", "-w", "\n%{http_code}\t%header{etag}\t%header{date}\t"
                         "%header{x-ratelimit-remaining}\t%header{x-ratelimit-reset}", "-H", "Accept: application/vnd.github+json"]
-                       + (["-H", "Authorization: Bearer " + TOKEN] if TOKEN else [])
-                       + (["-H", "If-None-Match: " + old[0]] if old else []) + ["https://api.github.com/" + path],
+                       + (["-H", "Authorization: Bearer " + tok[1]] if tok[1] else [])
+                       + (["-H", "If-None-Match: " + etag] if etag else []) + ["https://api.github.com/" + path],
                        capture_output=True, text=True)
     body, _, tail = r.stdout.rpartition("\n")
     f = tail.split("\t")
     if r.returncode or len(f) < 5:
         raise ReadFail(f"{path[:60]} -> rc={r.returncode}")
-    code = f[0]
-    if f[3].isdigit():
-        RL["rem"], RL["reset"] = int(f[3]), int(f[4]) if f[4].isdigit() else 0
+    try:
+        d = email.utils.parsedate_to_datetime(f[2]).timestamp()
+    except (TypeError, ValueError, IndexError):
+        d = None
+    return (f[0], body, f[1], d, int(f[3]) if f[3].isdigit() else None, int(f[4]) if f[4].isdigit() else None)
+
+
+def api(path):
+    """GET https://api.github.com/<path>; raises ReadFail on any error (fail closed). List pages are conditional.
+    Run token empty or refused for its primary limit: PR_TOKEN (see above)."""
+    READS["req"] += 1
+    cache = "/files" not in path
+    old = ETAGS.get(path) if cache else None
+    for att in range(2):
+        now = time.time()
+        tok = _tok(now)
+        code, body, tag, d, rem, reset = _get(path, tok, old[0] if old else None)
+        if rem is not None:
+            RL["rem"], RL["reset"] = rem, reset or 0
+            RL["tok"] = tok[0]
+            if tok[0] == "pr":
+                FB["pr_rem"] = rem
+        if fb_on() and tok[0] == "run":
+            if primary_refusal(code, rem, body if isinstance(body, str) else ""):
+                _empty(rem, reset, "refused", now)
+                if _tok(now)[0] == "pr":
+                    continue                                 # the same read again, now with PR_TOKEN
+            elif rem is not None and rem < RT_LOW and code in ("200", "304"):
+                _empty(rem, reset, f"under {RT_LOW}", now)   # this answer is good; the next reads use PR_TOKEN
+        if tok[0] == "pr":
+            FB["n"] += 1
+        break
     if code == "304" and old:
         rows = old[1]
     elif code == "200":
         READS["n"] += 1
-        try:
-            rows = json.loads(body)
-        except ValueError:
-            raise ReadFail(f"{path[:60]} -> bad json", -1)
-        if cache and f[1]:
-            ETAGS[path] = (f[1], rows)
+        if isinstance(body, str):
+            try:
+                rows = json.loads(body)
+            except ValueError:
+                raise ReadFail(f"{path[:60]} -> bad json", -1)
+        else:
+            rows = body
+        if cache and tag:
+            ETAGS[path] = (tag, rows)
     else:
         raise ReadFail(f"{path[:60]} -> http={code}", int(code) if code.isdigit() else 0)
-    try:
-        _date(email.utils.parsedate_to_datetime(f[2]).timestamp())
-    except (TypeError, ValueError, IndexError):
+    if d is None:
         raise ReadFail(f"{path[:60]} -> no Date header")
+    _date(d)
     return rows
 
 
@@ -407,6 +469,7 @@ def open_json(st, t_hdr):
         prs.append([n, v["who"], v["sha"], v["created"], sorted(set(v["units"]) | set(st.open[n])),
                     v.get("lease", 0), v.get("ref", "")])
     return json.dumps({"t": int(t_hdr), "full_t": int(st.full_t) if st.full_t else None, "rl": RL["rem"],
+                       "rl_tok": RL.get("tok", "run"), "fb_until": int(FB["until"]) if FB["until"] > time.time() else 0,
                        "skipped": sorted(n for n in st.bad if n in st.open), "prs": prs}, separators=(",", ":")) + "\n"
 
 
