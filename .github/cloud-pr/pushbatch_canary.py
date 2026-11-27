@@ -70,6 +70,10 @@ def scenario(name, base, bsha, units, arrive, workers, pre, t_writes):
     """units L-drill-<tag><name>-<i> through the real submit() with batched pushes; returns (bad, results, gate)"""
     gate = os.path.join(W, "gate-" + name); os.makedirs(gate, exist_ok=True)
     open(os.path.join(gate, f"upbase-{bsha[:12]}.ok"), "w").write("canary\n")
+    # lane movingmain (RC-c3): inside a drain submit() reads the drain's newest base note W/upbase.json (fail closed
+    # without it); the canary's shared base is the drain's
+    json.dump({"sha": bsha, "t": time.time(), "dir": base, "adopted": bsha, "adopted_fetch_t": time.time()},
+              open(os.path.join(gate, "upbase.json"), "w"))
     fenv = dict(os.environ, ID="pushflush", MOD="pushflush", PROOF=os.devnull, TREE=W, W=os.path.join(W, "pf-" + name),
                 DRY="0", PR_GATE_DIR=gate, RIVAL_SNAP_DIR=gate, GITHUB_OUTPUT=os.devnull, PUSH_BATCH_S=BATCH)
     os.makedirs(fenv["W"], exist_ok=True)
