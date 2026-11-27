@@ -201,18 +201,38 @@ def exposure(prs):
     return sp, close, exposed
 
 
+TKST = {"age": None, "alerted": -1e18}
+TAKEN_STALE_S = 60
+
+
+def taken_stale(age):
+    """Lead 06:22 TAKEN-STALE: the taken list's header is over 60 s old (or the list cannot be read) -> alert ref
+    TAKEN-STALE <age>s (or 'unreadable') once per 5 min. The age is the header epoch against this job's clock."""
+    TKST["age"] = age
+    if DRY or time.time() - TKST["alerted"] < 300:
+        return
+    TKST["alerted"] = time.time()
+    what = f"{int(age)}s" if age is not None else "unreadable"
+    alert_ref(f"TAKEN-STALE {what}", "takenstale")
+    log("TAKEN-STALE", what)
+
+
 def taken():
     """{step: (first PR number, author)} or None when missing or stale."""
     g = os.path.join(W, "taken.git")
     if not os.path.isdir(g):
         sh("git", "init", "-q", "--bare", g)
     if sh("git", *auth(), "-C", g, "fetch", "-q", "--depth=1", TK, "+refs/heads/status/taken:refs/heads/status/taken").returncode:
+        taken_stale(None)
         return None
     t = sh("git", "-C", g, "show", "refs/heads/status/taken:taken.txt").stdout.splitlines()
     try:
-        if not t or time.time() - int(t[0].split()[2]) > 180:
-            return None
+        TKST["age"] = time.time() - int(t[0].split()[2]) if t else None
     except (IndexError, ValueError):
+        TKST["age"] = None
+    if TKST["age"] is None or TKST["age"] > TAKEN_STALE_S:
+        taken_stale(TKST["age"])
+    if TKST["age"] is None or TKST["age"] > 180:
         return None
     out = {}
     for l in t[1:]:
@@ -426,7 +446,7 @@ def heartbeat(n, d, fresh):
     # 19:50: PR_TOKEN (Leg0shii, shared with PR creation and the PC) hit 0; rate_limit calls are free
     rlp = sh("gh", "api", "rate_limit", "--jq", r'"\(.resources.core.remaining)/\(.resources.core.reset)"', env=ghenv(), timeout=30).stdout.strip() or "?"
     msg = (f"dupclose {int(time.time())} open={n} dups={d} closed={len(CLOSED)} taken={'fresh' if fresh else 'stale'} "
-           f"{SPLIT['txt']} br={BR['deleted']}/{len(BR['cand'])}/{BR['kept']} badref={BADREF.get('n', '-')} pages={OPEN.get('pages', '-')} rej10={REJ.get('n', '-')} rl={rl} rl_pr={rlp} tok={'read' if os.environ.get('READ_TOKEN') else 'pr'} "
+           f"{SPLIT['txt']} br={BR['deleted']}/{len(BR['cand'])}/{BR['kept']} badref={BADREF.get('n', '-')} taken_age={'-' if TKST['age'] is None else int(TKST['age'])} pages={OPEN.get('pages', '-')} rej10={REJ.get('n', '-')} rl={rl} rl_pr={rlp} tok={'read' if os.environ.get('READ_TOKEN') else 'pr'} "
            f"run={os.environ.get('GITHUB_RUN_ID', '-')}")
     c = subprocess.run(["git", "-C", g, "commit-tree", tree, "-m", msg], capture_output=True, text=True, env=env).stdout.strip()
     sh("git", *auth(), "-C", g, "push", "-q", "-f", TK, f"{c}:refs/heads/status/dupclose", timeout=60)

@@ -365,6 +365,11 @@ def child_close(src, w):
                     GHOST["left"] -= 1
                     return subprocess.CompletedProcess(a, 1, "", "unexpected disconnect")
             return subprocess.CompletedProcess(a, 0, "", "")
+        if a[0] == "git" and "fetch" in a and "status/taken" in s and "taken_hdr_age" in w:      # TAKEN-STALE drill
+            ok = w["taken_hdr_age"] is not None
+            return subprocess.CompletedProcess(a, 0 if ok else 1, "", "" if ok else "fatal: couldn't find remote ref")
+        if a[0] == "git" and "show" in a and "status/taken" in s and "taken_hdr_age" in w:
+            return subprocess.CompletedProcess(a, 0, f"# updated {int(clock[0] - w['taken_hdr_age'])} 05:00:00 steps 0\n", "")
         if a[0] == "git" and "ls-remote" in a and PASS[0] in w.get("tk_lsremote_fail_passes", []):
             return subprocess.CompletedProcess(a, 128, "", "fatal: unable to access")   # 16.8 S1: toolkit refs unreadable
         if a[0] == "git" and "ls-remote" in a:                  # fixture refs ("ref" or {"ref", "msg"}) + what was pushed
@@ -396,7 +401,8 @@ def child_close(src, w):
         D._page = page
         D.sh = sh
         D.auth = lambda: []
-        D.taken = lambda: w.get("taken_map")
+        if "taken_hdr_age" not in w:
+            D.taken = lambda: w.get("taken_map")
         D.DRY = False
     for k in ("FIXTURE", "FIXTURE_OPEN", "FIXTURE_MERGED", "FIXTURE_CLOSED", "FIXTURE_FILING"):
         os.environ.pop(k, None)
@@ -781,6 +787,10 @@ def cases():
                                         "toolkit_refs": [{"ref": "refs/heads/filing/stop/now", "msg": "filing stop: by hand", "born": -50}]},
                 {"must_close": [], "no_push": True, "halted": True, "self_halted": True,
                  "push_count": {"refs/heads/alert/haltbadref-": 2}, "go_count": 0}))
+    # TAKEN-STALE (Lead 06:22): taken header over 60 s old or unreadable -> alert by name once per 5 min
+    for nm, age, want in (("TS1", 90, 2), ("TS2", 10, 0), ("TS3", None, 2)):
+        out.append(("hostile/" + nm, "close", {"closed_pulls": five, "taken_hdr_age": age, "passes": [0, 20, 60, 120, 300, 320]},
+                    {"must_close": [], "no_push": True, "push_count": {"refs/heads/alert/takenstale-": want}}))
     # B9 partial failures. B9a: gh pr close times out AFTER the close happened (our own duplicate, CI comment) -> no halt
     d1, d2 = our_pr(50300, "L-meta-93300", created=-200), our_pr(50301, "L-meta-93300", created=-100)
     d2["comments"] = [{"body": "CI: build started", "user": {"login": "ci-bot"}, "created_at": iso(T0 - 50)}]
