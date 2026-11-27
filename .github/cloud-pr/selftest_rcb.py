@@ -306,6 +306,11 @@ if have:
     case("6-PR-STALL-noprogress-61s", any(k == "prstall-noprogress" for k, m in D.stall_alerts(1000.0, 3, 939.0, 800.0, 0)), "")
     case("6-no-alert-at-59s", not D.stall_alerts(1000.0, 3, 941.0, 800.0, 0), "")
     case("6-no-alert-when-idle", not D.stall_alerts(1000.0, 0, 100.0, 50.0, 0), "")
+    if "last_idle" in D.stall_alerts.__code__.co_varnames:   # Lead 09:02 (r3): 14 units, 60 s nothing, 97 units = no PR-STALL
+        case("6-idle-gap-no-stall", not D.stall_alerts(1000.0, 97, 900.0, 800.0, 0, 998.0), "")
+        case("6-stuck-after-gap-alerts", any(k == "prstall-noprogress" for k, m in D.stall_alerts(1000.0, 97, 900.0, 800.0, 0, 935.0)), "")
+    else:
+        case("6-idle-gap-no-stall", bool(D.stall_alerts(1000.0, 97, 900.0, 800.0, 0)) is False, "(old drain: the idle gap counts as a stall)")
     sent = []
     D.alert_ref = lambda m, k: sent.append((k, m)) or True
     D.W = tempfile.mkdtemp(); open(os.path.join(D.W, "stall"), "w").write(str(time.time() + 60))   # time = the case clock
@@ -466,10 +471,10 @@ if True:                                   # runs on older code too (the convoy 
     S.gh = rt_gh
     json.dump({"t": REAL_TIME() - 30, "d": 0.5, "hdr": REAL_TIME() - 40, "taken": {}, "recent": [], "files": {}},
               open(os.path.join(SNAPD, "rival_snap.json"), "w"))
-    def put_hb(t):
-        tmp = os.path.join(SNAPD, "refresh.hb.t%d" % threading.get_ident())   # per thread: hb() and the refresher both
-        open(tmp, "w").write(f"{t:.1f} 0 0 0 0\n")                              # write it (a shared .t name raced:
-        os.replace(tmp, os.path.join(SNAPD, "refresh.hb"))                      # FileNotFoundError killed the refresher)
+    def put_hb(t):                  # two threads write it: one tmp name per thread (a shared one raced: the loser's
+        tmp = os.path.join(SNAPD, f"refresh.hb.t{threading.get_ident()}")   # os.replace raised and killed fake_refresher)
+        open(tmp, "w").write(f"{t:.1f} 0 0 0 0\n")
+        os.replace(tmp, os.path.join(SNAPD, "refresh.hb"))
     def fake_refresher():
         tl.ref = True
         while not stop.is_set():
@@ -597,6 +602,35 @@ if hasattr(S, "dry_final"):
         PULLS.clear(); reset_snap()
 else:
     case("dryfinal-snapshot-over-bound-WOULD-REFUSE", False, "(no dry_final in this submit.py)")
+
+# ---- Lead 09:10: a refused head push (429/403) is a 16.13 refusal (stall for every worker, alert), then pushed again
+if hasattr(S, "push_branch"):
+    PD = tempfile.mkdtemp(); svd = os.environ.get("PR_GATE_DIR"); os.environ["PR_GATE_DIR"] = PD
+    sv = (S.run, S.git, getattr(S, "upbase_ref", None))
+    calls = []
+    def prun(a, **k):
+        if "push" in a:
+            calls.append(1)
+            if len(calls) == 1:
+                return subprocess.CompletedProcess(a, 1, "", "remote: error: Too Many Requests (429)\nfatal: unable to access")
+        return subprocess.CompletedProcess(a, 0, "", "")
+    S.run = prun; S.git = lambda *a, **k: subprocess.CompletedProcess(a, 0, "abc\n", "")
+    if sv[2]:
+        S.upbase_ref = lambda b: "upbase/x"
+    t0c = CLK[0]
+    e = S.push_branch("c" * 40, "L-meta-1")
+    k = int(open(os.path.join(PD, "refusals")).read()) if os.path.exists(os.path.join(PD, "refusals")) else 0
+    case("09:10-push-429-is-a-refusal", e is None and len(calls) == 2 and k == 1 and CLK[0] - t0c >= 59,
+         f"(err {e}, pushes {len(calls)}, refusals {k}, waited {CLK[0] - t0c:.0f} s)")
+    S.run, S.git = sv[0], sv[1]
+    if sv[2]:
+        S.upbase_ref = sv[2]
+    if svd is None:
+        os.environ.pop("PR_GATE_DIR", None)
+    else:
+        os.environ["PR_GATE_DIR"] = svd
+else:
+    case("09:10-push-429-is-a-refusal", False, "(no push_branch)")
 
 bad = [n for n, ok in res if not ok]
 print(f"RCB SELFTEST OK {len(res)}" if not bad else "RCB SELFTEST FAIL " + " ".join(bad))
