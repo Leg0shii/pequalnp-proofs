@@ -168,6 +168,10 @@ def child_submit(src, w):
                 if g.get("statement") and g["statement"] != ps:
                     return cp("FAIL: statement differs from gaps.json\n", 1)
             return cp("guards ok\n")
+        if w.get("gate_refs") is not None and cmd[0] == "git" and "ls-remote" in cmd and any("deskgate" in x for x in cmd):
+            if w["gate_refs"] == "fail":                       # Y2: the toolkit refs cannot be read
+                return cp("", 128, "fatal: unable to access")
+            return cp("".join(f"0\t{r}\n" for r in w["gate_refs"]))
         if "taken_text" in w and cmd[0] == "git":            # the real _taken_list: init, fetch, show of status/taken
             if "init" in cmd or "fetch" in cmd:
                 return cp()
@@ -230,7 +234,8 @@ def child_submit(src, w):
         if any((p.get("handle") if isinstance(p, dict) else p) == HANDLE for p in gj.get("paused") or []):
             return False, "paused in the mirror"
         return (True, "open ref") if w.get("gate_open", True) else (False, "no open ref")
-    S.gate_open_now = gate_open_now
+    if w.get("gate_refs") is None:                # else the real gate_open_now reads the (fake) toolkit refs
+        S.gate_open_now = gate_open_now
 
     def gate_claim(g):
         out["desk"].append("claim " + g)
@@ -455,6 +460,8 @@ def judge_submit(name, w, r, expect):
         bad.append("not halted: " + r["result"])
     if w.get("body_expect") is not None:
         bad += body_bad(r["prs"], w["body_expect"])
+    if w.get("expect_claim") is not None and any(x.startswith("claim") for x in r["desk"]) != w["expect_claim"]:
+        bad.append(f"Y2 desk claims {r['desk']} (want {'a claim' if w['expect_claim'] else 'none'})")
     if w.get("li_reads") is not None and r.get("li_reads") != w["li_reads"]:
         bad.append(f"credit file read {r.get('li_reads')} times (want {w['li_reads']})")
     return (not bad), "; ".join(bad) or f"{got} ({r['result']}: {r['why'][:70]})"
@@ -719,6 +726,15 @@ def cases():
     out.append(("hostile/X13", "submit", {"gid": "L-meta-90103", "gaps": [unit("L-meta-90103")], "taken": {"L-meta-1": "someone"},
                 "open_pulls": [rival_pr(50103, "Batch of proofs", created=-10, files=["lean/PEqualNP/Outside/L_meta_90103.lean"])],
                 "files_fail": [50103]}, "no PR"))
+    # Y2: the opener's gate check with the real gate_open_now. Refs unreadable = closed (no claim; the closed-gate rule
+    # then files bare as GATEWAY 4 says); open newer than stop = claim; stop newer = no claim
+    for k, refs, claim in (("Y2-unreadable", "fail", False),
+                           ("Y2-open", ["refs/heads/deskgate/open/200", "refs/heads/deskgate/stop/100"], True),
+                           ("Y2-stopped", ["refs/heads/deskgate/open/100", "refs/heads/deskgate/stop/200"], False)):
+        g = "L-meta-%d" % (92100 + len(k))
+        out.append(("hostile/" + k, "submit", {"gid": g, "gaps": [unit(g)], "taken": {"L-meta-1": "someone"},
+                                               "env": {"CLAIM_FIRST": "tl6c-not-search"}, "gate_answers": {"*": "ok"},
+                                               "gate_refs": refs, "expect_claim": claim}, "PR"))
     # A20: the real taken-list parser. Header count differs from the rows (truncated) = no PR; "steps 0" fresh = files
     out.append(("hostile/A20-truncated", "submit", {"gid": "L-meta-92001", "gaps": [unit("L-meta-92001")],
                                                     "taken_text": "# updated {T} 05:00:00 steps 3\nL-meta-5 1 someone 04:00:00\n"}, "no PR"))

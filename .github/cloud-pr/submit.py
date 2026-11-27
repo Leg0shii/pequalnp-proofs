@@ -206,16 +206,22 @@ LAST_GJ = [None]  # the gaps.json read of the race check (mirror pause check of 
 def gate_open_now():
     """Lead 19:14: (open, why) without a gate round trip. Closed at once when the toolkit has no deskgate/open/<epoch>
     ref newer than the newest deskgate/stop/<epoch> ref (if any), or the mirror lists our handle as paused. Then no
-    claim is sent (and the one-claim lock is not used up). A git error = unknown -> ask the gate as before."""
+    claim is sent (and the one-claim lock is not used up). Red team Y2 (Lead 05:35): refs unreadable after 3 tries
+    2 s apart = CLOSED (was "unknown" = open, and the claim went out)."""
     gj = LAST_GJ[0] or {}
     if any((p.get("handle") if isinstance(p, dict) else p) == HANDLE for p in gj.get("paused") or []):
         return False, "paused in the mirror"
-    try:
-        r = run(["git", "-C", dg().REPO, "ls-remote", "origin", "refs/heads/deskgate/open/*", "refs/heads/deskgate/stop/*"], timeout=30)
-    except Exception:
-        return True, "unknown"
-    if r.returncode:
-        return True, "unknown"
+    r = None
+    for k in range(3):
+        try:
+            r = run(["git", "-C", dg().REPO, "ls-remote", "origin", "refs/heads/deskgate/open/*", "refs/heads/deskgate/stop/*"], timeout=30)
+            if r.returncode == 0:
+                break
+        except Exception:
+            r = None
+        time.sleep(2)
+    if r is None or r.returncode:
+        return False, "gate refs unreadable (closed, fail closed)"
     ep = lambda k: [int(m.group(1)) for m in re.finditer(rf"/deskgate/{k}/(\d+)$", r.stdout, re.M)]
     op, st = ep("open"), ep("stop")
     if not op or max(op) <= max(st or [0]):
