@@ -227,6 +227,7 @@ class Die(BaseException):
 
 def child_close(src, w):
     sys.path.insert(0, os.path.join(src, ".github", "cloud-pr"))
+    sys.path.append(HERE)                  # haltrule.py of the drill (judge) when src has none
     clock = [T0]
     real_time = time.time
     import importlib
@@ -380,8 +381,12 @@ def child_close(src, w):
             out["unexpected"].append("one_pass: " + repr(e)[:120])
     out["caches"] = {k: len(getattr(D, k)) for k in ("CMT", "CLOSER", "MERGED", "MSGS", "HALTED", "CLOSED") if hasattr(D, k)}
     out["closed_at"] = {}
-    ep = lambda pat: [int(r.rsplit("/", 1)[1]) for r in live_refs() if r.startswith(pat) and r.rsplit("/", 1)[1].isdigit()]
-    out["halted"] = max(ep("refs/heads/filing/stop/") or [0]) > max(ep("refs/heads/filing/go/") or [0])
+    import haltrule                        # Lead 16.1: the drill judges with the one rule (tie halted, odd names halted)
+    out["halted"] = haltrule.verdict("".join(f"0\t{r}\n" for r in live_refs()))[0]
+    try:
+        out["self_halted"] = D.halted_now()   # what the closer itself believes from the same refs
+    except Exception as e:
+        out["self_halted"] = "crash " + repr(e)[:60]
     return out
 
 
@@ -477,7 +482,7 @@ def body_bad(prs, ex):
     return bad
 
 
-def judge_close(name, w, r, must_close, must_keep=(), must_push=None, no_push=False, max_reads=None, go_count=None, last_stop=None, halted=None, stop_count=None, cache_max=None):
+def judge_close(name, w, r, must_close, must_keep=(), must_push=None, no_push=False, max_reads=None, go_count=None, last_stop=None, halted=None, stop_count=None, cache_max=None, self_halted=None):
     if r.get("crash"):
         return False, "crash " + " | ".join(r["crash"])
     bad = []
@@ -503,6 +508,8 @@ def judge_close(name, w, r, must_close, must_keep=(), must_push=None, no_push=Fa
             bad.append(f"caches over cap {big}")
     if halted is not None and r.get("halted") != halted:
         bad.append("filing " + ("NOT halted" if halted else "still halted") + " at the end")
+    if self_halted is not None and r.get("self_halted") != self_halted:
+        bad.append(f"closer halted_now() = {r.get('self_halted')} (want {self_halted})")
     if r.get("push_collisions"):
         bad.append(f"push to an existing ref {r['push_collisions'][:2]}")
     if go_count is not None:
@@ -678,6 +685,27 @@ def cases():
     out.append(("hostile/Y7d", "close", {"closed_pulls": five + r30, "passes": [0, 60, 120], "restart_at": [1],
                                          "toolkit_refs": [{"ref": "refs/heads/filing/go/%d" % (T0 + 40), "msg": "filing go: Lead", "born": 30}]},
                 {"must_close": [], "stop_count": 1, "halted": False}))
+    # 16.1 (Lead 06:22): one rule. R6 (red team): stop == go from one snapshot stays halted
+    out.append(("hostile/R6a", "close", {"closed_pulls": five, "passes": [0, 60],
+                                         "toolkit_refs": [{"ref": "refs/heads/filing/stop/%d" % (T0 - 100), "msg": "filing stop: REJ-HALT 1 49998", "born": -100},
+                                                          {"ref": "refs/heads/filing/go/%d" % (T0 - 100), "msg": "filing go: Lead", "born": -90}]},
+                {"must_close": [], "no_push": True, "go_count": 0, "halted": True, "self_halted": True}))
+    # R6b: a blind stop of ours tied with a go: halted, so two clean scans lift it with go = stop + 1
+    out.append(("hostile/R6b", "close", {"closed_pulls": five, "passes": [0, 60, 120, 180],
+                                         "toolkit_refs": [{"ref": "refs/heads/filing/stop/%d" % (T0 - 100), "msg": "filing stop: BLIND closed-read go=0", "born": -100},
+                                                          {"ref": "refs/heads/filing/go/%d" % (T0 - 100), "msg": "filing go: other writer", "born": -90}]},
+                {"must_close": [], "no_push": True, "go_count": 1, "halted": False, "self_halted": False}))
+    # R6c: tie + a blind scan: already halted, so no blind stop on top of it
+    out.append(("hostile/R6c", "close", {"closed_pulls": five, "closed_fail_passes": [0, 1, 2], "passes": [0, 60, 120],
+                                         "toolkit_refs": [{"ref": "refs/heads/filing/stop/%d" % (T0 - 100), "msg": "filing stop: REJ-HALT 1 49997", "born": -100},
+                                                          {"ref": "refs/heads/filing/go/%d" % (T0 - 100), "msg": "filing go: Lead", "born": -90}]},
+                {"must_close": [], "no_push": True, "go_count": 0, "halted": True, "self_halted": True}))
+    # R7: a stop named <n>-blind (not plain digits) newer go: halted until deleted; never lifted by the closer
+    for nm, extra in (("R7a", {}), ("R7b", {"closed_fail_passes": [0, 1, 2]})):
+        out.append(("hostile/" + nm, "close", dict({"closed_pulls": five, "passes": [0, 60, 120, 180, 240],
+                                                    "toolkit_refs": [{"ref": "refs/heads/filing/stop/%d-blind" % (T0 - 100), "msg": "filing stop: BLIND closed-read go=0", "born": -100},
+                                                                     {"ref": "refs/heads/filing/go/%d" % (T0 - 50), "msg": "filing go: Lead", "born": -50}]}, **extra),
+                    {"must_close": [], "no_push": True, "go_count": 0, "halted": True, "self_halted": True}))
     # B9 partial failures. B9a: gh pr close times out AFTER the close happened (our own duplicate, CI comment) -> no halt
     d1, d2 = our_pr(50300, "L-meta-93300", created=-200), our_pr(50301, "L-meta-93300", created=-100)
     d2["comments"] = [{"body": "CI: build started", "user": {"login": "ci-bot"}, "created_at": iso(T0 - 50)}]

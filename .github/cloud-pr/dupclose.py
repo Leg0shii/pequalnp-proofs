@@ -10,6 +10,8 @@ bus alert channel). Taken list stale (over 180 s): per-PR file search for PRs un
 Env: PR_TOKEN (close, toolkit push), MINUTES (58), DRY=1 (no close, no push), FIXTURE (json list of our PRs, tests).
 """
 import base64, json, os, re, subprocess, sys, tempfile, time
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import haltrule                                    # Lead 16.1: the one stop/go rule (shared with submit, drain, gate)
 
 UP = "open-goat/pequalnp-proofs"
 TK = "https://github.com/Leg0shii/pnp-toolkit.git"
@@ -256,13 +258,7 @@ def filing_go():
     return max([int(x) for x in re.findall(r"/filing/go/(\d+)$", txt, re.M)] or [0])
 
 
-def next_ref_epoch(now, stop_epochs, go_epochs):
-    """Ref number for a new filing/stop/<n> or filing/go/<n> (red team V5, Lead 06:02): max(now, every existing
-    filing/stop + 1, every existing filing/go + 1). A new ref is then greater than every ref that existed when it was
-    written, so ref order = write order whatever the writers' clocks say (a fast clock cannot outrank a later write,
-    two writes in one second cannot collide). Pure: now = int(time.time()), the epochs read right before the push.
-    Copy unchanged into every writer of these refs (PC, Lead, infra)."""
-    return max([int(now)] + [int(e) + 1 for e in stop_epochs] + [int(e) + 1 for e in go_epochs])
+next_ref_epoch = haltrule.next_ref_epoch          # one implementation (haltrule.py, Lead 16.1)
 
 
 def filing_stop(msg):
@@ -293,12 +289,19 @@ def all_refs(pattern):
                   reverse=True)
 
 
+def filing_snapshot():
+    """(ls-remote text, rc) of every toolkit refs/heads/filing/* ref, one snapshot (Lead 16.1)."""
+    r = sh("git", *auth(), "ls-remote", TK, "refs/heads/filing/*", timeout=60)
+    return r.stdout, r.returncode
+
+
 def halted_now():
-    """True if the newest filing/stop is newer than every filing/go, False if not, None if unreadable."""
-    st, go = all_refs("filing/stop"), all_refs("filing/go")
-    if st is None or go is None:
+    """Lead 16.1 (haltrule.verdict): True if halted (newest stop >= newest go, a tie halted; a stop name that is not
+    plain digits halted), False if not, None if the refs are unreadable."""
+    txt, rc = filing_snapshot()
+    if rc:
         return None
-    return bool(st) and st[0][0] > (go[0][0] if go else 0)
+    return haltrule.verdict(txt, rc)[0]
 
 
 def ref_message(sha, ref):
@@ -335,12 +338,15 @@ def stop_listed():
 
 
 def blind_lift():
-    """push filing/go/<epoch> + alert BLIND-LIFT if the newest filing/stop is our blind stop and newer than every go."""
-    sts, gos = all_refs("filing/stop"), all_refs("filing/go")
-    if sts is None or gos is None:
+    """push filing/go/<n> + alert BLIND-LIFT if filing is halted (Lead 16.1) only by blind stops of ours."""
+    txt, rc = filing_snapshot()                       # Lead 16.1: one snapshot for the verdict and the new ref number
+    if rc:
         return False                                  # unreadable
-    g0 = gos[0][0] if gos else 0
-    live = [(e, h) for e, h in sts if e > g0]         # every stop the newest go has not lifted
+    fs = haltrule.family_state(txt, "filing")
+    if fs["odd"]:
+        log("BLIND-LIFT refused: stop ref name not plain digits", fs["odd"][0], "(halted until deleted, only the Lead)")
+        return False
+    live = fs["live"]                                 # every stop >= the newest go (a tie is halted, R6)
     if not live:
         return False                                  # no stop, or already lifted
     for e, h in live:                                 # Lead 05:58: lift only if EVERY live stop is a blind one of ours
@@ -354,7 +360,7 @@ def blind_lift():
                GIT_COMMITTER_NAME="dupclose", GIT_COMMITTER_EMAIL="dupclose@localhost")
     c = subprocess.run(["git", "-C", g, "commit-tree", tree, "-m", f"filing go: BLIND-LIFT of stop {st[0]} (two full scans, no rejection)"],
                        capture_output=True, text=True, env=env).stdout.strip()
-    n = next_ref_epoch(time.time(), [e for e, _ in sts], [e for e, _ in gos])
+    n = haltrule.next_ref_epoch(time.time(), [e for e, _ in fs["stops"]], [fs["lift"]])
     ok = sh("git", *auth(), "-C", g, "push", "-q", TK, f"{c}:refs/heads/filing/go/{n}").returncode == 0
     if ok:
         alert_ref(f"BLIND-LIFT stop {st[0]}", "blindlift")
