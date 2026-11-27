@@ -22,6 +22,7 @@ OPTIONAL = {
 }
 # names the runner or the workflow itself provides (not secrets)
 RUNTIME = {"GITHUB_TOKEN", "ACTIONS_RUNTIME_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_TOKEN"}
+HARNESS = {"mintdrill.py", "mintfail.py", "mintcross.py", "mintload.py", "fakedrift.py", "secretcheck.py", "qdelay.py"}
 ENV_READ = re.compile(r"""(?:environ(?:\.get)?\s*(?:\(|\[)\s*|getenv\(\s*)["']([A-Z][A-Z0-9_]*)["']""")
 SHELL_EMPTY_EXIT0 = re.compile(r"""\[\s*-n\s+"\$\{?([A-Z][A-Z0-9_]*)(?::-)?\}?"\s*\]\s*\|\|\s*(\{[^}]*exit 0[^}]*\}|exit 0)""")
 
@@ -34,7 +35,8 @@ def load_yaml(path):
 
 
 def script_reads(path, seen=None):
-    """credential env names a script reads, following the cloud-pr scripts it runs ("x.py" literal or import x: drain -> submit, utest -> drain);
+    """credential env names a script reads, following the cloud-pr scripts it runs as a process ("x.py" literal: drain -> submit, utest -> drain; an import
+    from a replay harness such as mintdrill runs the code against fakes and is not followed);
     a name the parent sets for its children itself (NAME="..." / "NAME": ...) is provided, not read from the step"""
     seen = set() if seen is None else seen
     if path in seen or not os.path.isfile(path):
@@ -43,8 +45,10 @@ def script_reads(path, seen=None):
     src = open(path, errors="replace").read()
     names = {n for n in ENV_READ.findall(src) if CRED.search(n)}
     d = os.path.dirname(path)
+    if os.path.basename(path) in HARNESS:            # replay harnesses run the code against fakes: not followed
+        return names
     for other in sorted(os.listdir(d)):
-        if other.endswith(".py") and other != os.path.basename(path) and re.search(r"""(["']%s["']|^\s*import\s+%s\b)""" % (re.escape(other), re.escape(other[:-3])), src, re.M):
+        if other.endswith(".py") and other != os.path.basename(path) and re.search(r"""["']%s["']""" % re.escape(other), src):
             names |= {n for n in script_reads(os.path.join(d, other), seen)
                       if not re.search(r"""(\b%s\s*=\s*["']|["']%s["']\s*:)""" % (n, n), src)}
     return names
@@ -67,14 +71,18 @@ def sources(expr):
 
 def static(root):
     wfd = os.path.join(root, ".github", "workflows")
-    finds, used, checked = [], {}, set()
+    finds, used, checked, defaulted = [], {}, set(), {}
     for fn in sorted(os.listdir(wfd)):
         if not fn.endswith((".yml", ".yaml")):
             continue
         path = os.path.join(wfd, fn)
         raw = open(path).read()
-        for kind, name in re.findall(r"\b(secrets|vars)\.([A-Za-z0-9_]+)", raw):
-            if name != "GITHUB_TOKEN":
+        for kind, name, dflt in re.findall(r"\b(secrets|vars)\.([A-Za-z0-9_]+)(\s*\|\|\s*'[^']*')?", raw):
+            if name == "GITHUB_TOKEN":
+                continue
+            if dflt:                                   # vars.X || '14': a tuning value with a literal default, not a secret
+                defaulted.setdefault(name, set()).add(fn)
+            else:
                 used.setdefault(name, set()).add(fn)
         wf = load_yaml(path)
         wenv = wf.get("env") or {}
@@ -106,6 +114,8 @@ def static(root):
                     if (sec or var) and not all(x in OPTIONAL for x in sec + var):
                         finds.append("S3 SILENT-SKIP %s exits 0 (green run) when %s (from %s) is empty" %
                                      (label, name, ",".join("secrets." + x for x in sec) or ",".join("vars." + x for x in var)))
+    for name in sorted(set(defaulted) - set(used)):
+        print("info S2 defaulted %s (%s): absent means the literal default" % (name, ",".join(sorted(defaulted[name]))))
     for name in sorted(used):
         if name not in checked:
             finds.append("S2 UNCHECKED %s used by %s, not in preflight-live.yml" % (name, ",".join(sorted(used[name]))))
