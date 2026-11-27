@@ -31,6 +31,8 @@ FIRST = []
 REJ = {"t": 0.0, "alerted": 0.0}
 REJ_EVERY, REJ_WIN, REJ_MIN = 60, 600, 3      # Lead 18:42: REJ-BURST n at 3 or more in 10 min, once per 10 min
 HALTED = set()     # Lead 05:10: PRs that already pushed a filing/stop ref
+TIMEOUT_TXT = "ran past the time limit"   # Lead 18:57 27 Nov: the makers' check-timeout close ("Nothing is recorded")
+TOCLOSE = set()    # PRs already alerted as TIMEOUT-CLOSE
 
 
 def log(*a):
@@ -623,7 +625,7 @@ def beat_msg(now=None):
             f"closed={len(CLOSED)} taken={'fresh' if HBS['fresh'] else 'stale'} "
             f"{SPLIT['txt']} br={BR['deleted']}/{len(BR['cand'])}/{BR['kept']} badref={BADREF.get('n', '-')} "
             f"taken_age={'-' if TKST['age'] is None else int(TKST['age'])}{'p' if TKST.get('partial') else ''} "
-            f"pages={OPEN.get('pages', '-')} openlist={OPEN.get('src', '-')} rej10={REJ.get('n', '-')} "
+            f"pages={OPEN.get('pages', '-')} openlist={OPEN.get('src', '-')} rej10={REJ.get('n', '-')} to10={REJ.get('to', '-')} "
             f"rl={HB.get('rl', '?')} rl_pr={HB.get('rlp', '?')} tok={('pr-rt' if rt_empty() else 'read') if os.environ.get('READ_TOKEN') else 'pr'} "
             f"run={os.environ.get('GITHUB_RUN_ID', '-')}")
 
@@ -746,6 +748,31 @@ def prune_branches():
     return n_del
 
 
+def timeout_close(p):
+    """Lead 18:57 27 Nov: a close whose comments carry the makers' check-timeout text ("ran past the time limit") and
+    no "proved first" is a TIMEOUT-CLOSE: counted and alerted, never a rejection (no REJ-HALT, no blind-lift block)."""
+    txt = [(c.get("body") or "").lower() for c in p.get("comments") or []]
+    return any(TIMEOUT_TXT in t for t in txt) and not any("proved first" in t for t in txt)
+
+
+def timeout_alert(p):
+    """one TIMEOUT-CLOSE alert ref per PR: number, unit, Lean lines added (one files read, best effort)"""
+    n_ = p["number"]
+    if n_ in TOCLOSE:
+        return
+    TOCLOSE.add(n_)
+    lines = "?"
+    if not DRY:
+        r = sh("gh", "api", f"repos/{UP}/pulls/{n_}/files?per_page=10", "--jq", '[.[] | select(.filename | endswith(".lean")) | .additions] | add // empty',
+               env=rdenv(), timeout=60)
+        if r.returncode == 0 and r.stdout.strip():
+            lines = r.stdout.strip()
+    msg = f"TIMEOUT-CLOSE {n_} {title_unit(p.get('title') or '') or '-'} lean_lines={lines}"
+    if not DRY:
+        alert_ref(msg, "timeoutclose")
+    log(msg, "(dry)" if DRY else "")
+
+
 def rej_burst():
     """Lead 18:42 (PAUSE-CAUSE.md addendum 18:40): our PRs closed UNMERGED in the last 10 min whose comments carry the
     checker text 'proved first'. 3 or more -> REJ-BURST n (alert ref, relayed to the bus), once per 10 min. GitHub
@@ -820,7 +847,7 @@ def rej_burst():
                         closed_s = 0
                     CMT[n_] = (closed_s > CMT_FINAL_S, json.loads(c.stdout or "[]"))
             prs.append({"number": n_, "closedAt": ca, "mergedAt": None, "comments": (CMT.get(n_) or (False, []))[1],
-                        "closedBy": CLOSER.get(n_)})
+                        "closedBy": CLOSER.get(n_), "title": x.get("title") or ""})
         branch_cands(rows)                            # 16.5 rule 4 / 16.8 O3 O7: head branches we may delete
     now = time.time()
 
@@ -833,10 +860,14 @@ def rej_burst():
             and any("proved first" in (c.get("body") or "").lower() for c in p.get("comments") or []))
     # Lead 05:10 HALT ON ONE REJECTION: one of our PRs closed unmerged (not by dupclose) with a "proved first" comment
     # or any comment by another login, not yet named by one of our stops (Y7: no clock compare) -> filing/stop + REJ-HALT
+    tos = [p for p in prs if not p.get("mergedAt") and p.get("closedAt") and now - t(p["closedAt"]) <= REJ_WIN and timeout_close(p)]
+    REJ["to"] = len(tos)                              # to10=<n> in the heartbeat
+    for p in tos:
+        timeout_alert(p)
     go = filing_go()
     # closed by another login (closedBy known) = a maker's close = a rejection, comment or not (Y3)
     hit = [p["number"] for p in prs if not p.get("mergedAt") and p.get("closedAt") and now - t(p["closedAt"]) <= REJ_WIN
-           and p["number"] not in HALTED
+           and p["number"] not in HALTED and not timeout_close(p)
            and ((p.get("closedBy") not in (None, HANDLE))
                 or any("proved first" in (c.get("body") or "").lower() or ((c.get("user") or {}).get("login") or HANDLE) != HANDLE
                        for c in p.get("comments") or []))]
@@ -871,6 +902,7 @@ def rej_burst():
     # (HALTED and filing/go ignored) -> if the newest filing/stop ref is a blind stop of ours (its commit message read
     # from the remote, so a chain restart changes nothing) and newer than every filing/go: push filing/go + BLIND-LIFT
     rej_any = [p["number"] for p in prs if not p.get("mergedAt") and p.get("closedAt") and now - t(p["closedAt"]) <= REJ_WIN
+               and not timeout_close(p)
                and ((p.get("closedBy") not in (None, HANDLE))
                     or any("proved first" in (c.get("body") or "").lower() or ((c.get("user") or {}).get("login") or HANDLE) != HANDLE
                            for c in p.get("comments") or []))]
@@ -1071,8 +1103,21 @@ if __name__ == "__main__" and sys.argv[1:2] == ["selftest-halt"]:
     ref("stop", t0 + 5, "filing stop: REJ-HALT 1 104"); ref("go", t0 + 6, "filing go: Lead")
     e = case([pr(104, "proved first", ca=old_s)]) == []                     # named by a stop (lifted): nothing
     f_ = sum("filing/stop/" in x for x in case([pr(105, "proved first", ca=old_s)])) == 1   # not named, before the go: halt
-    print("HALT SELFTEST", "OK" if all((a, b, c, d, e, f_)) else "FAIL", a, b, c, d, e, f_)
-    sys.exit(0 if all((a, b, c, d, e, f_)) else 1)
+    # Lead 18:57 TIMEOUT-CLOSE replay: the two real closes of 18:41 (41359, 41306; maker close + check-timeout text)
+    # -> no stop, one alert/timeoutclose each; a real "proved first" close next to them still halts
+    TO = ("Closed: the check of this proof ran past the time limit of 20 minutes twice, the second time on a larger "
+          "runner. Nothing is recorded and nothing counts against this handle.")
+    tp = lambda n, unit: dict(pr(n, TO, who="maker"), closedBy="maker", title=f"Prove {unit}")
+    r7 = case([tp(41359, "L-meta-27843"), tp(41306, "L-meta-27825")])
+    g = not any("filing/stop/" in x for x in r7) and sum("alert/timeoutclose-" in x for x in r7) == 2 and REJ.get("to") == 2
+    h = case([tp(41359, "L-meta-27843"), tp(41306, "L-meta-27825")]) == []          # same closes again: nothing new
+    r9 = case([tp(41359, "L-meta-27843"), tp(41306, "L-meta-27825"),
+               dict(pr(41400, "This step was proved first by another pull request (#41390).", who="maker"), closedBy="maker")])
+    i = sum("filing/stop/" in x for x in r9) == 1 and not any("timeoutclose" in x for x in r9)
+    j = sum("filing/stop/" in x for x in case([dict(pr(41401, TO + " It was also proved first by #41000.", who="maker"),
+                                                     closedBy="maker")])) == 1         # both texts: a rejection, as today
+    print("HALT SELFTEST", "OK" if all((a, b, c, d, e, f_, g, h, i, j)) else "FAIL", a, b, c, d, e, f_, g, h, i, j)
+    sys.exit(0 if all((a, b, c, d, e, f_, g, h, i, j)) else 1)
 if __name__ == "__main__" and sys.argv[1:2] == ["measure"]:
     # Lead 19:30 item 2: one full sweep, print the split and what rule v2 would close; closes nothing
     sp, close2, exposed = exposure(open_prs())
