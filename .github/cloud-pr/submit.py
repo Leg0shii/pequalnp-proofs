@@ -771,8 +771,18 @@ def filing_halted():
     if os.environ.get("FILING_FIXTURE") is not None:
         txt, rc = os.environ["FILING_FIXTURE"], 0
     else:
-        r = run(["git", "ls-remote", TK_URL, "refs/heads/filing/*"], timeout=60)
-        txt, rc = r.stdout, r.returncode
+        # live test 05:13: an anonymous ls-remote of the (private) toolkit fails in the Action -> read it like
+        # gate_open_now, through the deskguard clone's authenticated origin; 3 tries 2 s apart (Lead 05:13)
+        txt, rc = "", 1
+        for k in range(3):
+            try:
+                r = run(["git", "-C", dg().REPO, "ls-remote", "origin", "refs/heads/filing/*"], timeout=30)
+                txt, rc = r.stdout, r.returncode
+            except Exception:
+                txt, rc = "", 1
+            if rc == 0:
+                break
+            time.sleep(2)
     if rc:
         return True, "filing refs unreadable (fail closed)"
     ep = lambda k: max([int(x) for x in re.findall(r"/filing/%s/(\d+)$" % k, txt, re.M)] or [0])

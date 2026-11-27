@@ -167,7 +167,11 @@ def halted():
     """newest filing/stop/<epoch> newer than the newest filing/go/<epoch> = halted; unreadable = halted (fail
     closed). Read at most every 10 s."""
     if time.time() - _FH[0] > 10:
-        r = sh("git", "ls-remote", "https://github.com/Leg0shii/pnp-toolkit.git", "refs/heads/filing/*", timeout=60)
+        for k in range(3):                    # live test 05:13: the toolkit needs auth; 3 tries 2 s apart
+            r = sh("git", *auth(), "ls-remote", "https://github.com/Leg0shii/pnp-toolkit.git", "refs/heads/filing/*", timeout=60)
+            if r.returncode == 0:
+                break
+            time.sleep(2)
         ep = lambda k: max([int(x) for x in re.findall(r"/filing/%s/(\d+)$" % k, r.stdout, re.M)] or [0])
         if r.returncode:
             _FH[:] = [time.time(), True, "filing refs unreadable (fail closed)"]
