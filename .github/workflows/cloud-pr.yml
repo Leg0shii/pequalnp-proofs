@@ -65,7 +65,7 @@ jobs:
           W: ${{ github.workspace }}/work
           READ_TOKEN: ${{ github.token }}
           PR_TOKEN: ${{ secrets.PR_TOKEN }}
-          PNP_LINKEDIN: ${{ secrets.PNP_LINKEDIN }}
+          PNP_LINKEDIN: ${{ secrets.PNP_LINKEDIN || vars.PNP_LINKEDIN }}
         run: python3 -I "$GITHUB_WORKSPACE/src/.github/cloud-pr/drain.py"
 
   submit:
@@ -132,7 +132,7 @@ jobs:
         env:
           READ_TOKEN: ${{ github.token }}
           PR_TOKEN: ${{ secrets.PR_TOKEN }}
-          PNP_LINKEDIN: ${{ secrets.PNP_LINKEDIN }}
+          PNP_LINKEDIN: ${{ secrets.PNP_LINKEDIN || vars.PNP_LINKEDIN }}
         run: python3 -I "$GITHUB_WORKSPACE/src/.github/cloud-pr/submit.py"
 
       - name: Summary
