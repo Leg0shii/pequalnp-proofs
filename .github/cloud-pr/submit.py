@@ -402,7 +402,8 @@ def gh(args, write=False, timeout=120):
             if r.returncode == 0:
                 return r
             if fb and t == READ_TOKEN and primary_rl(r):
-                _mark_runtoken_empty(r, args)
+                if not runtoken_empty():                    # W11 09:51: parallel 403s log once, not 8 times
+                    _mark_runtoken_empty(r, args)
                 if not prtoken_low():
                     toks.append(PR_TOKEN)
                 break
