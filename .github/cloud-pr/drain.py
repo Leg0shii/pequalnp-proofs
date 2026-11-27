@@ -682,6 +682,25 @@ def stall_tick(n_inflight):
         pass
     if not n_inflight:
         LAST_IDLE[0] = time.time()
+    try:                                   # Lead 09:08 (16.13 ext.): GitHub refused a head push (403/429)
+        pr = open(os.path.join(W, "pushrefused")).read().split(None, 4)
+        if time.time() - ALERTED.get("pushrefused", 0) >= 300 and time.time() - float(pr[0]) < 300:
+            ALERTED["pushrefused"] = time.time()
+            m = (f"PUSH-REFUSED push refusal {pr[1]} on {pr[3]}: every worker stops pushing and creating for {pr[2]} s, "
+                 f"rate halved, no giveup; that unit pushes first after it ({pr[4][:120] if len(pr) > 4 else ''})")
+            ok = DRY or alert_ref(m, "pushrefused")
+            log(m, "(alert ref pushed)" if ok else "(alert ref push FAILED)")
+    except (OSError, ValueError, IndexError):
+        pass
+    try:                                   # Lead 09:22 R5: a head push refused for a PERMISSION (403 denied): no stall
+        pd = open(os.path.join(W, "pushdenied")).read().split(None, 2)
+        if time.time() - ALERTED.get("pushdenied", 0) >= 300 and time.time() - float(pd[0]) < 300:
+            ALERTED["pushdenied"] = time.time()
+            m = f"PUSH-DENIED on {pd[1]}: GitHub denied the head push (permission, not a rate limit; check PR_TOKEN) ({pd[2][:120] if len(pd) > 2 else ''})"
+            ok = DRY or alert_ref(m, "pushdenied")
+            log(m, "(alert ref pushed)" if ok else "(alert ref push FAILED)")
+    except (OSError, ValueError, IndexError):
+        pass
     for kind, msg in stall_alerts(time.time(), n_inflight, LAST_DONE[0], T0, su, LAST_IDLE[0]):
         ALERTED[kind] = time.time()
         ok = DRY or alert_ref(msg, kind)
