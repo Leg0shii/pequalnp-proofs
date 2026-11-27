@@ -65,7 +65,14 @@ jobs:
           git config --global http.https://github.com/.extraheader "AUTHORIZATION: basic $(printf 'x-access-token:%s' "$PR_TOKEN" | base64 -w0)"
           export GIT_AUTHOR_NAME=Leg0shii GIT_COMMITTER_NAME=Leg0shii
           export GIT_AUTHOR_EMAIL=46093332+Leg0shii@users.noreply.github.com GIT_COMMITTER_EMAIL=46093332+Leg0shii@users.noreply.github.com
-          export TAKEN_OUT=$W/taken.txt TAKEN_MINUTES=$MIN
+          export TAKEN_OUT=$W/taken.txt TAKEN_OPEN_OUT=$W/open.json TAKEN_MINUTES=$MIN
+          # W6 (16.7): seed the file cache from the last published open.json, so a restart re-reads only moved heads
+          if timeout 60 git -C "$G" fetch -q --depth=1 https://github.com/Leg0shii/pnp-toolkit.git +refs/heads/status/taken:refs/heads/prev \
+             && git -C "$G" show prev:open.json > "$W/seed.json" 2>/dev/null && [ -s "$W/seed.json" ]; then
+            export TAKEN_SEED=$W/seed.json; echo "seed: $(wc -c < "$W/seed.json") bytes of open.json"
+          else
+            echo "seed: none (first run or no open.json yet)"
+          fi
           python3 -I "$GITHUB_WORKSPACE/src/.github/taken/takenpub.py" 3 > "$W/takenpub.log" 2>&1 &
           pid=$!
           last=""; lastpush=0; n=0; fails=0
@@ -75,7 +82,11 @@ jobs:
             body=$(head -1 "$TAKEN_OUT")                   # a new pass = a new header (pass start epoch): push it
             [ "$body" = "$last" ] && continue
             blob=$(git -C "$G" hash-object -w "$TAKEN_OUT")
-            tree=$(printf '100644 blob %s\ttaken.txt\n' "$blob" | git -C "$G" mktree)
+            ent=$(printf '100644 blob %s\ttaken.txt' "$blob")
+            if [ -s "$TAKEN_OPEN_OUT" ]; then              # 16.7: open.json in the same commit (written before taken.txt)
+              ob=$(git -C "$G" hash-object -w "$TAKEN_OPEN_OUT"); ent=$(printf '100644 blob %s\topen.json\n%s' "$ob" "$ent")
+            fi
+            tree=$(printf '%s\n' "$ent" | git -C "$G" mktree)
             c=$(git -C "$G" commit-tree "$tree" -m "taken list ($(head -1 "$TAKEN_OUT" | cut -d' ' -f4-))")
             if timeout 60 git -C "$G" push -q -f https://github.com/Leg0shii/pnp-toolkit.git "$c:refs/heads/status/taken"; then
               last=$body; lastpush=$(date +%s); n=$((n + 1)); fails=0
