@@ -44,8 +44,11 @@ permissions:
   actions: read
   pull-requests: read
 
+# W8 (Lead 08:36): one group PER BRANCH, so lanes and the rehearsal run side by side. A DRY drain only reads the
+# loadtest/* units (no claim, no push, no delete), so parallel runs cannot take each other's units; non-drill runs skip
+# the rehearsal's L-drill-* units (DRAIN_MATCH below). Lanes cap themselves at 3 canaries at once (lane-ci.yml "queue").
 concurrency:
-  group: loadcanary
+  group: loadcanary-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: false
 
 defaults:
@@ -98,6 +101,7 @@ jobs:
           case "$GITHUB_REF_NAME" in
             *-drill-*) t=${GITHUB_REF_NAME##*-drill-}; export DRAIN_MATCH="L-drill-$t-[0-9]+" DRILL_GAPS_REF="loadtest-gaps/$t";;
             *-drill) export DRAIN_MATCH='L-drill-[a-z0-9-]+' DRILL_GAPS_REF='loadtest-gaps/drill';;
+            *) export DRAIN_MATCH='(?!L-drill-).+';;      # W8: lane and plain canaries leave the rehearsal's units alone
           esac
           r=${GITHUB_REF_NAME%-drill*}
           case "$r" in *-lin[0-9]*) export DRAIN_LINGER=${r##*-lin}; r=${r%-lin*};; esac
@@ -161,6 +165,10 @@ jobs:
         run: |
           for t in RT PT; do GH_TOKEN=${!t} gh api rate_limit --jq .resources.core.remaining 2>/dev/null || echo "?"; done | paste -sd' ' > core.after
           read rb pb < core.before; read ra pa < core.after
+          # the run token's first rate_limit answer can come from a fresh bucket (PR 3: 4999, drain 1 s later 3155):
+          # take "before" from the drain's own RUN-TOKEN line, the same bucket as core.after
+          d=$(grep -oE 'RUN-TOKEN rate_limit core limit/remaining: [0-9]+ [0-9]+' drain.log 2>/dev/null | head -1 | awk '{print $NF}')
+          [ -n "$d" ] && rb=$d
           w=$IN_W; warm=$IN_WARM; r=${GITHUB_REF_NAME%-drill*}; r=${r%-lin*}       # same branch-name rules as the drain step
           case "$r" in *-warm[0-9]*) warm=${r##*-warm}; r=${r%-warm*};; esac
           case "$r" in *-w[0-9]*) w=${r##*-w};; esac

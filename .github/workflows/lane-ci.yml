@@ -33,11 +33,11 @@ permissions:
   contents: read
   actions: read
   pull-requests: read
-# The canary waits its turn (infra 08:23): GitHub keeps ONE waiting run per concurrency group and a new one CANCELS the
-# waiting one, so a lane PR must never wait inside the group "loadcanary" (it knocked w12's rehearsal out at 08:21).
-# Job "queue" polls until no loadcanary run and no other lane-ci canary is queued or running (up to 40 min, every
-# 20 s, run token only), and only then does the canary join the group. Queue still busy at 40 min: no canary, the line
-# says so and the lane re-runs the run.
+# Canaries run side by side (Lead 08:36): loadcanary.yml's group is per branch (loadcanary-<branch>), so a lane never
+# waits on the rehearsal or on another lane. Cap (W8): job "queue" lets this canary start only while fewer than 3
+# canaries (loadcanary runs + other lane-ci canaries) are queued or running: the run-token read pool (5000/h) is shared
+# with the live opener. Polls every 20 s, up to 40 min; still full: no canary, the line says so, re-run the run.
+# Merge gate: job "line" FAILS unless the LANE-CI verdict is ok and every suite passed.
 concurrency:                       # never the group "loadcanary" (a caller sharing a called workflow's group deadlocks)
   group: lane-ci-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
@@ -66,7 +66,7 @@ jobs:
       go: ${{ steps.wait.outputs.go }}
       why: ${{ steps.wait.outputs.why }}
     steps:
-      - name: Wait until no other canary is queued or running
+      - name: Wait until fewer than 3 canaries are queued or running
         id: wait
         env:
           GH_TOKEN: ${{ github.token }}
@@ -82,12 +82,12 @@ jobs:
           }
           t0=$(date +%s)
           while :; do
-            b=$(busy 2>&1 | head -3 | paste -sd';' -)
-            [ -z "$b" ] && { echo "queue free after $(( $(date +%s) - t0 )) s"; echo "go=true" >> "$GITHUB_OUTPUT"; exit 0; }
+            all=$(busy 2>&1); n=$(printf '%s' "$all" | grep -c .); b=$(printf '%s' "$all" | head -3 | paste -sd';' -)
+            [ "$n" -lt 3 ] && { echo "start: $n other canaries running after $(( $(date +%s) - t0 )) s ${b:+($b)}"; echo "go=true" >> "$GITHUB_OUTPUT"; exit 0; }
             [ $(( $(date +%s) - t0 )) -ge 2400 ] && break
-            echo "$(date -u +%T) waiting: $b"; sleep 20
+            echo "$(date -u +%T) waiting, $n running: $b"; sleep 20
           done
-          echo "go=false" >> "$GITHUB_OUTPUT"; echo "why=queue busy 40 min ($b): re-run this run" >> "$GITHUB_OUTPUT"
+          echo "go=false" >> "$GITHUB_OUTPUT"; echo "why=3 canaries busy for 40 min ($b): re-run this run" >> "$GITHUB_OUTPUT"
   canary:
     needs: queue
     if: needs.queue.outputs.go == 'true'
@@ -117,8 +117,12 @@ jobs:
           l="${LINE:-LANE-CI ? verdict=BAD (no canary line, canary job $R_LC${Q_WHY:+, $Q_WHY})} suites mintdrill=$R_MD nodesk=$R_ND preflight-live=$R_PL canary=$R_LC"
           echo "$l"; echo "$l" > line.txt
           { echo '### LANE-CI (paste into team/board/<lane>.md)'; echo '```'; echo "$l"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-          case "$l" in *verdict=ok*) ;; *) echo "::warning::canary verdict not ok";; esac
-          [ "$R_MD" = success ] && [ "$R_ND" = success ] && [ "$R_PL" = success ]
+          ok=1
+          case "$l" in *" verdict=ok "*|*" verdict=ok") ;; *) echo "::error::LANE-CI verdict is not ok: no merge"; ok=0;; esac
+          for x in "mintdrill $R_MD" "nodesk $R_ND" "preflight-live $R_PL"; do
+            [ "${x#* }" = success ] || { echo "::error::suite ${x% *} is ${x#* }: no merge"; ok=0; }
+          done
+          [ $ok = 1 ]
       - uses: actions/upload-artifact@v4
         if: always()
         with:
