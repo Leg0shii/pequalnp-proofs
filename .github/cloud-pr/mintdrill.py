@@ -44,6 +44,7 @@ def norm_pull(p, now, k):
     q = dict(p)
     q.setdefault("user", {"login": "rival1"})
     q.setdefault("head", {"ref": "patch-1"})
+    q["head"] = dict({"sha": "%040x" % (int(q.get("number") or 0) + 0xb15)}, **q["head"])   # B15: real heads carry a sha
     q.setdefault("body", "")
     q.setdefault("files", [])
     q["created_at"] = reltime(p.get("created_at"), now) or iso(now - 600 + k)
@@ -577,13 +578,13 @@ def unit(gid, tpl="tl6c-not-search", **k):
 
 
 def our_pr(n, gid, lease=False, created=-300, title=None):
-    return {"number": n, "title": title or gid, "user": {"login": HANDLE}, "head": {"ref": gid}, "files": [],
+    return {"number": n, "title": title or gid, "user": {"login": HANDLE}, "head": {"ref": gid, "sha": "%040x" % n}, "files": [],
             "body": "desc" + ("\n\nLease: lid-%d" % n if lease else ""), "created_at": iso(T0 + created),
             "merged_at": None, "closed_at": None}
 
 
 def rival_pr(n, title, created=-100, merged=None, closed=None, login="rival1", files=(), ref="patch-1"):
-    return {"number": n, "title": title, "user": {"login": login}, "head": {"ref": ref}, "files": list(files), "body": "",
+    return {"number": n, "title": title, "user": {"login": login}, "head": {"ref": ref, "sha": "%040x" % n}, "files": list(files), "body": "",
             "created_at": iso(T0 + created), "merged_at": iso(T0 + merged) if merged is not None else None,
             "closed_at": iso(T0 + (closed if closed is not None else merged)) if (closed is not None or merged is not None) else None}
 
@@ -679,6 +680,14 @@ def cases():
     out.append(("hostile/X7", "close", {"open_pulls": [our_pr(50011, "L-meta-90001", created=-120),
                                                         our_pr(50012, "L-meta-90001", created=-90, title="Prove L-meta-90001")],
                                         "passes": [0, 30]}, {"must_close": [50012], "must_keep": [50011]}))
+    # B15 (fakedrift): real PRs can have body null. A rival's open PR on our unit with body null: no PR from us, and the
+    # closer still closes our later PR on that unit (it reads body for the Lease line)
+    rb = rival_pr(50201, "Prove L-meta-90201", created=-60); rb["body"] = None
+    out.append(("hostile/B15-body-null", "submit", {"gid": "L-meta-90201", "gaps": [unit("L-meta-90201")], "taken": {"L-meta-1": "someone"},
+                                                     "open_pulls": [rb]}, "no PR"))
+    rb2 = dict(rb, merged_at=iso(T0 - 30), closed_at=iso(T0 - 30))
+    out.append(("hostile/B15-body-null-close", "close", {"open_pulls": [our_pr(50202, "L-meta-90201", created=-20)],
+                                                          "closed_pulls": [rb2], "passes": [0, 30]}, {"must_close": [50202]}))
     # X9: makers close ours with a text that is not "proved first": halt
     x = hx["X9"]["ours_closed"][0]
     c = our_pr(x["number"], x["gid"], created=-900)
