@@ -30,6 +30,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: takenpub
@@ -58,7 +59,7 @@ jobs:
           IN_MIN: ${{ inputs.minutes }}
         run: |
           set -uo pipefail
-          [ -n "${PR_TOKEN:-}" ] || { echo "no PR_TOKEN secret: stop"; exit 0; }
+          [ -n "${PR_TOKEN:-}" ] || { echo "::error::no PR_TOKEN secret: stop"; exit 1; }
           MIN=${IN_MIN:-58}; case "$MIN" in ''|*[!0-9]*) MIN=58;; esac
           W=$GITHUB_WORKSPACE/work; mkdir -p "$W"; G=$W/pub.git; git init -q --bare "$G"
           git config --global http.https://github.com/.extraheader "AUTHORIZATION: basic $(printf 'x-access-token:%s' "$PR_TOKEN" | base64 -w0)"
@@ -92,6 +93,11 @@ jobs:
           GH_TOKEN: ${{ secrets.PR_TOKEN }}
         shell: bash
         run: |
-          [ -n "${GH_TOKEN:-}" ] || exit 0
+          [ -n "${GH_TOKEN:-}" ] || { echo "::error::no PR_TOKEN secret: no next run"; exit 1; }
           for i in 1 2 3 4 5; do gh workflow run taken.yml --repo "$GITHUB_REPOSITORY" --ref main -f chain=true && exit 0; sleep $((i * 10)); done
           echo "could not start the next run"; exit 1
+      - name: Queue delay (B13, measurement only, never fails the job)
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -I "$GITHUB_WORKSPACE/src/.github/cloud-pr/qdelay.py" run || true
