@@ -76,6 +76,23 @@ def next_ref_epoch(now, stop_epochs, go_epochs):
     return max([int(now)] + [int(e) + 1 for e in stop_epochs] + [int(e) + 1 for e in go_epochs])
 
 
+def closer_verdict(beat_msg, now, max_age=120):
+    """16.1 for the closer (Lead 07:53): (halted, why) from the commit message of toolkit ref status/dupclose
+    (`dupclose <epoch> loop=<s>|loop=STUCK<s> ...`). Unreadable, older than max_age, or loop=STUCK -> halted for
+    creates (a blind closer cannot close our duplicates). The age compares the beat's epoch with the reader's clock:
+    the only clock compare allowed here, a liveness age, never an order between refs."""
+    m = re.match(r"dupclose (\d+)\b", beat_msg or "")
+    if not m:
+        return True, "closer beat unreadable"
+    age = now - int(m.group(1))
+    if age > max_age:
+        return True, f"closer beat {int(age)}s old"
+    st = re.search(r"\bloop=STUCK(\d+)", beat_msg)
+    if st:
+        return True, f"closer loop stuck {st.group(1)}s"
+    return False, ""
+
+
 def selftest():
     L = lambda *names: "".join(f"{i:040x}\trefs/heads/{n}\n" for i, n in enumerate(names, 1))
     cases = [
@@ -106,6 +123,9 @@ def selftest():
     s = family_state(L("filing/stop/100", "filing/stop/90", "filing/go/95"))
     if [e for e, _ in s["live"]] != [100]:
         bad.append("live set")
+    cv = [(None, 1000, True), ("dupclose 990 loop=3 step=x", 1000, False), ("dupclose 800 loop=3", 1000, True),
+          ("dupclose 990 loop=STUCK200 in=200s", 1000, True), ("garbage", 1000, True), ("dupclose 990 open=1", 1000, False)]
+    bad += [f"closer {m!r}" for m, now, want in cv if closer_verdict(m, now)[0] != want]
     if next_ref_epoch(50, [100], [100]) != 101 or next_ref_epoch(200, [100], [150]) != 200:
         bad.append("next_ref_epoch")
     return bad
