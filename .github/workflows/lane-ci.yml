@@ -38,27 +38,44 @@ permissions:
 # canaries (loadcanary runs + other lane-ci canaries) are queued or running: the run-token read pool (5000/h) is shared
 # with the live opener. Polls every 20 s, up to 40 min; still full: no canary, the line says so, re-run the run.
 # Merge gate: job "line" FAILS unless the LANE-CI verdict is ok and every suite passed.
+# Read budget (Lead 08:49): while the fork ref wave/on exists (the Lead sets and deletes it) job "wave" fails and NOTHING
+# else runs (no suite, no canary): the wave's opener owns the read pool. The check is a git ls-remote (no REST read).
 concurrency:                       # never the group "loadcanary" (a caller sharing a called workflow's group deadlocks)
   group: lane-ci-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 jobs:
+  wave:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Refuse while the wave is on (fork ref wave/on)
+        shell: bash
+        run: |
+          o=$(git ls-remote "https://github.com/${{ github.repository }}.git" refs/heads/wave/on) || { echo "::error::ls-remote failed: not starting"; exit 1; }
+          [ -z "$o" ] || { echo "::error::fork ref wave/on exists (the wave is on): no lane-ci runs until the Lead deletes it"; exit 1; }
+          echo "wave/on absent: go"
   mintdrill:
+    needs: wave
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     uses: ./.github/workflows/mintdrill.yml
     with:
       ref: ${{ github.event.pull_request.head.sha || inputs.ref }}
   nodesk:
+    needs: wave
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     uses: ./.github/workflows/nodesk.yml
     with:
       ref: ${{ github.event.pull_request.head.sha || inputs.ref }}
   preflight-live:
+    needs: wave
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     uses: ./.github/workflows/preflight-live.yml
     secrets: inherit
     with:
       ref: ${{ github.event.pull_request.head.sha || inputs.ref }}
   queue:
+    needs: wave
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -99,7 +116,7 @@ jobs:
       slots: ${{ inputs.slots }}
       warm_s: ${{ inputs.warm_s || '0' }}
   line:
-    needs: [mintdrill, nodesk, preflight-live, queue, canary]
+    needs: [wave, mintdrill, nodesk, preflight-live, queue, canary]
     if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 3
@@ -111,12 +128,14 @@ jobs:
           R_ND: ${{ needs.nodesk.result }}
           R_PL: ${{ needs['preflight-live'].result }}
           R_LC: ${{ needs.canary.result }}
+          R_WAVE: ${{ needs.wave.result }}
           Q_WHY: ${{ needs.queue.outputs.why }}
         shell: bash
         run: |
           l="${LINE:-LANE-CI ? verdict=BAD (no canary line, canary job $R_LC${Q_WHY:+, $Q_WHY})} suites mintdrill=$R_MD nodesk=$R_ND preflight-live=$R_PL canary=$R_LC"
           echo "$l"; echo "$l" > line.txt
           { echo '### LANE-CI (paste into team/board/<lane>.md)'; echo '```'; echo "$l"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          [ "$R_WAVE" = success ] || { echo "::error::wave/on is set (or its check failed): lane-ci did not run"; exit 1; }
           ok=1
           case "$l" in *" verdict=ok "*|*" verdict=ok") ;; *) echo "::error::LANE-CI verdict is not ok: no merge"; ok=0;; esac
           for x in "mintdrill $R_MD" "nodesk $R_ND" "preflight-live $R_PL"; do

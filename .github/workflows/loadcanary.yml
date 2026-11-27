@@ -62,6 +62,10 @@ jobs:
     outputs:
       line: ${{ steps.lcsum.outputs.line }}
     steps:
+      - name: Refuse while the wave is on (fork ref wave/on, Lead 08:49 read budget)
+        run: |
+          o=$(git ls-remote "https://github.com/${{ github.repository }}.git" refs/heads/wave/on) || { echo "::error::ls-remote failed: not starting"; exit 1; }
+          [ -z "$o" ] || { echo "::error::fork ref wave/on exists (the wave is on): no canary until the Lead deletes it"; exit 1; }
       - name: Check out the candidate (drain.py, submit.py, guards)
         uses: actions/checkout@v4
         with:
