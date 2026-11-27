@@ -1311,69 +1311,16 @@ def stopped():
     return r.stdout.strip() == "200"
 
 
-HEADS_S = float(os.environ.get("HEADS_S", "1"))           # Lead 08:17: the refresher reads every fork head once a second
-HEADS_WAIT_S = float(os.environ.get("HEADS_WAIT_S", "10"))  # no newer heads copy this long = read inline (HEADS-SLOW)
-
-
-def _heads_read():
-    """one ls-remote of every fork branch L-* (about 530 refs, 35 KB, 0.4 s on 27 Nov) -> (ok, {branch: sha})"""
-    r = run(["git"] + (auth_cfg() if PR_TOKEN else []) + ["ls-remote", f"https://github.com/{FORK}.git", "refs/heads/L-*"],
-            timeout=30)
-    if r.returncode:
-        return False, {}
-    h = {}
-    for l in r.stdout.splitlines():
-        p = l.split()
-        if len(p) == 2 and p[1].startswith("refs/heads/"):
-            h[p[1][len("refs/heads/"):]] = p[0]
-    return True, h
-
-
-def heads_reader(stop=lambda: False):
-    """the refresher's fork-head reader (Lead 08:17, 16.14): SNAP_DIR/heads.json = {t (read START), ok, heads} once
-    per HEADS_S, so a worker's fork_head() is a file read, not one ls-remote per call."""
-    f = os.path.join(SNAP_DIR, "heads.json")
-    while not stop():
-        t = time.time()
-        try:
-            ok, h = _heads_read()
-        except Exception:
-            ok, h = False, {}
-        try:
-            with open(f + ".tmp", "w") as o:
-                json.dump({"t": t, "ok": ok, "heads": h}, o)
-            os.replace(f + ".tmp", f)
-        except OSError:
-            pass
-        REAL_SLEEP(max(0.05, HEADS_S - (time.time() - t)))
-
-
 def fork_head(gid):
     """sha of this fork's branch <gid> (the PR head), None when it does not exist. A git read, no API call. Raises when
-    unreadable (callers fail closed: no push, no PR). In a drain: the refresher's heads copy whose read started after
-    this ask (16.14, at most about HEADS_S + one read away, no sleep); no such copy within HEADS_WAIT_S, or a dead
-    refresher: one inline read (REFRESHER-DEAD when it died)."""
-    if os.environ.get("RIVAL_SNAP_DIR") and not IS_REFRESHER[0]:
-        if refresher_alive():
-            ask = time.time()
-            c = wait_copy(os.path.join(SNAP_DIR, "heads.json"), lambda c: c.get("t", 0) > ask, timeout=HEADS_WAIT_S)
-            if c is not None:
-                if not c.get("ok"):
-                    raise RuntimeError("fork branch unreadable (shared heads read)")
-                return c.get("heads", {}).get(gid)
-            if refresher_alive():
-                log("HEADS-SLOW:", gid, f"no heads copy newer than the ask in {HEADS_WAIT_S:.0f} s: inline read")
-            else:
-                _refdead("heads")
-        else:
-            _refdead("heads")
-        WREADS["heads"] = WREADS.get("heads", 0) + 1
-    for k in range(2):
+    unreadable (callers fail closed: no push, no PR)."""
+    for k in range(3):
         r = run(["git"] + (auth_cfg() if PR_TOKEN else []) + ["ls-remote", f"https://github.com/{FORK}.git", f"refs/heads/{gid}"],
                 timeout=60)
         if r.returncode == 0:
             o = r.stdout.split()
             return o[0] if o else None
+        time.sleep(2)
     raise RuntimeError("fork branch unreadable")
 
 
@@ -1467,23 +1414,12 @@ def upbase_ref(base):
     return None
 
 
-def _fork_tip_base(url, env=None):
-    """fallback negotiation base: the highest fork L-meta branch (its own base may be far behind: a large pack)"""
-    refs = git("ls-remote", url, "refs/heads/L-*", timeout=120).stdout.split("\n")
-    nums = sorted(((int(m.group(1)), m.group(0)) for l in refs for m in [re.search(r"refs/heads/L-meta-(\d+)$", l)] if m),
-                  reverse=True)
-    if nums:
-        git("fetch", "-q", "--depth=1", url, f"{nums[0][1]}:refs/fork/tip", timeout=180, env=env)
-
-
 def push_branch(c, gid):
     url = f"https://github.com/{FORK}.git"
     t = time.time()
     base = git("rev-parse", f"{c}^").stdout.strip()
     ub = upbase_ref(base) if base else None
     STG["upbase"] = round(time.time() - t, 3)
-    if PUSH_BATCH_S > 0:
-        return push_batched(c, gid, not ub)
     if not ub:
         # fallback: a recent fork branch as negotiation base (its own base may be far behind: a large pack)
         refs = git("ls-remote", url, "refs/heads/L-*", timeout=120).stdout.split("\n")
@@ -1671,286 +1607,8 @@ def push_first_done(gid):
             pass
 
 
-# Lane pushbatch (Lead 09:10 UTC 27 Nov, RC-c): GitHub recommends at most 6 pushes a minute per repository (Repository
-# limits) and a single push got a 429 at 08:49:57. With PUSH_BATCH_S > 0 the drain's workers do not push one by one:
-# each hands (commit, head) to PR_GATE_DIR/pushq and waits; whichever worker holds pushq/push.lock (non-blocking
-# flock, so a dead worker never blocks the queue) sends EVERY waiting head in ONE multi-ref push, at most once per
-# PUSH_BATCH_S. Create-only per ref as before (--force-with-lease=<ref>: per head): a ref that exists is rejected alone
-# and the others land (per-ref results from --porcelain). The objects of every unit's tree reach the push through
-# GIT_ALTERNATE_OBJECT_DIRECTORIES. A 403/429 on the push is a 16.13 refusal (bucket_refusal: stall for the whole
-# drain, rate halved, 4th ends the drain's creates); waiting heads stay queued until the stall ends.
-# PUSH_BATCH_S=0 (default) = the per-unit push above, unchanged.
-PUSH_BATCH_S = float(os.environ.get("PUSH_BATCH_S", "0") or 0)   # BURST (Lead 20:15): warm.yml and cloud-pr.yml set 10 (code default there)
-PUSH_WAIT_MAX_S = float(os.environ.get("PUSH_WAIT_MAX_S", "300"))
-PUSH_BATCH_MAX = int(os.environ.get("PUSH_BATCH_MAX", "25"))   # heads per push
-PUSH_REFS_MAX = int(os.environ.get("PUSH_REFS_MAX", "50"))     # refs per push, heads + deletes (w12: a 93-ref push got a bare 403)
-
-
-def _pushq():
-    return os.path.join(os.environ.get("PR_GATE_DIR") or SNAP_DIR, "pushq")
-
-
-def _qkey(gid):
-    return re.sub(r"[^A-Za-z0-9_.-]", "_", gid)
-
-
-def _jread(f):
-    try:
-        with open(f) as fh:
-            return json.load(fh)
-    except (OSError, ValueError):
-        return None
-
-
-def _jwrite(f, v):
-    with open(f + ".tmp", "w") as fh:
-        json.dump(v, fh)
-    os.replace(f + ".tmp", f)
-
-
-def _rm(f):
-    try:
-        os.remove(f)
-    except OSError:
-        pass
-
-
-def push_batched(c, gid, fallback=False):
-    """hand (c, gid) to the drain's pusher and wait for its per-ref result: None = landed, else why not"""
-    q = _pushq()
-    os.makedirs(q, exist_ok=True)
-    k = _qkey(gid)
-    req, res = os.path.join(q, k + ".req"), os.path.join(q, k + ".res")
-    _rm(res)
-    _rm(os.path.join(q, k + ".att"))
-    t0 = time.time()
-    _jwrite(req, {"c": c, "head": gid, "objs": os.path.join(TREE, ".git", "objects"), "tree": TREE, "t": t0, "fb": bool(fallback)})
-    while True:
-        v = _jread(res)
-        if v is not None:
-            _rm(res)
-            STG["push_wait"] = round(time.time() - t0, 3)
-            STG["push_batch"] = v.get("n")
-            return v.get("err")
-        if time.time() - t0 > PUSH_WAIT_MAX_S:
-            _rm(req)
-            STG["push_wait"] = round(time.time() - t0, 3)
-            return f"push batch: no result in {PUSH_WAIT_MAX_S:.0f} s"
-        push_leader(q)
-        time.sleep(0.2)
-
-
-def push_leader(q, flusher=False, final=False):
-    """one batch push when this worker holds the lock and PUSH_BATCH_S passed since the start of the last one (and no
-    stall): every waiting head and every queued ready/ delete. No fixed tick: a head after a quiet spell goes at once.
-    flusher (submit.py --pushflush, one per drain): deletes only, and only while no head waits (a waiting worker
-    carries them with its heads)."""
-    lk = open(os.path.join(q, "push.lock"), "w")
-    try:
-        fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        lk.close()
-        return
-    try:
-        now = time.time()
-        lastf = os.path.join(q, "last")
-        try:
-            last = float(open(lastf).read())
-        except (OSError, ValueError):
-            last = 0.0
-        if now - last < PUSH_BATCH_S:
-            return
-        d = os.environ.get("PR_GATE_DIR")
-        if d:
-            try:
-                if now < float(open(os.path.join(d, "stall")).read()):
-                    return                                  # 16.13 stall: no push either
-            except (OSError, ValueError):
-                pass
-        reqs, dels = [], []
-        for f in sorted(os.listdir(q)):
-            if f.endswith(".req") and not os.path.exists(os.path.join(q, f[:-4] + ".res")):
-                v = _jread(os.path.join(q, f))
-                if isinstance(v, dict) and v.get("c") and v.get("head"):
-                    v["k"] = f[:-4]
-                    reqs.append(v)
-            elif f.endswith(".del"):
-                v = _jread(os.path.join(q, f))
-                if isinstance(v, dict) and str(v.get("ref", "")).startswith("refs/heads/"):
-                    v["f"] = os.path.join(q, f)
-                    dels.append(v)
-        if flusher and reqs and not final:
-            return                                          # the waiting workers carry the deletes
-        if flusher:
-            reqs = []
-        if not reqs and not dels:
-            return
-        if reqs and d and os.path.exists(os.path.join(d, "giveup")):
-            for v in reqs:                                  # 16.13: the drain's creates ended: no head push either
-                _jwrite(os.path.join(q, v["k"] + ".res"), {"err": "stall-giveup: four create refusals in this drain, no push",
-                                                        "n": 0, "t": now})
-                _rm(os.path.join(q, v["k"] + ".req"))
-            reqs = []
-        if reqs:
-            h, hwhy = filing_halted()                       # R3: a fresh halt read before every head push
-            if h:
-                for v in reqs:
-                    _jwrite(os.path.join(q, v["k"] + ".res"), {"err": "halted: " + hwhy, "n": 0, "t": now})
-                    _rm(os.path.join(q, v["k"] + ".req"))
-                reqs = []
-        if not reqs and not dels:
-            return
-        reqs.sort(key=lambda v: v.get("t", 0))
-        reqs = reqs[:PUSH_BATCH_MAX]
-        dels = dels[:max(0, PUSH_REFS_MAX - len(reqs))]       # the rest go in the next push
-        with open(lastf + ".tmp", "w") as o:
-            o.write(f"{now:.3f}")
-        os.replace(lastf + ".tmp", lastf)
-        t = time.time()
-        out, whole = push_many(reqs, dels, flusher)
-        dt = time.time() - t
-        with open(os.path.join(q, "pushes.log"), "a") as o:
-            o.write(f"{now:.3f} {len(reqs)} {dt:.2f} {'ok' if whole is None else 'fail'} {len(dels)}\n")
-        log(f"PUSH-BATCH {len(reqs)} heads + {len(dels)} ready deletes in one push, {dt:.2f} s"
-            + ("" if whole is None else f": {whole[:150]}"))
-        if whole is None or not (push_refusal_kind(whole) == "refused" or TRANSIENT.search(whole)):
-            for v in dels:                                  # a delete that failed is not retried (the next drain sees
-                _rm(v["f"])                                 # the unit again: submit.py is idempotent there)
-            bad = [v["ref"] for v in dels if out.get(v["ref"])]
-            if bad:
-                log("ready deletes failed:", " ".join(bad)[:200])
-        kind = push_refusal_kind(whole) if whole is not None else None
-        if kind == "refused" and d:
-            push_refusal(f"batch-{os.getpid()}", whole, last=True)   # w9's push ladder + PUSH-REFUSED alert, no pushfirst
-        elif kind == "denied":
-            push_denied(f"batch-{os.getpid()}", whole)
-        for v in reqs:
-            err = out.get(v["head"], "") if whole is None else None
-            if whole is not None:
-                af = os.path.join(q, v["k"] + ".att")
-                try:
-                    a = int(open(af).read()) + 1
-                except (OSError, ValueError):
-                    a = 1
-                open(af, "w").write(str(a))
-                if kind == "refused" and a < 2:
-                    continue                                # stays queued; goes in the first batch after the stall
-                if kind is None and TRANSIENT.search(whole) and a < 4:
-                    continue                                # retried in the next batch
-                err = ("PUSH-DENIED: " if kind == "denied" else "PUSH-REFUSED twice: " if kind == "refused" else "") + whole[:280]
-            _jwrite(os.path.join(q, v["k"] + ".res"), {"err": err, "n": len(reqs), "t": now})
-            _rm(os.path.join(q, v["k"] + ".req"))
-    except Exception as e:
-        log("push leader failed:", repr(e)[:200])
-    finally:
-        lk.close()
-
-
-def push_many(reqs, dels=(), flusher=False):
-    """ONE git push of every head in reqs (create-only per ref) and every ready/ delete in dels. Returns
-    ({head or deleted ref: None | why}, None) when git answered per ref, or ({}, why) when the whole push failed."""
-    url = f"https://github.com/{FORK}.git"
-    alts = sorted({v["objs"] for v in reqs if os.path.isdir(v.get("objs") or "")})
-    env = dict(os.environ, GIT_ALTERNATE_OBJECT_DIRECTORIES=":".join(alts))
-    repo = TREE
-    if flusher:                                             # deletes only: any repository will do
-        repo = os.path.join(_pushq(), "flushrepo")
-        if not os.path.isdir(os.path.join(repo, ".git")):
-            run(["git", "init", "-q", repo], timeout=30)
-    if any(v.get("fb") for v in reqs):
-        _fork_tip_base(url, env=env)
-    cmd = (["git"] + auth_cfg() + ["-C", repo, "push", "--porcelain"]
-           + [f"--force-with-lease=refs/heads/{v['head']}:" for v in reqs] + [url]
-           + [f"{v['c']}:refs/heads/{v['head']}" for v in reqs] + [f":{v['ref']}" for v in dels])
-    r = run(cmd, timeout=600, env=env)
-    st = {}
-    for l in r.stdout.splitlines():
-        m = re.match(r"^(.)\t[^\t]*:refs/heads/(\S+)\t?(.*)$", l)
-        if m:
-            st[m.group(2)] = (m.group(1), m.group(3))
-    if not st:
-        return {}, (r.stderr.strip() or f"push rc={r.returncode}, no per-ref result")[:300]
-    out, rej = {}, []
-    for v in dels:
-        f = st.get(v["ref"][len("refs/heads/"):])
-        out[v["ref"]] = None if f and f[0] == "-" else f"delete: {f[1] if f else 'no result'}"[:200]
-    for v in reqs:
-        f = st.get(v["head"])
-        if f is None:
-            out[v["head"]] = "no result for this ref: " + r.stderr.strip()[:200]
-        elif f[0] in "*+ =":
-            out[v["head"]] = None
-        else:
-            out[v["head"]] = f"rejected: {f[1]}"[:300]
-            rej.append(v)
-    if rej:                     # rejected but already ours (a retry after a lost answer): landed
-        have = {}
-        for l in git("ls-remote", url, *[f"refs/heads/{v['head']}" for v in rej], timeout=120, env=env).stdout.splitlines():
-            p = l.split("\t")
-            if len(p) == 2:
-                have[p[1][len("refs/heads/"):]] = p[0]
-        for v in rej:
-            if have.get(v["head"]) == v["c"]:
-                out[v["head"]] = None
-    return out, None
-
-
 PR_PER_MIN = int(os.environ.get("PR_PER_MIN", "70"))       # Lead 06:12: GitHub documents 80/min and 500/hour per token
 PR_PER_HOUR = int(os.environ.get("PR_PER_HOUR", "480"))
-
-
-# BURST (Lead 20:15 UTC 27 Nov): the hour cap (PR_PER_HOUR) and the minute cap hold for the ACCOUNT, not only this
-# drain: every ACCT_EVERY_S one search read (whoever finds the cache stale, under the creates lock) counts Leg0shii's
-# PRs upstream created in the last hour (total_count) and in the last 60 s (newest 100 items). Search lags by seconds,
-# so this drain's own creates.log stays the exact floor. A failed read keeps the last value up to ACCT_STALE_S, then
-# the drain's own counts alone (as before this change), logged once per stale period.
-ACCT_EVERY_S = float(os.environ.get("ACCT_EVERY_S", "20"))
-ACCT_STALE_S = 300.0
-
-
-def _acct_read(now):
-    since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - 3600))
-    r = run(["gh", "api", "-X", "GET", "search/issues", "-f", f"q=repo:{UP} is:pr author:{HANDLE} created:>={since}",
-             "-f", "sort=created", "-f", "order=desc", "-f", "per_page=100"], timeout=30,
-            env=dict(os.environ, GH_TOKEN=READ_TOKEN or PR_TOKEN or os.environ.get("GH_TOKEN", "")))
-    if r.returncode:
-        return None
-    j = json.loads(r.stdout or "{}")
-    mins = 0
-    for it in j.get("items") or []:
-        try:
-            if now - (time.mktime(time.strptime(it["created_at"][:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone) < 60:
-                mins += 1
-        except Exception:
-            pass
-    return mins, int(j.get("total_count") or 0)
-
-
-def acct_creates(d, now):
-    """(PRs of the account in the last 60 s, in the last hour) from the cache PR_GATE_DIR/acct.json; (0, 0) = unknown"""
-    if os.environ.get("ACCT_CAP", "0") != "1":       # warm.yml and cloud-pr.yml set 1; tests and single runs: off
-        return 0, 0
-    f = os.path.join(d, "acct.json")
-    try:
-        c = json.load(open(f))
-    except Exception:
-        c = {}
-    if now - float(c.get("t", 0)) >= ACCT_EVERY_S and now - float(c.get("try", 0)) >= ACCT_EVERY_S:
-        c["try"] = now
-        try:
-            v = _acct_read(now)
-        except Exception:
-            v = None
-        if v is not None:
-            c.update(t=now, min=v[0], hour=v[1])
-            log(f"account PRs: {v[0]} in 60 s, {v[1]} in 1 h (search)")
-        with open(f + ".tmp", "w") as o:
-            json.dump(c, o)
-        os.replace(f + ".tmp", f)
-    if now - float(c.get("t", 0)) > ACCT_STALE_S:
-        return 0, 0
-    own_since = now - float(c.get("t", now))      # creates of this drain after the read are in creates.log already
-    return int(c.get("min", 0)) if own_since < 60 else 0, int(c.get("hour", 0))
 
 
 def bucket_wait(d, now):
@@ -1975,13 +1633,10 @@ def bucket_wait(d, now):
         if os.path.exists(os.path.join(d, "giveup")):
             return float("inf")                      # 16.13: four refusals in this drain: no create any more
         last_min = [t for t in ts if now - t < 60]
-        a_min, a_hour = acct_creates(d, now)         # BURST (Lead 20:15): the ACCOUNT's PRs (PC watcher too), search-based
-        if max(len(last_min), a_min) >= gate_rate(d):
-            return (60 - (now - min(last_min)) + 0.05) if len(last_min) >= gate_rate(d) else ACCT_EVERY_S
+        if len(last_min) >= gate_rate(d):
+            return 60 - (now - min(last_min)) + 0.05
         if len(ts) >= PR_PER_HOUR:
             return 3600 - (now - min(ts)) + 0.05
-        if a_hour >= PR_PER_HOUR:
-            return ACCT_EVERY_S
         ts.append(now)
         with open(f + ".tmp", "w") as o:
             o.write("\n".join(f"{t:.3f}" for t in ts))
@@ -2130,11 +1785,9 @@ def submit(gid, lease):
     # trees written bottom-up with mktree --missing (treebuild.py); the same tree sha as read-tree/update-index/write-tree
     # (treebuild_test.py). Was: read-tree of the whole upstream tree per unit, 59.5 s p50 at w28.
     t = time.time()
-    tree = tree_from_prime(base, blob, t_cm)      # infra/Lead 10:58: the drain's prime of this base, in-process
     try:
-        if not tree:
-            tree = treebuild.tree_with_file(TREE, base, REL, blob)
-            STG["tree_src"] = "mktree"
+        tree = treebuild.tree_with_file(TREE, base, REL, blob)
+        STG["tree_src"] = "mktree"
     except Exception as e:                   # never blocks a unit: the old index path, logged
         log("treebuild failed, index path:", str(e)[:120])
         idx = os.path.join(W, "submit.idx")
@@ -2161,16 +1814,25 @@ def submit(gid, lease):
         return None, "commit-tree failed"
     STG["commit"] = round(time.time() - t_cm, 3)     # whole stage, rev-parse to commit-tree (same span as before)
     # drain.py cuts each unit line at 200 chars, so the long TIMES line loses these: one short line of its own
-    log("COMMIT-STAGES", gid, " ".join(f"{k}={STG[k]}" for k in ("commit", "tree", "tree_src", "tree_cache", "cbase_age", "head", "halt2", "newbase", "base_age", "g_revparse",
+    log("COMMIT-STAGES", gid, " ".join(f"{k}={STG[k]}" for k in ("commit", "tree", "tree_src", "head", "halt2", "newbase", "base_age", "g_revparse",
                                                                "g_catfile", "g_hashobj", "g_difftree", "g_committree") if k in STG))
     # lane movingmain (W7, Lead 09:20): the base may be up to DRAIN_BASE_MAX_S older than live main (no equality
     # any more). What equality protected, the unit's own file not yet in upstream main, is checked again here on the
     # newest base the drain's base refresher has (trees only: no blob read in the blobless shared repo)
-    why = newest_base_check(base)
-    if why:
-        return None, why
+    t = time.time()
+    nb = newest_base()
+    if nb and nb["sha"] != base:
+        r = run(["git", "-C", nb["dir"], "ls-tree", "--name-only", nb["sha"], "--", REL], timeout=30)
+        STG["newbase"] = round(time.time() - t, 3)
+        if r.returncode == 0 and r.stdout.strip():
+            log("file already in upstream main on the newest base", nb["sha"][:12], f"(this unit's base {base[:12]})")
+            return None, "file already in upstream main"
+    if nb:
+        STG["base_age"] = round(time.time() - nb["t"], 1)
     if DRY:
-        return dry_final(gid, lease, c)
+        tw = time.time()                 # rehearsal (Lead 08:12): the would-create time per unit, epoch to 0.001 s
+        log(f"WOULD-CREATE {gid} {tw:.3f}"); log(sight_line(gid, tw))
+        return "dry-run", f"would push {c[:12]} as {FORK}:{gid} and open the PR"
     t = time.time()
     err = push_branch(c, gid)
     STG["push"] = round(time.time() - t, 1)
@@ -2178,68 +1840,6 @@ def submit(gid, lease):
         return None, err if err.startswith(("halted: ", "stall-giveup: ")) else "push: " + err   # R3: finish halted/giveup
     log("pushed", c[:12], "to", f"{FORK}:{gid}")
     return create_pr(gid, lease)
-
-
-def tree_from_prime(base, blob, t_cm):
-    """infra/Lead 10:58 (SPEED r9 under move4: tree 11.4/20.9 s against 2.3/3.7 s quiet): the unit's tree from the
-    drain's prime of its base (SNAP_DIR/treeprime/<base>.bin, written once per adopted base) built in-process, or None
-    (a miss: the mktree lane as before). Logged per unit: tree_cache=hit|miss-<why>, tree_src=prime, and cbase_age =
-    seconds from the fetch that brought this base to the start of the commit stage."""
-    try:
-        pd = treebuild.load_prime(os.path.join(SNAP_DIR, "treeprime", base + ".bin"), base)
-    except FileNotFoundError:
-        STG["tree_cache"] = "miss-nofile"
-        pd = None
-    except Exception:
-        STG["tree_cache"] = "miss-bad"
-        pd = None
-    if pd and pd[0].get("t"):
-        STG["cbase_age"] = round(t_cm - pd[0]["t"], 1)
-    else:
-        try:
-            ub = json.load(open(os.path.join(SNAP_DIR, "upbase.json")))
-            if ub.get("adopted") == base and ub.get("adopted_fetch_t"):
-                STG["cbase_age"] = round(t_cm - ub["adopted_fetch_t"], 1)
-        except Exception:
-            pass
-    if not pd:
-        return None
-    try:
-        tree = treebuild.tree_from_prime(TREE, pd, REL, blob)
-    except Exception as e:
-        STG["tree_cache"] = "miss-build"
-        log("tree prime: build failed, mktree lane:", str(e)[:120])
-        return None
-    STG["tree_cache"] = "hit"
-    STG["tree_src"] = "prime"
-    return tree
-
-
-def newest_base_check(base, rel=None):
-    """lane movingmain + Lead F1 (10:29, fail closed): None when the unit's path is not on the drain's newest upstream
-    base, else why not: "file already in upstream main" (finish race), or "newest-base check failed: ..." (submitfail,
-    the drain retries the unit) when the ls-tree fails or times out, or when inside a drain (PR_GATE_DIR) the drain's
-    W/upbase.json is missing or unreadable. Outside a drain (one run per branch: a fresh clone) there is no newer base."""
-    rel = rel or REL
-    t = time.time()
-    nb = newest_base()
-    if nb is None:
-        if os.environ.get("PR_GATE_DIR"):
-            log("newest-base check: the drain's upbase.json is missing or unreadable (fail closed, the unit is retried)")
-            return "newest-base check failed: upbase.json missing or unreadable"
-        return None
-    if nb["sha"] != base:
-        r = run(["git", "-C", nb["dir"], "ls-tree", "--name-only", nb["sha"], "--", rel], timeout=30)
-        STG["newbase"] = round(time.time() - t, 3)
-        if r.returncode != 0:
-            err = ((r.stderr or "") + (r.stdout or "")).strip()[:100]
-            log("newest-base check: ls-tree on", nb["sha"][:12], f"failed (rc {r.returncode}): {err} (fail closed, retried)")
-            return f"newest-base check failed: ls-tree rc {r.returncode}"
-        if r.stdout.strip():
-            log("file already in upstream main on the newest base", nb["sha"][:12], f"(this unit's base {base[:12]})")
-            return "file already in upstream main"
-    STG["base_age"] = round(time.time() - nb["t"], 1)
-    return None
 
 
 def newest_base():
@@ -2250,40 +1850,6 @@ def newest_base():
         return d if d.get("sha") and d.get("dir") and os.path.isdir(d["dir"]) else None
     except Exception:
         return None
-
-
-def dry_final(gid, lease, c):
-    """lane dryfinal (Lead 09:03): a dry run makes the checks that create_pr() makes before its first create, in the
-    same order and with the same calls: STOP file, site status, then inside a PR slot (pr_gate, so the slot and bucket
-    waits are part of the time) the halt switch and, for an unleased PR, the final rival check rival_now(final=True)
-    under the 16.12 bound (SNAP-SLOW waits included). It returns before the push and the create. STG final = seconds for
-    these checks. A check that would stop the create logs WOULD-REFUSE (with SKIP, so the drain echoes it); else
-    WOULD-CREATE as before, now stamped after the final check. Dry only: create_pr() is unchanged."""
-    t_f = time.time()
-
-    def refuse(why):
-        STG["final"] = round(time.time() - t_f, 3)
-        log(f"WOULD-REFUSE {gid}: SKIP before create, {why}")
-        return "dry-run", f"would refuse before create: {why} (commit {c[:12]}, no push)"
-    if stopped():
-        return refuse("STOP file on upstream main")
-    sc = site_closed_now()
-    if sc:
-        return refuse("site-closed: " + sc)
-    with pr_gate() as g:
-        if getattr(g, "giveup", False):
-            return refuse("stall-giveup: four create refusals in this drain")
-        h, hwhy = filing_halted()
-        if h:
-            return refuse("halted: " + hwhy)
-        if not lease:
-            rv = rival_now(gid, SNAP_CREATE_AGE_S, final=True)
-            if rv:
-                return refuse(rv if rv.startswith("rival check failed") else "rival PR open: " + rv)
-        STG["final"] = round(time.time() - t_f, 3)
-        tw = time.time()                 # rehearsal (Lead 08:12): the would-create time per unit, epoch to 0.001 s
-        log(f"WOULD-CREATE {gid} {tw:.3f}"); log(sight_line(gid, tw))
-    return "dry-run", f"would push {c[:12]} as {FORK}:{gid} and open the PR"
 
 
 def pr_create_cmd(gid, body):
@@ -2416,13 +1982,6 @@ def delete_ready():
     pre = "utest" if UNLEASED_TEST else "ready"
     if DRY or os.environ.get("GITHUB_REF_NAME") != f"{pre}/{ID}":     # push, or a dispatch on the ready/ branch
         return
-    if PUSH_BATCH_S > 0 and os.environ.get("PR_GATE_DIR"):
-        # lane pushbatch (Lead 09:22): the delete rides in the drain's next batch push (heads or the flusher); the drain
-        # marks the unit seen when this process ends, so a ready ref waiting for its delete never runs twice
-        q = _pushq(); os.makedirs(q, exist_ok=True)
-        _jwrite(os.path.join(q, _qkey(f"{pre}/{ID}") + ".del"), {"ref": f"refs/heads/{pre}/{ID}", "t": time.time()})
-        log(f"queued delete of {pre}/{ID} for the next batch push")
-        return
     r = run(["git"] + auth_cfg() + ["-C", TREE, "push", "-q", f"https://github.com/{FORK}.git", "--delete", f"{pre}/{ID}"], timeout=120)
     log(f"deleted {pre}/" + ID if r.returncode == 0 else f"could not delete {pre}/" + ID + ": " + r.stderr.strip()[:120])
 
@@ -2464,116 +2023,7 @@ def site_closed_now(strict=False):
     return None
 
 
-_CS = {"alerted": 0.0, "sha": None, "sha_t": 0.0, "hold": False}   # sha/sha_t: status/dupclose as the halt read saw it
-
-
-def _closer_msg():
-    """the commit message of toolkit ref status/dupclose (the closer's beat), None if unreadable. Fetched only when the
-    halt read's ls-remote shows the ref at a new sha (one fetch per closer beat, about every 30 s). CLOSER_BEAT_FIXTURE
-    = the message ("" = unreadable)."""
-    if os.environ.get("CLOSER_BEAT_FIXTURE") is not None:
-        return os.environ["CLOSER_BEAT_FIXTURE"] or None
-    try:
-        repo = dg().REPO
-        if run(["git", "-C", repo, "fetch", "-q", "--no-write-fetch-head", "origin",
-                "+refs/heads/status/dupclose:refs/beat/dupclose"], timeout=20).returncode:
-            return None
-        r = run(["git", "-C", repo, "log", "-1", "--format=%B", "refs/beat/dupclose"], timeout=10)
-        return r.stdout.strip() if r.returncode == 0 else None
-    except Exception:
-        return None
-
-
-def closer_step(st, now):
-    """one pass of the closer reader over state st {ok, cb, cs, seen_sha, seen_t}: takes the newest status/dupclose
-    sha the halt read saw (_CS), reads the beat message only for a new sha, returns (hold, why) at `now`."""
-    sha, t = _CS["sha"], _CS["sha_t"]
-    if t > st["seen_t"]:
-        st["seen_t"] = t
-        if sha and sha == st["seen_sha"]:
-            st["ok"] = t
-        elif sha:
-            b = haltrule.closer_beat(_closer_msg())
-            if b is not None:
-                st["seen_sha"], st["ok"] = sha, t
-                if st["cb"] is None or b[0] >= st["cb"]:
-                    st["cb"], st["cs"] = b
-    return haltrule.closer_hold(st["cb"], st["cs"], st["ok"], now)
-
-
-def closer_reader(stop=lambda: False, every=0.2):
-    """the refresher's closer reader (Lead 08:27, a HOLD): the halt read's ls-remote (every refresher pass) also lists
-    status/dupclose; on a new sha this reads the beat once, and SNAP_DIR/closer.json = {t, ok (last good read), cb
-    (newest beat epoch), cs (its loop=STUCK seconds), hold, why}. Workers judge the hold from that copy
-    (closer_hold_now), never by an own read, so a fresh beat lifts the hold within one refresher pass. Logs "HOLD
-    closer-stale age=<s>" when a hold starts, alerts CLOSER-STALE once per 5 min while it stands."""
-    st = {"ok": time.time(), "cb": None, "cs": 0, "seen_sha": None, "seen_t": 0.0}
-    f = os.path.join(SNAP_DIR, "closer.json")
-    while not stop():
-        now = time.time()
-        seen = st["seen_sha"]
-        hold, why = closer_step(st, now)
-        if st["seen_sha"] != seen:
-            log("closer beat", st["cb"], f"age={now - st['cb']:.0f}s stuck={st['cs']}s read at halt pass {st['ok'] - now:+.1f}s")
-        try:
-            with open(f + ".tmp", "w") as o:
-                json.dump({"t": now, "ok": st["ok"], "cb": st["cb"], "cs": st["cs"], "hold": hold, "why": why}, o)
-            os.replace(f + ".tmp", f)
-        except OSError:
-            pass
-        if hold and not _CS["hold"]:
-            log(why, "(creates held until a fresh closer beat)")
-        elif _CS["hold"] and not hold:
-            log("HOLD lifted: closer beat", st["cb"], f"{now - (st['cb'] or now):.0f}s old")
-        _CS["hold"] = hold
-        if hold and now - _CS["alerted"] >= 300:
-            _CS["alerted"] = now
-            log("CLOSER-STALE:", why)
-            _closer_alert(f"CLOSER-STALE {why}: creates held until a fresh closer beat")
-        REAL_SLEEP(every)
-
-
-def _closer_alert(msg):
-    """alert ref alert/closerstale-<epoch> on the toolkit (one per 5 min at most, the reader's limit)."""
-    if DRY or os.environ.get("CLOSER_BEAT_FIXTURE") is not None:
-        return False
-    try:
-        repo = dg().REPO
-        tree = run(["git", "-C", repo, "mktree"], timeout=10).stdout.strip() or "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-        env = dict(os.environ, GIT_AUTHOR_NAME="drain", GIT_AUTHOR_EMAIL="drain@localhost",
-                   GIT_COMMITTER_NAME="drain", GIT_COMMITTER_EMAIL="drain@localhost")
-        c = subprocess.run(["git", "-C", repo, "commit-tree", tree, "-m", msg], capture_output=True, text=True, env=env,
-                           timeout=10).stdout.strip()
-        return bool(c) and run(["git", "-C", repo, "push", "-q", "origin", f"{c}:refs/heads/alert/closerstale-{int(time.time())}"],
-                               timeout=30).returncode == 0
-    except Exception:
-        return False
-
-
-def closer_hold_now(now=None):
-    """(hold, why) from the refresher's closer copy, judged at the caller's clock (a dead reader stops advancing ok, so
-    it holds after 300 s). No drain (RIVAL_SNAP_DIR unset) or no copy yet = no hold."""
-    if not os.environ.get("RIVAL_SNAP_DIR"):
-        return False, ""
-    c = _load(os.path.join(SNAP_DIR, "closer.json"))
-    if not c:
-        return False, ""
-    try:
-        return haltrule.closer_hold(c.get("cb"), c.get("cs") or 0, float(c["ok"]), time.time() if now is None else now)
-    except Exception:
-        return False, ""
-
-
 def filing_halted(max_age=None):
-    """the halt switch (below) plus the closer HOLD (Lead 08:27): halted refs stop, a stale closer holds."""
-    hv, why = _filing_halted_copy(max_age)
-    if hv or (max_age == 0):
-        return hv, why
-    h2, w2 = closer_hold_now()
-    return (True, w2) if h2 else (hv, why)
-
-
-def _filing_halted_copy(max_age=None):
     """RC-b 1 (Lead 06:22): the halt switch, shared by every drain worker like the rival snapshot: one read at most
     HALT_MAX_AGE_S old in SNAP_DIR/halt.json (stamped at read START), kept fresh by the drain's refresher. A fresh copy
     is read without the lock; a stale or missing one (refresher dead, or no drain) means an inline read under the
@@ -2621,7 +2071,6 @@ def _filing_halted_copy(max_age=None):
 def _filing_halted_read():
     """Lead 05:10 HALT ON ONE REJECTION, rule 16.1 (haltrule.py): (halted, why) from the toolkit filing/stop/<n> and
     filing/go/<n> refs; unreadable = halted. FILING_FIXTURE = ls-remote text."""
-    t0 = time.time()
     if os.environ.get("FILING_FIXTURE") is not None:
         txt, rc = os.environ["FILING_FIXTURE"], 0
     else:
@@ -2630,23 +2079,14 @@ def _filing_halted_read():
         txt, rc = "", 1
         for k in range(3):
             try:
-                r = run(["git", "-C", dg().REPO, "ls-remote", "origin", "refs/heads/filing/*",
-                         "refs/heads/status/dupclose"], timeout=30)
+                r = run(["git", "-C", dg().REPO, "ls-remote", "origin", "refs/heads/filing/*"], timeout=30)
                 txt, rc = r.stdout, r.returncode
             except Exception:
                 txt, rc = "", 1
             if rc == 0:
                 break
             time.sleep(2)
-    _closer_sha(txt, rc, t0)
     return haltrule.verdict(txt, rc)
-
-
-def _closer_sha(txt, rc, t0):
-    """Lead 08:27: the closer's beat ref rides on the halt read (same ls-remote, no extra call); closer_reader reads it."""
-    if rc == 0:
-        m = re.search(r"^(\S+)\s+refs/heads/status/dupclose\s*$", txt or "", re.M)
-        _CS["sha"], _CS["sha_t"] = (m.group(1) if m else None), t0
 
 
 T_START = time.time()
@@ -2839,12 +2279,6 @@ def refresher():
             hprog[0] = time.time()
             REAL_SLEEP(max(0.05, REFRESH_S - (time.time() - t)))
     threading.Thread(target=halts, daemon=True).start()
-    try:
-        os.remove(os.path.join(SNAP_DIR, "closer.json"))   # an earlier drain's copy is not this drain's
-    except OSError:
-        pass
-    threading.Thread(target=closer_reader, args=(lambda: done[0] or os.getppid() != ppid,), daemon=True).start()
-    threading.Thread(target=heads_reader, args=(lambda: done[0] or os.getppid() != ppid,), daemon=True).start()
     while os.getppid() == ppid and not os.path.exists(os.path.join(SNAP_DIR, "refresh.stop")):
         t = time.time()
         try:
@@ -2859,22 +2293,5 @@ def refresher():
     done[0] = True
 
 
-def pushflush():
-    """lane pushbatch: one per drain (drain.py, PUSH_BATCH_S > 0). Sends the queued ready/ deletes when no worker is
-    waiting to carry them, within the same one-push-per-PUSH_BATCH_S budget. On pushq/flush.stop: one last flush
-    (after the interval) and exit."""
-    q = _pushq(); os.makedirs(q, exist_ok=True)
-    ppid = os.getppid()
-    log("pushflush started, batch", PUSH_BATCH_S, "s")
-    while os.getppid() == ppid and not os.path.exists(os.path.join(q, "flush.stop")):
-        push_leader(q, flusher=True)
-        time.sleep(0.5)
-    t = time.time()
-    while time.time() - t < PUSH_BATCH_S + 30 and any(f.endswith((".del", ".req")) for f in os.listdir(q)):
-        push_leader(q, flusher=True, final=not any(f.endswith(".req") for f in os.listdir(q)))
-        time.sleep(0.5)
-    log("pushflush stopped; left:", sum(1 for f in os.listdir(q) if f.endswith(".del")), "deletes")
-
-
 if __name__ == "__main__":
-    refresher() if sys.argv[1:2] == ["--refresh"] else pushflush() if sys.argv[1:2] == ["--pushflush"] else main()
+    refresher() if sys.argv[1:2] == ["--refresh"] else main()

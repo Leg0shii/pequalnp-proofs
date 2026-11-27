@@ -553,71 +553,10 @@ if hasattr(S, "sight_line"):
 else:
     case("07:31-sight-to-create-logged", False, "(no sight_line)")
 
-# ---- lane dryfinal (Lead 09:03): a dry run makes the final checks of the create (halt, rival_now(final=True) under
-# the 16.12 bound) and returns before the push and the create. Fixture: a snapshot over the bound = WOULD-REFUSE.
-if hasattr(S, "dry_final"):
-    sv = (S.run, S.filing_halted, S.stopped, S.log, S.push_branch, S.create_pr, S.gh)
-    logs, calls = [], []
-    S.log = lambda *a: logs.append(" ".join(map(str, a))); S.stopped = lambda: False
-    S.push_branch = lambda *a: calls.append("push") or None
-    S.create_pr = lambda *a: calls.append("create") or ("u", "ok")
-    def frun_df(cmd, timeout=300, env=None, cwd=None):
-        calls.append(" ".join(cmd[:3]))
-        return fake_run(cmd, timeout, env, cwd)
-    S.run = frun_df
-    os.environ.pop("PR_GATE_DIR", None)
-    try:
-        # (a) over the bound: every newest-page read takes 7 s (d > 6 s), no refresher: SNAP-SLOW = WOULD-REFUSE
-        reset_snap(); PULLS.clear(); add_pr(74001, CLK[0] - 5, "Prove L-meta-74001"); S.STG.clear()
-        S.filing_halted = lambda *a: (False, ""); REQ = []; S.gh = page_lat(7.0)
-        r, why = S.dry_final("L-meta-74999", None, "c" * 40)
-        wr = [l for l in logs if l.startswith("WOULD-REFUSE L-meta-74999") and " SKIP " in l]
-        case("dryfinal-snapshot-over-bound-WOULD-REFUSE", r == "dry-run" and why.startswith("would refuse") and wr
-             and "rival check failed" in wr[0] and not [l for l in logs if l.startswith("WOULD-CREATE")] and "final" in S.STG
-             and not [x for x in calls if x in ("push", "create") or x.startswith("gh api -i")],
-             f"({wr[0][:90] if wr else why[:90]}, final={S.STG.get('final')}, page reads {len(REQ)})")
-        # (b) fresh read: clear = WOULD-CREATE after the final check, final= timed, no push, no create
-        logs.clear(); calls.clear(); reset_snap(); REQ = []; S.gh = page_lat(0.5); S.STG.clear()
-        r, why = S.dry_final("L-meta-74999", None, "c" * 40)
-        case("dryfinal-fresh-WOULD-CREATE", r == "dry-run" and why.startswith("would push") and "final" in S.STG
-             and [l for l in logs if l.startswith("WOULD-CREATE L-meta-74999")] and not [l for l in logs if l.startswith("WOULD-REFUSE")]
-             and len(REQ) >= 1 and not [x for x in calls if x in ("push", "create")], f"(final={S.STG.get('final')}, why={why[:50]})")
-        # (c) a rival PR on the unit, seen only at the final check
-        logs.clear(); reset_snap(); add_pr(74002, CLK[0] - 1, "Prove L-meta-74999"); S.STG.clear()
-        r, why = S.dry_final("L-meta-74999", None, "c" * 40)
-        case("dryfinal-rival-WOULD-REFUSE", why.startswith("would refuse before create: rival PR open: #74002"), f"({why[:70]})")
-        # (d) halted at the final check: WOULD-REFUSE halted, also for a leased PR (no rival read then)
-        logs.clear(); REQ.clear(); S.filing_halted = lambda *a: (True, "stop/1800000000 >= go")
-        r, why = S.dry_final("L-meta-74999", "lease-z", "c" * 40)
-        case("dryfinal-halted-WOULD-REFUSE", why.startswith("would refuse before create: halted:") and not REQ, f"({why[:70]})")
-        # (e) the dry return in submit() is after the commit build and before push_branch, and goes through dry_final
-        src = open(S.__file__).read()
-        body = src[src.index("def submit(gid, lease):"):src.index("def dry_final(")]
-        case("dryfinal-dry-return-before-push", body.index("return dry_final(") < body.index("push_branch(") and
-             body.count("if DRY:") == 1 and body.index("commit-tree") < body.index("return dry_final("), "")
-    except Exception as e:
-        case("dryfinal-snapshot-over-bound-WOULD-REFUSE", False, repr(e)[:120])
-    finally:
-        S.run, S.filing_halted, S.stopped, S.log, S.push_branch, S.create_pr, S.gh = sv
-        PULLS.clear(); reset_snap()
-else:
-    case("dryfinal-snapshot-over-bound-WOULD-REFUSE", False, "(no dry_final in this submit.py)")
-
 # ---- Lead 09:10: a refused head push (429/403) is a 16.13 refusal (stall for every worker, alert), then pushed again
 if hasattr(S, "push_branch"):
-    # hermetic (infra 10:09, flaked 1 of 3 under the full parallel mintdrill): its own PR_GATE_DIR and RIVAL_SNAP_DIR
-    # (no halt.json, refresher heartbeat or pushfirst/stall file of another case), no halt read (R3 reads
-    # filing_halted() before every push; leftover refresher threads of the 16.14 cases may still write the shared
-    # copy), and its own fake clock (no other case's CLK, no real sleep).
     PD = tempfile.mkdtemp(); svd = os.environ.get("PR_GATE_DIR"); os.environ["PR_GATE_DIR"] = PD
-    PRD = tempfile.mkdtemp(); svrd = os.environ.get("RIVAL_SNAP_DIR"); os.environ["RIVAL_SNAP_DIR"] = PRD
     sv = (S.run, S.git, getattr(S, "upbase_ref", None))
-    svh, svclk = getattr(S, "filing_halted", None), (S.time.time, S.time.sleep)
-    if svh:
-        S.filing_halted = lambda *a, **k: (False, "")
-    PCLK = [1_900_000_000.0]
-    S.time.time = lambda: PCLK[0]
-    S.time.sleep = lambda x: PCLK.__setitem__(0, PCLK[0] + max(x, 0.0))
     calls = []
     def prun(a, **k):
         if "push" in a:
@@ -628,25 +567,20 @@ if hasattr(S, "push_branch"):
     S.run = prun; S.git = lambda *a, **k: subprocess.CompletedProcess(a, 0, "abc\n", "")
     if sv[2]:
         S.upbase_ref = lambda b: "upbase/x"
-    t0c = PCLK[0]
+    t0c = CLK[0]
     e = S.push_branch("c" * 40, "L-meta-1")
-    waited = PCLK[0] - t0c
     # Lead 09:22 R1: a push refusal has its own counter (pushrefusals) and never counts toward the create giveup
     k = int(open(os.path.join(PD, "pushrefusals")).read()) if os.path.exists(os.path.join(PD, "pushrefusals")) else 0
     k = k if not os.path.exists(os.path.join(PD, "refusals")) else -1
-    S.time.time, S.time.sleep = svclk
-    case("09:10-push-429-is-a-refusal", e is None and len(calls) == 2 and k == 1 and 59 <= waited <= 70,
-         f"(err {e}, pushes {len(calls)}, refusals {k}, waited {waited:.0f} s)")
+    case("09:10-push-429-is-a-refusal", e is None and len(calls) == 2 and k == 1 and CLK[0] - t0c >= 59,
+         f"(err {e}, pushes {len(calls)}, refusals {k}, waited {CLK[0] - t0c:.0f} s)")
     S.run, S.git = sv[0], sv[1]
     if sv[2]:
         S.upbase_ref = sv[2]
-    if svh:
-        S.filing_halted = svh
-    for var, old in (("PR_GATE_DIR", svd), ("RIVAL_SNAP_DIR", svrd)):
-        if old is None:
-            os.environ.pop(var, None)
-        else:
-            os.environ[var] = old
+    if svd is None:
+        os.environ.pop("PR_GATE_DIR", None)
+    else:
+        os.environ["PR_GATE_DIR"] = svd
 else:
     case("09:10-push-429-is-a-refusal", False, "(no push_branch)")
 
