@@ -1303,6 +1303,64 @@ class pr_gate:
             self.f.close()
 
 
+class Guard:
+    """lane guards (W6, Lead 08:40, RC-c): checkcore.sh runs in a thread while the race check, the commit build and
+    the branch push go on. The rule is unchanged: no create (and no WOULD-CREATE) before every guard has passed; a
+    guard that fails after the push deletes the just-pushed head branch, and only when no PR of ours is on it
+    (16.5 / 16.8). The thread uses run() like the inline call did."""
+    def __init__(self, cmd, env):
+        self.cmd, self.env, self.r, self.t0, self.t1 = cmd, env, None, time.time(), None
+        self.th = threading.Thread(target=self._go, daemon=True)
+        self.th.start()
+
+    def _go(self):
+        try:
+            self.r = run(self.cmd, env=self.env, timeout=600)
+        except Exception as e:                       # a crash of the guard run is a failed guard (fail closed)
+            self.r = subprocess.CompletedProcess(self.cmd, 1, "", f"guard run crashed: {e!r}"[:200])
+        self.t1 = time.time()
+
+    def done(self):
+        return self.r is not None
+
+    def wait(self):
+        """'' when every guard passed, else the reason (the last line of the guard output)"""
+        t = time.time()
+        self.th.join()
+        STG["guard_wait"] = round(time.time() - t, 3)
+        if not getattr(self, "_shown", False):
+            self._shown = True
+            STG["checkcore"] = round(self.t1 - self.t0, 3)
+            print(self.r.stdout[-3000:], self.r.stderr[-2000:], sep="\n", flush=True)
+            git("clean", "-q", "-f", "--", "lean/PEqualNP/Outside/")      # the closure guard copied the file in
+        if self.r.returncode:
+            return "guards: " + ((self.r.stdout + self.r.stderr).strip().splitlines() or ["?"])[-1][:200]
+        return ""
+
+
+GUARD = [None]
+
+
+def guards_failed():
+    """'' when the background guard (if any) passed; waits for it"""
+    return GUARD[0].wait() if GUARD[0] is not None else ""
+
+
+def drop_pushed_branch(gid):
+    """a guard failed after our push: delete Leg0shii:<gid>, only if no PR of ours (open or closed) is on it"""
+    try:
+        if our_prs_on_branch(gid, "open") or our_prs_on_branch(gid, "closed"):
+            log("guards failed after the push; a PR is on", gid, "so the branch is kept (16.5)")
+            return
+    except RuntimeError as e:
+        log("guards failed after the push; PR lookup failed, branch kept:", str(e)[:100])
+        return
+    r = run(["git"] + auth_cfg() + ["-C", TREE, "push", "-q", f"https://github.com/{FORK}.git", "--delete",
+                                    f"refs/heads/{gid}"], timeout=120)
+    log("guards failed after the push: head branch", gid, "deleted" if r.returncode == 0 else
+        "NOT deleted: " + r.stderr.strip()[:120])
+
+
 def submit(gid, lease):
     # Lead 06:12 (W6 mintfail): the head branch Leg0shii:<ID> is created once with a create-only push and never
     # forced. If it exists: our open PR on it = done; our closed PR on it = stop (nothing reopens, I5); neither = the
@@ -1318,6 +1376,9 @@ def submit(gid, lease):
             if our_prs_on_branch(gid, "closed"):
                 return None, "our PR on this branch was closed: no reopen (I5)"
             log("branch", gid, "exists at", head[:12], "with no PR: opening the PR from it (no push)")
+            gw = guards_failed()                     # lane guards: no create before every guard passed
+            if gw:
+                return None, gw
             return create_pr(gid, lease)
     except RuntimeError as e:
         return None, "head check failed (fail closed): " + str(e)[:120]
@@ -1369,7 +1430,11 @@ def submit(gid, lease):
     # drain.py cuts each unit line at 200 chars, so the long TIMES line loses these: one short line of its own
     log("COMMIT-STAGES", gid, " ".join(f"{k}={STG[k]}" for k in ("commit", "tree", "tree_src", "head", "halt2", "g_revparse",
                                                                "g_catfile", "g_hashobj", "g_difftree", "g_committree") if k in STG))
+    STG["to_push"] = round(time.time() - T_GUARDS[0], 3)   # lane guards: guards start -> the push (would push, DRY)
     if DRY:
+        gw = guards_failed()                     # lane guards: the WOULD-CREATE point waits for the guards too
+        if gw:
+            return None, gw
         tw = time.time()                 # rehearsal (Lead 08:12): the would-create time per unit, epoch to 0.001 s
         log(f"WOULD-CREATE {gid} {tw:.3f}"); log(sight_line(gid, tw))
         return "dry-run", f"would push {c[:12]} as {FORK}:{gid} and open the PR"
@@ -1378,6 +1443,10 @@ def submit(gid, lease):
     STG["push"] = round(time.time() - t, 1)
     if err:
         return None, "push: " + err
+    gw = guards_failed()                         # lane guards: never a create before every guard passed
+    if gw:
+        drop_pushed_branch(gid)
+        return None, gw
     log("pushed", c[:12], "to", f"{FORK}:{gid}")
     return create_pr(gid, lease)
 
@@ -1613,8 +1682,12 @@ def _filing_halted_read():
 T_START = time.time()
 
 
+T_GUARDS = [time.time()]
+
+
 def main():
     t0 = time.time()
+    T_GUARDS[0] = t0
     h, hwhy = filing_halted()             # Lead 05:10: before anything else (no guards, no desk, no PR); branch kept
     STG["halt1"] = round(time.time() - t0, 3)              # lane tree: guards split (halt1, prlookup, gaps, checkcore)
     if h:
@@ -1628,12 +1701,49 @@ def main():
         finish("formatfail", f"file is {os.path.getsize(PROOF)} bytes, over the CI limit {SIZE_LIMIT}")
     if not DRY and not PR_TOKEN:
         finish("skipped", "no PR_TOKEN secret: the PC watcher takes this file from pnp-toolkit ready/ instead")
-    t_pl = time.time()
+    # lane guards: the PR lookup (taken list fetch + fork head) runs in a thread beside the gaps read and the guards;
+    # its answer is taken before the race check, exactly where it acted before
+    PL = {}
+
+    def _pl():
+        t_pl = time.time()
+        try:
+            PL["url"] = open_pr_for_branch(ID)
+        except Exception as e:
+            PL["err"] = e
+        STG["prlookup"] = round(time.time() - t_pl, 3)
+    pl_th = threading.Thread(target=_pl, daemon=True)
+    pl_th.start()
+    # 1. guards (= formatscan on the PC)
+    env = dict(os.environ, NODE=subprocess.run(["sh", "-c", "command -v node"], capture_output=True, text=True).stdout.strip())
+    if MOD != ID.replace("-", "_"):
+        env["REL_OVERRIDE"] = REL
+    # 12:19 UTC 26 Nov (L-meta-19447): a file for a proposed, not yet listed step failed the gap guard as formatfail and
+    # its ready/ branch was deleted, so the ready-wait path never ran. Unlisted: guards in prestage mode (no gap guard,
+    # the file's own imports), then keep the branch; ready-wait.yml dispatches this job again at listing.
+    unlisted, hn = False, 0
+    t_gj = time.time()
     try:
-        url = open_pr_for_branch(ID)
+        gj0 = gaps_json()
+        env["GAPS_FILE"] = os.path.join(os.environ.get("RIVAL_SNAP_DIR") or os.environ.get("PR_GATE_DIR") or W, "gaps.json")
+        unlisted = not any(x.get("id") == ID for x in gj0.get("gaps") or []) and ID not in (gj0.get("withdrawn") or {}) \
+            and not any((x.get("id") if isinstance(x, dict) else x) == ID for x in gj0.get("checked") or [])
+        # Lead 14:22 SAFETY: no new PR on a step another agent holds (holders_now above 0) unless we hold its lease
+        hn = next((x.get("holders_now") or 0 for x in gj0.get("gaps") or [] if x.get("id") == ID), 0)
     except Exception as e:
-        finish("error", f"PR lookup failed: {e}")
-    STG["prlookup"] = round(time.time() - t_pl, 3)
+        log("gaps.json read failed, full guards:", repr(e)[:120])
+    STG["gaps"] = round(time.time() - t_gj, 3)
+    if unlisted:
+        imps = re.findall(r"^import\s+(\S+)", open(PROOF, errors="replace").read(), re.M) or ["PEqualNP.Defs"]
+        env["PRESTAGE_IMPORTS"] = json.dumps(imps)
+        log("not listed yet: prestage guards (imports", imps, ")")
+    STG["start"] = round(t0 - T_START, 1)      # opener start -> guards start (halt check, gaps read, setup)
+    GUARD[0] = Guard(["bash", os.path.join(os.path.dirname(os.path.abspath(__file__)), "checkcore.sh"), PROOF, ID, TREE,
+                      os.path.join(W, "guard"), "--quick"], env)
+    pl_th.join()
+    if "err" in PL:
+        finish("error", f"PR lookup failed: {PL['err']}")
+    url = PL.get("url")
     if url and DRY:
         log("dry run: our PR is already open, testing the rest anyway:", url)
     elif url:
@@ -1646,49 +1756,21 @@ def main():
             release(old, "submitted")
         finish("exists", "our PR for this branch is already open (PC watcher or an earlier run)"
                + (f"; lease {old} released" if old else ""), url)
-    # 1. guards (= formatscan on the PC)
-    env = dict(os.environ, NODE=subprocess.run(["sh", "-c", "command -v node"], capture_output=True, text=True).stdout.strip())
-    if MOD != ID.replace("-", "_"):
-        env["REL_OVERRIDE"] = REL
-    # 12:19 UTC 26 Nov (L-meta-19447): a file for a proposed, not yet listed step failed the gap guard as formatfail and
-    # its ready/ branch was deleted, so the ready-wait path never ran. Unlisted: guards in prestage mode (no gap guard,
-    # the file's own imports), then keep the branch; ready-wait.yml dispatches this job again at listing.
-    unlisted = False
-    t_gj = time.time()
-    try:
-        gj0 = gaps_json()
-        env["GAPS_FILE"] = os.path.join(os.environ.get("RIVAL_SNAP_DIR") or os.environ.get("PR_GATE_DIR") or W, "gaps.json")
-        unlisted = not any(x.get("id") == ID for x in gj0.get("gaps") or []) and ID not in (gj0.get("withdrawn") or {}) \
-            and not any((x.get("id") if isinstance(x, dict) else x) == ID for x in gj0.get("checked") or [])
-        # Lead 14:22 SAFETY: no new PR on a step another agent holds (holders_now above 0) unless we hold its lease
-        hn = next((x.get("holders_now") or 0 for x in gj0.get("gaps") or [] if x.get("id") == ID), 0)
-        if hn > 0 and os.environ.get("HELD_SKIP", "1") == "1":
-            old = None
-            try:
-                old = dg().lease_of(ID) if PR_TOKEN else None
-            except Exception:
-                pass
-            if not old:
-                finish("unleased" if LEASE_FIRST else "race",
-                       f"held by {hn} other agent(s) at the desk and no lease of ours: no new PR (Lead 14:22)")
-    except Exception as e:
-        log("gaps.json read failed, full guards:", repr(e)[:120])
-    STG["gaps"] = round(time.time() - t_gj, 3)
-    if unlisted:
-        imps = re.findall(r"^import\s+(\S+)", open(PROOF, errors="replace").read(), re.M) or ["PEqualNP.Defs"]
-        env["PRESTAGE_IMPORTS"] = json.dumps(imps)
-        log("not listed yet: prestage guards (imports", imps, ")")
-    t_cc = time.time()
-    r = run(["bash", os.path.join(os.path.dirname(os.path.abspath(__file__)), "checkcore.sh"), PROOF, ID, TREE,
-             os.path.join(W, "guard"), "--quick"], env=env, timeout=600)
-    STG["checkcore"] = round(time.time() - t_cc, 3)
-    print(r.stdout[-3000:], r.stderr[-2000:], sep="\n", flush=True)
-    git("clean", "-q", "-f", "--", "lean/PEqualNP/Outside/")          # the closure guard copied the file in
-    if r.returncode:
-        finish("formatfail", "guards: " + ((r.stdout + r.stderr).strip().splitlines() or ["?"])[-1][:200])
-    log(f"guards passed ({time.time() - t0:.0f}s)")
-    STG["guards"] = round(time.time() - t0, 1)
-    STG["start"] = round(t0 - T_START, 1)      # opener start -> guards start (halt check, gaps read, setup)
+    if hn > 0 and os.environ.get("HELD_SKIP", "1") == "1":     # (order as before: after the PR lookup)
+        old = None
+        try:
+            old = dg().lease_of(ID) if PR_TOKEN else None
+        except Exception:
+            pass
+        if not old:
+            finish("unleased" if LEASE_FIRST else "race",
+                   f"held by {hn} other agent(s) at the desk and no lease of ours: no new PR (Lead 14:22)")
+    if unlisted or os.environ.get("GUARDS_INLINE") == "1":      # prestage: nothing follows the guards; or asked inline
+        gw = guards_failed()
+        if gw:
+            finish("formatfail", gw)
+        log(f"guards passed ({time.time() - t0:.0f}s)")
+        STG["guards"] = round(time.time() - t0, 1)
     if unlisted:
         finish("waiting", "not posted: prestage guards passed, branch kept for ready-wait")
     # GATEWAY v1 section 4: a pause never stops filing (the gate answers closed and the unleased branch decides)
@@ -1719,6 +1801,11 @@ def main():
         lease = None
     LEASE[0] = lease
     t_h2 = time.time()
+    if GUARD[0] is not None and GUARD[0].done():  # lane guards: a guard that already failed stops the unit before any push
+        gw = guards_failed()
+        if gw:
+            free_slot()
+            finish("formatfail", gw)
     h, hwhy = filing_halted()             # Lead 05:10: again right before the PR (a stop may have come meanwhile)
     STG["halt2"] = round(time.time() - t_h2, 3)
     if h and not DRY:
@@ -1744,7 +1831,11 @@ def main():
     elif LEASE[0]:     # D: failed PR create: keep the lease (recorded on claim/<id>; the retry or PC reuses it, expires 45 min)
         log("PR not opened: lease", LEASE[0], "kept for the retry")
     free_slot()
+    if not url and why2.startswith("guards: "):   # lane guards: failed after the race (branch dropped if pushed)
+        finish("formatfail", why2)
     if url == "dry-run":
+        if GUARD[0] is not None:
+            STG["guards"] = round(GUARD[0].t1 - t0, 1)
         finish("dry", why2)
     if not url and (why2 == "file already in upstream main" or why2.startswith("rival PR open")):
         finish("race", why2)
