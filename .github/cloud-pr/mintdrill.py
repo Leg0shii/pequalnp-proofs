@@ -872,6 +872,17 @@ def main():
         print("ok  " if ok else "FAIL", name, why)
         if not ok:
             fails.append(name)
+    for tool, args in (("haltrule.py", []), ("lift.py", ["selftest"])):     # 16.1 / 16.8 S3: pure rule + lift tool
+        tp = os.path.join(src, ".github", "cloud-pr", tool)
+        if os.path.exists(tp):
+            rr = subprocess.run([sys.executable, tp] + args, capture_output=True, text=True, timeout=300)
+            last = (rr.stdout.strip().splitlines() or ["no output"])[-1]
+            print(("ok   " if rr.returncode == 0 else "FAIL ") + f"selftest/{tool} {last}")
+            if rr.returncode:
+                fails.append(f"selftest/{tool}")
+        else:
+            print(f"FAIL selftest/{tool} missing")
+            fails.append(f"selftest/{tool}")
     print(f"recorded/F3 {ok_f3}/{n_f3} provable units of the 21:52-21:53 mint filed")
     print("SKIP hostile/X11 mirror export order (team/mirror/mirror.py) and gate stop refs: gate v1.2.1 (T11), not fork code")
     f3 = [f for f in fails if f.startswith("recorded/F3-")]
