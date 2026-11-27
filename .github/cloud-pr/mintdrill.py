@@ -84,14 +84,18 @@ def child_submit(src, w):
         return gaps_now()
     S.curl_json = curl_json
 
-    pulls_open = sorted(w.get("open_pulls", []), key=lambda p: -p["number"])
-    pulls_closed = sorted(w.get("closed_pulls", []), key=lambda p: -p["number"])
+    now_c = T0 + w.get("t", 0)
+    vis = lambda p: time.mktime(time.strptime(p["created_at"][:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone <= now_c
+    pulls_open = sorted([p for p in w.get("open_pulls", []) if vis(p)], key=lambda p: -p["number"])
+    pulls_closed = sorted([p for p in w.get("closed_pulls", []) if vis(p)], key=lambda p: -p["number"])
+    out["reads"] = 0
 
     def cp(stdout="", rc=0, err=""):
         return subprocess.CompletedProcess([], rc, stdout, err)
 
     def gh(args, write=False, timeout=120):
         a = list(args)
+        out["reads"] += 1
         if a[0] == "api" and "/pulls?" in a[1]:
             q = dict(x.split("=", 1) for x in a[1].split("?", 1)[1].split("&"))
             if "head" in q:                          # open_pr_for_branch: our own open PR on fork branch <gid>
@@ -103,6 +107,8 @@ def child_submit(src, w):
             return cp(json.dumps(src_l[(pg - 1) * pp:pg * pp]))
         m = re.search(r"/pulls/(\d+)/files", a[1]) if a[0] == "api" else None
         if m:
+            if int(m.group(1)) in (w.get("files_fail") or []):
+                return cp("", 1, "HTTP 403: secondary rate limit")
             p = next((x for x in pulls_open + pulls_closed if x["number"] == int(m.group(1))), {})
             return cp(json.dumps([{"filename": f} for f in p.get("files") or []]))
         if a[:2] == ["pr", "list"]:
@@ -171,7 +177,24 @@ def child_submit(src, w):
 
     tl = w.get("taken", {})
     if "taken_text" not in w:
-        S._taken_list = lambda: (None if tl is None else dict(tl))
+        def fake_taken():
+            if tl is None:
+                return None
+            hdr = int(now_c) - 20
+            S.TL_HDR[0] = hdr
+            rows = {}
+            for p in sorted(pulls_open + pulls_closed, key=lambda p: -p["number"]):
+                if time.mktime(time.strptime(p["created_at"][:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone >= hdr:
+                    continue
+                us = set(S.UNIT_TOKEN.findall(p.get("title") or "")) | \
+                    set(S.UNIT_TOKEN.findall((p.get("head") or {}).get("ref", "").replace("_", "-")))
+                if not p.get("closed_at"):
+                    us |= {u for u in map(S.file_unit, p.get("files") or []) if u}
+                for u in us:
+                    rows[u] = p["user"]["login"]
+            rows.update(tl)
+            return rows
+        S._taken_list = fake_taken
     S._TL.clear()
 
     class DG:
@@ -190,7 +213,8 @@ def child_submit(src, w):
     S.pr_gate = contextlib.nullcontext
     S.release = lambda lid, why: out["desk"].append("release " + str(lid)) if lid else None
     S.time.sleep = lambda s: None
-    S.time.time = lambda: T0                # the fixtures' clock (created_at of the pulls is relative to T0)
+    NOW = T0 + w.get("t", 0)
+    S.time.time = lambda: NOW               # the fixtures' clock (created_at of the pulls is relative to T0)
 
     def gate_open_now():
         gj = S.LAST_GJ[0] or {}
@@ -314,6 +338,9 @@ def spawn(kind, src, w):
     for k in ("PNP_LINKEDIN", "CLAIM_FIRST", "FILE_FIRST"):
         env.pop(k, None)
     env.update(w.get("env") or {})
+    if w.get("snap"):                                # one drain: every worker shares the rival snapshot directory
+        os.makedirs(w["snap"], exist_ok=True)
+        env["RIVAL_SNAP_DIR"] = w["snap"]
     r = subprocess.run([sys.executable, os.path.abspath(__file__), "--child"], input=json.dumps(w), capture_output=True,
                        text=True, env=env, timeout=120, cwd=d)
     m = re.search(r"^MDRESULT (.*)$", r.stdout, re.M)
@@ -427,14 +454,38 @@ def rival_pr(n, title, created=-100, merged=None, closed=None, login="rival1", f
             "closed_at": iso(T0 + (closed if closed is not None else merged)) if (closed is not None or merged is not None) else None}
 
 
+def upstream_world(t_end, new_every=30, base=60000):
+    """81 open PRs as upstream at 05:40 27 Nov (41 with no unit id in title or branch, files of other units), all older
+    than the mint, plus one new no-id rival PR every new_every s during the mint (they need file reads)."""
+    ws = [rival_pr(base + i, "Prove L-meta-%d" % (70000 + i), created=-7200 + i, login="r%d" % (i % 7),
+                   files=["lean/PEqualNP/Outside/L_meta_%d.lean" % (70000 + i)]) for i in range(40)]
+    ws += [rival_pr(base + 40 + i, "Batch %d of circuit proofs" % i, created=-7000 + i, login="b%d" % (i % 5),
+                    files=["lean/PEqualNP/Outside/L_meta_%d.lean" % (71000 + i)]) for i in range(41)]
+    ws += [rival_pr(base + 200 + j, "more proofs %d" % j, created=j * new_every, login="late%d" % j,
+                    files=["lean/PEqualNP/Outside/L_meta_%d.lean" % (72000 + j)]) for j in range(int(t_end // new_every) + 1)]
+    return ws
+
+
+SNAPS = tempfile.mkdtemp(prefix="mintdrill-snap-")
+
+
 def cases():
     rec = json.load(open(os.path.join(DATA, "recorded.json")))
     out = []
     # F3: the held mint. Every provable unit free at first sight must get our PR, no claim.
-    for u in [x for x in rec["f3_units"] if x["meet"]]:
+    # A19: the upstream world of 05:40 (81 open PRs, 41 without an id) and one drain: units 3 s apart, one snapshot dir
+    f3u = [x for x in rec["f3_units"] if x["meet"]]
+    wf3 = upstream_world(3 * len(f3u))
+    for i, u in enumerate(f3u):
         w = {"gid": u["id"], "gaps": [unit(u["id"], u["template"])], "taken": {"L-meta-1": "someone"}, "gate_open": True,
-             "gate_answers": {"*": rec["f3_gate_answer"]}}
+             "gate_answers": {"*": rec["f3_gate_answer"]}, "open_pulls": wf3, "t": 3 * i, "snap": SNAPS + "/f3"}
         out.append(("recorded/F3-" + u["id"], "submit", w, "PR"))
+    # A19 budget: a 400-unit mint drained at 20 units a minute against the same world; every unit free
+    w400 = upstream_world(3 * 400, base=80000)
+    for i in range(400):
+        g = "L-meta-%d" % (93000 + i)
+        out.append(("budget/M400-" + g, "submit", {"gid": g, "gaps": [unit(g)], "taken": {"L-meta-1": "someone"},
+                                                    "open_pulls": w400, "t": 3 * i, "snap": SNAPS + "/m400"}, "PR"))
     # F4: yifgu's later merged "Prove L-meta-N" settles our 12 leased PRs: all closed in the first pass
     ours = [our_pr(n, g, lease=l, created=-12000) for n, g, l in rec["f4_ours"]]
     riv = [rival_pr(40000 + i, rec["f4_title"].format(gid=g), created=-9000, merged=-8000, login=rec["f4_rival"])
@@ -500,6 +551,15 @@ def cases():
     for g in hx["X10"]["gaps"]:
         out.append(("hostile/X10-" + g["id"], "submit", {"gid": g["id"], "gaps": [unit_rec(g)], "taken": {"L-meta-1": "someone"},
                                                         "gate_answers": {"*": "held"}}, "PR"))
+    # X12: a batch PR titled with ANOTHER unit carries our unit's file; recent (opener reads files) and old (publisher)
+    for k, cr in (("X12-recent", -10), ("X12-old", -600)):
+        out.append(("hostile/" + k, "submit", {"gid": "L-meta-90101", "gaps": [unit("L-meta-90101")], "taken": {"L-meta-1": "someone"},
+                    "open_pulls": [rival_pr(50101, "Prove L-meta-90102", created=cr, files=["lean/PEqualNP/Outside/L_meta_90101.lean",
+                                                                                             "lean/PEqualNP/Outside/L_meta_90102.lean"])]}, "no PR"))
+    # X13: the files read of a recent no-id PR fails (403 secondary limit): no PR
+    out.append(("hostile/X13", "submit", {"gid": "L-meta-90103", "gaps": [unit("L-meta-90103")], "taken": {"L-meta-1": "someone"},
+                "open_pulls": [rival_pr(50103, "Batch of proofs", created=-10, files=["lean/PEqualNP/Outside/L_meta_90103.lean"])],
+                "files_fail": [50103]}, "no PR"))
     # A20: the real taken-list parser. Header count differs from the rows (truncated) = no PR; "steps 0" fresh = files
     out.append(("hostile/A20-truncated", "submit", {"gid": "L-meta-92001", "gaps": [unit("L-meta-92001")],
                                                     "taken_text": "# updated {T} 05:00:00 steps 3\nL-meta-5 1 someone 04:00:00\n"}, "no PR"))
@@ -523,6 +583,9 @@ def cases():
     return out, hx
 
 
+BUD = {}
+
+
 def main():
     if sys.argv[1:2] == ["--child"]:
         w = json.loads(sys.stdin.read())
@@ -541,6 +604,16 @@ def main():
             ok, why = judge_submit(name, w, r, exp)
         else:
             ok, why = judge_close(name, w, r, **exp)
+        rd = r.get("reads", 0) if isinstance(r, dict) else 0
+        grp = "F3" if name.startswith("recorded/F3-") else "M400" if name.startswith("budget/M400-") else None
+        if grp:
+            BUD.setdefault(grp, []).append(rd)
+        if name.startswith("budget/M400-"):
+            if not ok:
+                fails.append(name)
+                if len([f for f in fails if f.startswith("budget/")]) <= 3:
+                    print("FAIL", name, why)
+            continue
         if name.startswith("recorded/F3-"):
             n_f3 += 1; ok_f3 += ok
             if not ok and len([f for f in fails if f.startswith("recorded/F3-")]) < 3:
@@ -548,13 +621,25 @@ def main():
             if not ok:
                 fails.append(name)
             continue
-        print("ok  " if ok else "FAIL", name, why)
+        print("ok  " if ok else "FAIL", name, why, f"reads={rd}")
         if not ok:
             fails.append(name)
     print(f"recorded/F3 {ok_f3}/{n_f3} provable units of the 21:52-21:53 mint filed")
+    for grp, lim_avg, lim_tot in (("F3", 2.0, None), ("M400", 2.0, 800)):
+        v = BUD.get(grp) or [0]
+        tot, avg = sum(v), sum(v) / len(v)
+        okb = avg <= lim_avg and (lim_tot is None or tot < lim_tot)
+        print(("ok  " if okb else "FAIL"), f"budget/{grp} GitHub reads total {tot} over {len(v)} units, avg {avg:.2f}/unit, "
+              f"max {max(v)} (limit avg {lim_avg}" + (f", total < {lim_tot})" if lim_tot else ")"))
+        if not okb:
+            fails.append(f"budget/{grp}")
+    m4 = [f for f in fails if f.startswith("budget/M400-")]
+    if m4:
+        print(f"FAIL budget/M400 {len(m4)} of 400 units not filed")
     print("SKIP hostile/X11 mirror export order (team/mirror/mirror.py) and gate stop refs: gate v1.2.1 (T11), not fork code")
     f3 = [f for f in fails if f.startswith("recorded/F3-")]
-    short = [f for f in fails if not f.startswith("recorded/F3-")] + ([f"recorded/F3 ({len(f3)} of {n_f3})"] if f3 else [])
+    short = [f for f in fails if not f.startswith(("recorded/F3-", "budget/M400-"))] + \
+        ([f"recorded/F3 ({len(f3)} of {n_f3})"] if f3 else []) + ([f"budget/M400 ({len(m4)} of 400)"] if m4 else [])
     print(f"{time.time() - t:.0f}s")
     if fails:
         print(f"PREFLIGHT FAIL {sha}: " + ", ".join(short))

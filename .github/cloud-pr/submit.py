@@ -238,6 +238,7 @@ TAKEN_REF = "refs/heads/status/taken"
 
 
 _TL = []
+TL_HDR = [None]          # header epoch of the last taken list read: every PR created before it is in the list (A19)
 
 
 def taken_list():
@@ -271,6 +272,7 @@ def _taken_list():
         log(f"taken list: header says {m.group(1) if m else 'no count'}, {len(rows)} rows (truncated, fail closed)")
         return None
     log(f"taken list: fresh, steps {len(rows)}, {age:.0f} s old")
+    TL_HDR[0] = int(t[0].split()[2])
     return rows
 
 
@@ -284,6 +286,8 @@ def race_check(step_id):
         return []
     if tl is not None and tl.get(step_id) == HANDLE:
         return [{"number": "?", "state": "OPEN", "ours": True, "why": "our PR on the taken list"}]
+    if tl is not None and step_id in tl:      # A19: another author's PR on the list is a rival; no search, no file reads
+        return [{"number": "?", "state": "OPEN", "ours": False, "why": f"taken list: first PR by {tl[step_id]}"}]
     n = step_id.split("-")[-1]
     mod = step_id.replace("-", "_")
     out = gh(["pr", "list", "--repo", UP, "--state", "all", "--search", n, "--limit", "200",
@@ -521,51 +525,112 @@ _FILES = {}
 
 
 def pr_files(n):
-    """changed file paths of an upstream PR (cached per run)"""
+    """changed file paths of an upstream PR (all pages). Raises on any read error: a failed read is never "no files"
+    (red team X13)."""
     if n not in _FILES:
-        _FILES[n] = [f.get("filename") for f in json.loads(gh(["api", f"repos/{UP}/pulls/{n}/files?per_page=100"]).stdout or "[]")]
+        fs, pg = [], 1
+        while True:
+            r = gh(["api", f"repos/{UP}/pulls/{n}/files?per_page=100&page={pg}"])
+            if r.returncode:
+                raise RuntimeError(f"files of #{n}: rc={r.returncode} {r.stderr.strip()[:80]}")
+            got = json.loads(r.stdout)
+            if not isinstance(got, list):
+                raise RuntimeError(f"files of #{n}: not a list")
+            fs += [f.get("filename") for f in got]
+            if len(got) < 100 or pg >= 30:
+                break
+            pg += 1
+        _FILES[n] = fs
     return _FILES[n]
 
 
+SNAP_MAX_AGE_S = 5       # A19: one snapshot shared by every drain worker (and the second check before the PR)
+SNAP_DIR = os.environ.get("RIVAL_SNAP_DIR") or os.environ.get("PR_GATE_DIR") or W
+FILE_UNIT_RX = re.compile(r"lean/PEqualNP/Outside/(L_[a-z0-9]+(?:_[a-z0-9]+)*_\d+|V_[a-z0-9]+(?:_[a-z0-9]+)*_\d+__k\d+)\.lean")
+
+
+def file_unit(f):
+    m = FILE_UNIT_RX.fullmatch(f or "")
+    if not m:
+        return None
+    u = m.group(1)
+    return ("L_" + u[2:].split("__k")[0] if u.startswith("V_") else u).replace("_", "-")
+
+
+def _build_snapshot(files):
+    """taken list (fresh fetch) + every open PR created after its header minus 30 s, with its units by title, branch
+    and changed files. Older PRs are in the taken list (takenpub.py maps every open PR by file path). Raises on any
+    failed read (fail closed)."""
+    _TL.clear()
+    tl = taken_list()
+    if tl is None:
+        raise RuntimeError("taken list missing, older than 180 s or truncated (fail closed)")
+    cut = TL_HDR[0] - 30
+    recent = []
+    for k in range(1, RIVAL_MAX_PAGES + 1):
+        r = gh(["api", f"repos/{UP}/pulls?state=open&sort=created&direction=desc&per_page=100&page={k}"])
+        if r.returncode:
+            raise RuntimeError(f"open pulls page {k}: rc={r.returncode}")
+        pulls = json.loads(r.stdout)
+        old = False
+        for p in pulls:
+            c = time.mktime(time.strptime(p["created_at"][:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone
+            if c < cut:
+                old = True
+                continue
+            who = (p.get("user") or {}).get("login") or "?"
+            if who == HANDLE:
+                continue
+            us = set(UNIT_TOKEN.findall(p.get("title") or "")) | \
+                set(UNIT_TOKEN.findall(((p.get("head") or {}).get("ref") or "").replace("_", "-")))
+            key = f"{p['number']}:{(p.get('head') or {}).get('sha') or ''}"
+            if key not in files:
+                files[key] = sorted({u for u in map(file_unit, pr_files(p["number"])) if u})
+            recent.append({"n": p["number"], "who": who, "units": sorted(us | set(files[key])),
+                           "by_file": sorted(set(files[key]) - us)})
+        if old or len(pulls) < 100:
+            return {"t": time.time(), "hdr": TL_HDR[0], "taken": tl, "recent": recent, "files": files}
+    raise RuntimeError(f"more than {RIVAL_MAX_PAGES} pages of open PRs since the taken list (fail closed)")
+
+
+def rival_snapshot():
+    """the shared snapshot, at most SNAP_MAX_AGE_S old (flock in SNAP_DIR; one builder at a time)"""
+    os.makedirs(SNAP_DIR, exist_ok=True)
+    f = os.path.join(SNAP_DIR, "rival_snap.json")
+    with open(os.path.join(SNAP_DIR, "rival_snap.lock"), "w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        old = {}
+        try:
+            old = json.load(open(f))
+            if 0 <= time.time() - old["t"] <= SNAP_MAX_AGE_S:
+                return old
+        except Exception:
+            pass
+        snap = _build_snapshot(dict(old.get("files") or {}))
+        with open(f + ".tmp", "w") as o:
+            json.dump(snap, o)
+        os.replace(f + ".tmp", f)
+        log(f"rival snapshot: taken {len(snap['taken'])} rows (header {time.time() - snap['hdr']:.0f} s old), "
+            f"{len(snap['recent'])} open PRs since, file cache {len(snap['files'])}")
+        return snap
+
+
 def rival_now(gid):
-    """Another author's open PR on the unit, right before we decide and again right before gh pr create.
-    Mintdrill gaps (red team 27 Nov): A1 a title or branch that names NO unit id is checked by its changed file path
-    (lean/PEqualNP/Outside/<unit>.lean); A2 every open PR newer than RIVAL_WINDOW_S is read (all pages, not the newest
-    100; older ones are on the taken list); A3/A4 a missing, stale or empty taken list = rival (fail closed).
-    Any error = rival (no PR). RIVAL_FIXTURE: the pulls JSON (tests)."""
-    tl = None if os.environ.get("RIVAL_FIXTURE") else taken_list()
-    if not os.environ.get("RIVAL_FIXTURE"):
-        if tl is None:
-            return "taken list missing, older than 180 s or truncated (fail closed)"
-        if tl.get(gid) not in (None, HANDLE):
-            return f"taken list: first PR by {tl.get(gid)}"
-    rel = f"lean/PEqualNP/Outside/{gid.replace('-', '_')}.lean"
-    pat = re.compile(r"(?<![A-Za-z0-9])(%s|%s)(?![0-9])" % (re.escape(gid), re.escape(gid.replace("-", "_"))))
+    """Another author's PR on the unit, right before we decide and again right before gh pr create (A19 design, Lead
+    05:40): the taken list is the authority for every PR created before its header (REST publisher, units by title,
+    branch AND changed files of every open PR); open PRs created after the header minus 30 s are read here, with their
+    file paths, once per snapshot shared by all drain workers. Any failed read = rival (no PR)."""
     try:
-        for k in range(1, RIVAL_MAX_PAGES + 1):
-            if os.environ.get("RIVAL_FIXTURE"):
-                pulls = json.load(open(os.environ["RIVAL_FIXTURE"]))[(k - 1) * 100:k * 100]
-            else:
-                pulls = json.loads(gh(["api", f"repos/{UP}/pulls?state=open&sort=created&direction=desc&per_page=100&page={k}"]).stdout)
-            old = False
-            for p in pulls:
-                who = (p.get("user") or {}).get("login")
-                t, ref = p.get("title") or "", (p.get("head") or {}).get("ref") or ""
-                if who != HANDLE and (pat.search(t) or pat.search(ref)):
-                    return f"#{p.get('number')} by {who}"
-                if who != HANDLE and not UNIT_TOKEN.search(t) and not UNIT_TOKEN.search(ref.replace("_", "-")) \
-                        and rel in pr_files(p["number"]):
-                    return f"#{p.get('number')} by {who} (file path)"
-                try:
-                    if time.time() - (time.mktime(time.strptime(p["created_at"][:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone) > RIVAL_WINDOW_S:
-                        old = True
-                except (KeyError, ValueError):
-                    pass
-            if len(pulls) < 100 or old:
-                return None
-        return f"more than {RIVAL_MAX_PAGES} pages of open PRs in {RIVAL_WINDOW_S} s (fail closed)"
+        snap = rival_snapshot()
     except Exception as e:
-        return "rival check failed: " + repr(e)[:80]
+        return "rival check failed: " + str(e)[:120]
+    who = snap["taken"].get(gid)
+    if who not in (None, HANDLE):
+        return f"taken list: first PR by {who}"
+    for p in snap["recent"]:
+        if gid in p["units"]:
+            return f"#{p['n']} by {p['who']}" + (" (file path)" if gid in p.get("by_file", []) else "")
+    return None
 
 
 def rival_open(gid):

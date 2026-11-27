@@ -118,7 +118,7 @@ def one(sid, sha, prefix="ready", extra=None):
     os.makedirs(os.path.join(tree, "lean", "PEqualNP", "Outside"), exist_ok=True)
     outp = os.path.join(d, "out")
     env = dict(os.environ, ID=sid, MOD=mod, PROOF=proof, TREE=tree, W=d, DRY="0", GITHUB_REF_NAME=f"{prefix}/{sid}",
-               GITHUB_OUTPUT=outp, PR_GATE_DIR=W, PR_GATE_N="2", READY_MSG=msg)
+               GITHUB_OUTPUT=outp, PR_GATE_DIR=W, PR_GATE_N="2", READY_MSG=msg, RIVAL_SNAP_DIR=W)
     env.update(extra or {})
     if DRY:
         return "dry", f"would run submit.py for {sid} {mod} ({os.path.getsize(proof)} bytes, sha {got[:8]})"
