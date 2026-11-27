@@ -109,6 +109,20 @@ jobs:
           # rehearsal: -lin<S> = DRAIN_LINGER S, -drill = only loadtest/L-drill-* units (DRAIN_MATCH)
           # -drill-<tag>: only L-drill-<tag>-<n> units, listing from fork ref loadtest-gaps/<tag> (plain -drill: any
           # L-drill unit, ref loadtest-gaps/drill). The drill driver force-pushes that ref (tree: gaps.json) per export.
+          # lane movingmain (W7): -move<S> (last suffix) = a fake upstream main that moves every S s: a local bare depth-1
+          # clone of upstream main served to the drain as file:// (DRAIN_UPSTREAM), moved by movemain.py. Local, so the
+          # moves push nothing to GitHub (a fork ref every 4 s = 15 pushes a minute on the fork filing pushes to).
+          mv=""; case "$GITHUB_REF_NAME" in *-move[0-9]*) mv=${GITHUB_REF_NAME##*-move};; esac
+          GITHUB_REF_NAME=${GITHUB_REF_NAME%-move[0-9]*}
+          if [ -n "$mv" ]; then
+            mkdir -p "$W"; fu="$W/fakeup.git"
+            git clone -q --bare --depth 1 --single-branch --branch main https://github.com/open-goat/pequalnp-proofs.git "$fu" || exit 1
+            git -C "$fu" config uploadpack.allowFilter true; git -C "$fu" config uploadpack.allowAnySHA1InWant true
+            export DRAIN_UPSTREAM="file://$fu"
+            python3 -I "$SRC/.github/cloud-pr/movemain.py" "$fu" "$mv" > move.log 2>&1 &
+            mover=$!
+            echo "fake upstream main: $fu, moves every $mv s (movemain.py pid $mover)"
+          fi
           case "$GITHUB_REF_NAME" in
             *-drill-*) t=${GITHUB_REF_NAME##*-drill-}; export DRAIN_MATCH="L-drill-$t-[0-9]+" DRILL_GAPS_REF="loadtest-gaps/$t";;
             *-drill) export DRAIN_MATCH='L-drill-[a-z0-9-]+' DRILL_GAPS_REF='loadtest-gaps/drill';;
@@ -131,6 +145,8 @@ jobs:
           python3 -I "$SRC/.github/cloud-pr/drain.py" 2>&1 | tee drain.log
           rc=${PIPESTATUS[0]}
           kill $vm $ps_loop 2>/dev/null
+          if [ -n "$mv" ]; then kill $mover 2>/dev/null; echo "fake upstream main: $(grep -c '^MOVE [0-9]* [0-9a-f]' move.log) moves, $(grep -c failed move.log) failed"; fi
+          grep -E "upstream base:|upstream base behind" drain.log | tail -3
           echo "drain rc=$rc wall=$(( $(date +%s) - t0 )) s"
           python3 - <<'EOF'
           import re, statistics as st
@@ -152,6 +168,9 @@ jobs:
           rq = [int(l.split()[0]) for l in open("cpu.log").read().splitlines() if l.split() and l.split()[0].isdigit()]
           print(f"LOADCANARY units={len(prep)} results={res}")
           print(f"LOADCANARY prep p50={pct(prep, .5):.1f}s p95={pct(prep, .95):.1f}s  submit total p50={pct(tot, .5):.1f}s p95={pct(tot, .95):.1f}s")
+          ba = [float(m.group(1)) for l in L for m in [re.search(r"base_age=([\d.]+)", l)] if m and " TIMES " in l]
+          if ba:          # lane movingmain (Lead 09:31): the upstream base's age at the would-create, units over 15 s
+              print(f"LOADCANARY base_age p50={pct(ba, .5):.1f}s p95={pct(ba, .95):.1f}s max={max(ba):.1f}s over15s={sum(1 for x in ba if x > 15)} of {len(ba)}")
           import collections
           cnt = collections.Counter(l.strip() for l in open("run.log") if l.strip() and l.strip() != "--")
           tot_r = sum(cnt.values()) or 1
@@ -180,7 +199,7 @@ jobs:
           # take "before" from the drain's own RUN-TOKEN line, the same bucket as core.after
           d=$(grep -oE 'RUN-TOKEN rate_limit core limit/remaining: [0-9]+ [0-9]+' drain.log 2>/dev/null | head -1 | awk '{print $NF}')
           [ -n "$d" ] && rb=$d
-          w=$IN_W; warm=$IN_WARM; r=${GITHUB_REF_NAME%-drill*}; r=${r%-lin*}       # same branch-name rules as the drain step
+          w=$IN_W; warm=$IN_WARM; r=${GITHUB_REF_NAME%-move[0-9]*}; r=${r%-drill*}; r=${r%-lin*}       # same branch-name rules as the drain step
           case "$r" in *-warm[0-9]*) warm=${r##*-warm}; r=${r%-warm*};; esac
           case "$r" in *-w[0-9]*) w=${r##*-w};; esac
           sha=$(git -C src rev-parse HEAD)

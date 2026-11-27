@@ -1428,8 +1428,21 @@ def submit(gid, lease):
         return None, "commit-tree failed"
     STG["commit"] = round(time.time() - t_cm, 3)     # whole stage, rev-parse to commit-tree (same span as before)
     # drain.py cuts each unit line at 200 chars, so the long TIMES line loses these: one short line of its own
-    log("COMMIT-STAGES", gid, " ".join(f"{k}={STG[k]}" for k in ("commit", "tree", "tree_src", "head", "halt2", "g_revparse",
+    log("COMMIT-STAGES", gid, " ".join(f"{k}={STG[k]}" for k in ("commit", "tree", "tree_src", "head", "halt2", "newbase", "base_age", "g_revparse",
                                                                "g_catfile", "g_hashobj", "g_difftree", "g_committree") if k in STG))
+    # lane movingmain (W7, Lead 09:20): the base may be up to DRAIN_BASE_MAX_S older than live main (no equality
+    # any more). What equality protected, the unit's own file not yet in upstream main, is checked again here on the
+    # newest base the drain's base refresher has (trees only: no blob read in the blobless shared repo)
+    t = time.time()
+    nb = newest_base()
+    if nb and nb["sha"] != base:
+        r = run(["git", "-C", nb["dir"], "ls-tree", "--name-only", nb["sha"], "--", REL], timeout=30)
+        STG["newbase"] = round(time.time() - t, 3)
+        if r.returncode == 0 and r.stdout.strip():
+            log("file already in upstream main on the newest base", nb["sha"][:12], f"(this unit's base {base[:12]})")
+            return None, "file already in upstream main"
+    if nb:
+        STG["base_age"] = round(time.time() - nb["t"], 1)
     if DRY:
         tw = time.time()                 # rehearsal (Lead 08:12): the would-create time per unit, epoch to 0.001 s
         log(f"WOULD-CREATE {gid} {tw:.3f}"); log(sight_line(gid, tw))
@@ -1441,6 +1454,16 @@ def submit(gid, lease):
         return None, "push: " + err
     log("pushed", c[:12], "to", f"{FORK}:{gid}")
     return create_pr(gid, lease)
+
+
+def newest_base():
+    """lane movingmain: the drain's newest upstream base (drain.py writes W/upbase.json = RIVAL_SNAP_DIR/upbase.json:
+    sha, t = start of the fetch that saw it, dir = the shared checkout). None without a drain or on any read error."""
+    try:
+        d = json.load(open(os.path.join(SNAP_DIR, "upbase.json")))
+        return d if d.get("sha") and d.get("dir") and os.path.isdir(d["dir"]) else None
+    except Exception:
+        return None
 
 
 def pr_create_cmd(gid, body):

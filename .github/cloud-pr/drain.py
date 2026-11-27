@@ -315,81 +315,140 @@ def fetch_ready(sid, prefix, lref):
     return me["ok"]
 
 
-# w12 speed fix 3 (Lead 06:30): every unit cloned upstream main and checked out the sparse tree (about 13 MB, 1-6 s,
-# 28 at once on the runner). Now ONE shared checkout per drain (W/upstream-base) at the live main sha: one
-# `ls-remote main` shared by all workers for MAIN_CHECK_S; when main moved, or the base is older than BASE_MAX_S, it is
-# cloned again under BASE_LOCK before any unit copies it (workers wait, nobody copies a base behind live main). Each
-# unit gets its own copy (cp -a) and adds its Outside imports to the copy's sparse set. Fail closed: main unreadable,
-# or the base cannot be brought to the live sha = no tree, the unit is "error" (retried by the drain).
-# Guards: submit.py's checks (cat-file -e HEAD:<file>, the commit's parent, checkcore.sh) read the copy, i.e. main as
-# of at most MAIN_CHECK_S before the copy, the same as a fresh clone was (its clone ran 1-6 s before the copy point).
+# w12 speed fix 3 (Lead 06:30): ONE shared checkout per drain (W/upstream-base), each unit gets its own copy (cp -a)
+# and adds its Outside imports to the copy's sparse set.
+# lane movingmain (W7, Lead 09:20 UTC 27 Nov): upstream main moves 14-18 times a minute in a wave (22:05 UTC 26 Nov),
+# so "the base must equal live main" re-cloned the base on nearly every unit (29 clones for 30 units, canary c3dd4615)
+# and failed units "upstream base behind live main" when main moved during a clone. Now (16.14 pattern, one reader):
+# ONE base refresher thread per drain keeps the shared checkout at the newest upstream main by an incremental fetch
+# (shallow, blobless: a move costs the new commit and the trees along its path, a few KB) every BASE_FETCH_S while
+# units ask (BASE_IDLE_S when idle), and moves the sparse worktree there under BASE_LOCK (Outside is not checked out,
+# so a typical move changes no file). A unit copies the newest base under the same lock; it never fails or waits for
+# "behind" while that base's last good fetch STARTED at most BASE_MAX_S ago. Older (refresher stuck or failing): one
+# inline fetch, else no tree (fail closed, the unit is "error" and retried). The clone is made once per drain.
+# What the old equality protected: the unit's file must not already be in upstream main (proved first and merged).
+# That is kept as a check of the unit's own path on the newest base: submit.py checks HEAD:<file> on its copy and,
+# right before the create, again on the newest base sha (W/upbase.json, read from the shared repo, trees only).
+# Guards (checkcore.sh) read the copy, i.e. main as of at most BASE_FETCH_S + one fetch before the copy.
 BASE_MAX_S = float(os.environ.get("DRAIN_BASE_MAX_S", "60"))
-MAIN_CHECK_S = float(os.environ.get("DRAIN_MAIN_CHECK_S", "5"))
+BASE_FETCH_S = float(os.environ.get("DRAIN_BASE_FETCH_S", "2"))
+BASE_IDLE_S = float(os.environ.get("DRAIN_BASE_IDLE_S", "15"))
+UPSTREAM_REF = os.environ.get("DRAIN_UPSTREAM_REF", "main")      # loadcanary -move<S>: a local moving test main
 SPARSE = ["/.github/", "/STOP", "/CONTRIBUTING.md", "/lean/PEqualNP/", "!/lean/PEqualNP/Outside/"]
-BASE_LOCK = threading.Lock(); _MAIN_LOCK = threading.Lock()
-_BASE = {"dir": None, "t": 0.0, "sha": None, "main_t": 0.0, "main": None, "clones": 0, "copies": 0}
+BASE_LOCK = threading.Lock(); _FETCH_LOCK = threading.Lock()
+_BASE = {"dir": None, "t": 0.0, "sha": None, "clones": 0, "copies": 0, "fetches": 0, "fetch_fail": 0, "moves": 0,
+         "asked": 0.0, "thread": None, "fetch_s": []}
 
 
 def _clone_upstream(tree, outs=()):
     for att in range(3):
         ok = (sh("git", "clone", "-q", "--depth", "1", "--filter=blob:none", "--no-checkout", "--single-branch",
-                 "--branch", "main", UPSTREAM, tree, timeout=180).returncode == 0
+                 "--branch", UPSTREAM_REF, UPSTREAM, tree, timeout=180).returncode == 0
               and sh("git", "-C", tree, "sparse-checkout", "set", "--no-cone", *SPARSE,
                      *[f"/lean/{o}.lean" for o in outs]).returncode == 0
-              and sh("git", "-C", tree, "checkout", "-q", "main", timeout=180).returncode == 0)
+              and sh("git", "-C", tree, "checkout", "-q", "--detach", f"refs/remotes/origin/{UPSTREAM_REF}", timeout=180).returncode == 0)
         if ok:
             return True
         sh("rm", "-rf", tree); time.sleep(5 * (att + 1))
     return False
 
 
-def main_sha():
-    """the live upstream main sha, read at most every MAIN_CHECK_S for all workers; None when unreadable"""
-    with _MAIN_LOCK:
-        if _BASE["main"] and time.time() - _BASE["main_t"] < MAIN_CHECK_S:
-            return _BASE["main"]
+def _base_note():
+    try:
+        with open(os.path.join(W, "upbase.json.t"), "w") as o:
+            json.dump({"sha": _BASE["sha"], "t": _BASE["t"], "dir": _BASE["dir"]}, o)
+        os.replace(os.path.join(W, "upbase.json.t"), os.path.join(W, "upbase.json"))
+    except OSError:
+        pass
+
+
+def base_fetch():
+    """one incremental fetch of upstream main into the shared base, then the worktree moves to it under BASE_LOCK.
+    True when the base is now the sha main had at the fetch's start (t = that start)."""
+    with _FETCH_LOCK:
+        b = _BASE["dir"]
+        if not b:
+            return False
         t = time.time()
-        r = sh("git", "ls-remote", UPSTREAM, "refs/heads/main", timeout=60)
-        o = r.stdout.split() if r.returncode == 0 else []
-        _BASE["main"], _BASE["main_t"] = (o[0], t) if o else (None, 0.0)
-        return _BASE["main"]
+        r = sh("git", "-C", b, "fetch", "-q", "--depth", "1", "origin",
+               f"+refs/heads/{UPSTREAM_REF}:refs/remotes/origin/{UPSTREAM_REF}", timeout=60)
+        _BASE["fetches"] += 1
+        _BASE["fetch_s"].append(round(time.time() - t, 3))
+        sha = sh("git", "-C", b, "rev-parse", f"refs/remotes/origin/{UPSTREAM_REF}").stdout.strip() if r.returncode == 0 else ""
+        if not sha:
+            _BASE["fetch_fail"] += 1
+            if _BASE["fetch_fail"] <= 3 or _BASE["fetch_fail"] % 30 == 0:
+                log("upstream base: fetch failed", f"({_BASE['fetch_fail']} so far):", (r.stderr or "").strip()[:120])
+            return False
+        with BASE_LOCK:
+            if sha != _BASE["sha"]:
+                if sh("git", "-C", b, "checkout", "-q", "--detach", sha, timeout=120).returncode:
+                    _BASE["fetch_fail"] += 1
+                    log("upstream base: checkout of", sha[:12], "failed (base kept at", (_BASE["sha"] or "?")[:12] + ")")
+                    return False
+                _BASE["moves"] += 1
+            _BASE.update(sha=sha, t=t)
+            _base_note()
+        return True
+
+
+def _base_loop():
+    while True:
+        busy = time.time() - _BASE["asked"] < 120
+        time.sleep(BASE_FETCH_S if busy else BASE_IDLE_S)
+        try:
+            base_fetch()
+        except Exception as e:
+            log("upstream base refresher:", repr(e)[:120])
 
 
 def upstream_tree(tree, outs):
-    """copy of the shared checkout at the live main into `tree`; '' when done, else why not (fail closed)"""
-    live = main_sha()
-    if not live:
-        return "upstream main unreadable (no tree, fail closed)"
+    """copy of the shared checkout at the newest upstream main (at most BASE_MAX_S old) into `tree`; '' when done, else
+    why not (fail closed)"""
+    _BASE["asked"] = time.time()
     with BASE_LOCK:
-        b = _BASE["dir"]
-        if b is None or _BASE["sha"] != live or time.time() - _BASE["t"] > BASE_MAX_S:
-            nb = os.path.join(W, "upstream-base-%d" % (_BASE["clones"] + 1))
+        if _BASE["dir"] is None:                          # first unit of the drain: the one clone
+            nb = os.path.join(W, "upstream-base")
             t = time.time()
             if not _clone_upstream(nb):
                 return "upstream checkout failed (shared base)"
-            got = sh("git", "-C", nb, "rev-parse", "HEAD").stdout.strip()
-            if got != live:                               # main moved during the clone: accept only the live sha
-                with _MAIN_LOCK:
-                    _BASE["main_t"] = 0.0
-                live = main_sha()
-                if got != live:
-                    log("upstream base", got[:12], "is not live main", (live or "?")[:12], "(no tree, fail closed)")
-                    sh("rm", "-rf", nb)
-                    return "upstream base behind live main"
-            _BASE.update(dir=nb, t=t, sha=got, clones=_BASE["clones"] + 1)
-            if b:
-                sh("rm", "-rf", b)                        # no copy is made from the old one any more
-            b = nb
-        r = sh("cp", "-a", b, tree, timeout=120)
-        _BASE["copies"] += 1
+            for k, v in (("gc.auto", "0"), ("maintenance.auto", "false"), ("fetch.writeCommitGraph", "false")):
+                sh("git", "-C", nb, "config", k, v)       # no repack or prune under a copy
+            _BASE.update(dir=nb, t=t, sha=sh("git", "-C", nb, "rev-parse", "HEAD").stdout.strip(), clones=1)
+            _base_note()
+        if _BASE["thread"] is None:
+            _BASE["thread"] = threading.Thread(target=_base_loop, daemon=True, name="base-refresher")
+            _BASE["thread"].start()
+        age = time.time() - _BASE["t"]
+    if age > BASE_MAX_S and not base_fetch():             # refresher stuck or failing: one inline fetch, else fail closed
+        return f"upstream base {age:.0f} s old and the fetch failed (no tree, fail closed)"
+    for att in range(3):
+        # the fetch writes into the base's .git outside the lock (temp packs, shallow.lock, renamed when done): a copy
+        # that meets a file vanishing under it fails; it is then made again. A half-copied new pack is harmless (no
+        # .idx = not read; the copy's HEAD is the checked-out sha, moved only under the lock)
+        with BASE_LOCK:
+            r = sh("cp", "-a", _BASE["dir"], tree, timeout=120)
+            _BASE["copies"] += 1
+        if r.returncode == 0:
+            break
+        _BASE["copy_retry"] = _BASE.get("copy_retry", 0) + 1
+        sh("rm", "-rf", tree)
     if r.returncode:
-        return "copy of the upstream base failed"
+        return "copy of the upstream base failed: " + r.stderr.strip()[:100]
     if outs and sh("git", "-C", tree, "sparse-checkout", "add", *[f"/lean/{o}.lean" for o in outs], timeout=180).returncode:
         return "sparse-checkout add of the Outside imports failed"
     return ""
 
 
-atexit.register(lambda: _BASE["copies"] and log("upstream base:", _BASE["clones"], "clones for", _BASE["copies"], "units"))
+def _base_summary():
+    if _BASE["copies"]:
+        fs = sorted(_BASE["fetch_s"]) or [0.0]
+        log("upstream base:", _BASE["clones"], "clones for", _BASE["copies"], "units;", _BASE["fetches"], "fetches,",
+            _BASE["moves"], "moves,", _BASE["fetch_fail"], "failed,", _BASE.get("copy_retry", 0), "copies redone; fetch p50",
+            fs[len(fs) // 2], "s max", fs[-1], "s")
+
+
+atexit.register(_base_summary)
 
 
 def one(sid, sha, prefix=None, extra=None):
