@@ -950,7 +950,7 @@ def main():
     if " OK " not in line:
         fails.append("rate/bucket")
     # RC-b (Lead 06:22/06:25): shared halt state, refresher, R3 stamp, rule 16.1 (opener and drain), 16.7 read budget
-    for tool, args, okw, tag in (("selftest_rcb.py", [], "RCB SELFTEST OK", "rcb"), ("haltrule.py", ["selftest"], "HALTRULE SELFTEST OK", "16.1"),
+    for tool, args, okw, tag in (("selftest_rcb.py", [], "RCB SELFTEST OK", "rcb"), ("haltrule.py", ["selftest"], "HALTRULE OK", "16.1"),
                                  ("ghcond.py", ["selftest"], "GHCOND SELFTEST OK", "16.7")):
         tp = os.path.join(src, ".github", "cloud-pr", tool)
         if os.path.exists(tp):
@@ -965,8 +965,8 @@ def main():
         if not line.startswith(okw):
             fails.append(f"{tag}/{tool}")
     dr = open(os.path.join(src, ".github", "cloud-pr", "drain.py")).read()
-    okd = "haltrule.decide" in dr and re.search(r'DRAIN_PR_SLOTS", "6"', dr)
-    print(("ok   " if okd else "FAIL ") + "rcb/drain uses haltrule.decide (rule 16.1) and DRAIN_PR_SLOTS defaults to 6")
+    okd = "haltrule.verdict" in dr and re.search(r'DRAIN_PR_SLOTS", "6"', dr)
+    print(("ok   " if okd else "FAIL ") + "rcb/drain uses haltrule.verdict (rule 16.1) and DRAIN_PR_SLOTS defaults to 6")
     if not okd:
         fails.append("rcb/drain")
     print("SKIP hostile/X11 mirror export order (team/mirror/mirror.py) and gate stop refs: gate v1.2.1 (T11), not fork code")

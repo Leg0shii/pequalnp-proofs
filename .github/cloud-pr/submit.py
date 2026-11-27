@@ -1176,7 +1176,7 @@ def _filing_halted_read():
             if rc == 0:
                 break
             time.sleep(2)
-    return haltrule.decide(txt, rc == 0)
+    return haltrule.verdict(txt, rc)
 
 
 T_START = time.time()

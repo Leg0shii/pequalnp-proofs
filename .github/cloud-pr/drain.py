@@ -10,7 +10,7 @@ re-push is a new commit and runs again. A run stops after DRAIN_MAX_S (1200) or 
 Env: SRC (fork main checkout), W, PR_TOKEN, READ_TOKEN, GITHUB_REPOSITORY."""
 import base64, os, re, subprocess, sys, tempfile, threading, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import haltrule                                        # rule 16.1: the same halt rule as submit.py filing_halted()
+import haltrule                                        # rule 16.1 (w9's haltrule.py): the same rule as submit.py and the closer
 from concurrent.futures import ThreadPoolExecutor
 
 SRC = os.environ["SRC"]; W = os.environ.get("W") or tempfile.mkdtemp()
@@ -214,7 +214,7 @@ _FH = [0.0, False, ""]    # Lead 05:10: (checked at, halted, why) of the toolkit
 
 
 def halted():
-    """rule 16.1 (haltrule.decide): newest filing/stop/<n> >= newest filing/go/<n> = halted (a tie too), a stop name
+    """rule 16.1 (haltrule.verdict): newest filing/stop/<n> >= newest filing/go/<n> = halted (a tie too), a stop name
     that is not plain digits = halted, a go name that is not plain digits is ignored, unreadable = halted. Read at
     most every 10 s here (new branches only); every PR create re-checks within 2 s (submit.py filing_halted)."""
     if time.time() - _FH[0] > 10:
@@ -223,7 +223,7 @@ def halted():
             if r.returncode == 0:
                 break
             time.sleep(2)
-        h, why = haltrule.decide(r.stdout, r.returncode == 0)
+        h, why = haltrule.verdict(r.stdout, r.returncode)
         _FH[:] = [time.time(), h, why]
     return _FH[1]
 

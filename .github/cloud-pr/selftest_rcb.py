@@ -140,6 +140,23 @@ for name, txt, rc, exp in (("16.1-tie", "0\trefs/heads/filing/stop/200\n0\trefs/
     case(name, h == exp, f"(halted={h})")
 os.environ["RIVAL_SNAP_DIR"] = SNAPD
 
+# ---- 16.1 rule table on haltrule.verdict (the one rule file, w9's, used by submit, drain and the closer)
+import haltrule
+R = lambda *names: "".join(f"0123\trefs/heads/filing/{n}\n" for n in names)
+for name, txt, rc, exp in (("unreadable", "", 128, True), ("no refs", R(), 0, False), ("only go", R("go/100"), 0, False),
+                           ("stop newer", R("stop/200", "go/100"), 0, True), ("go newer", R("stop/100", "go/200"), 0, False),
+                           ("tie", R("stop/200", "go/200"), 0, True), ("stop, no go", R("stop/100"), 0, True),
+                           ("non-digit stop under newer go", R("stop/100", "stop/now", "go/999"), 0, True),
+                           ("non-digit go ignored", R("stop/100", "go/100x", "go/next"), 0, True),
+                           ("non-digit go ignored, digit go newer", R("stop/100", "go/zz", "go/101"), 0, False),
+                           ("nested stop name", R("stop/100/a", "go/200"), 0, True),
+                           ("unicode digits", R("stop/\u0661\u0662", "go/200"), 0, True),
+                           ("other refs", "0\trefs/heads/filing/x\n0\trefs/heads/main\n", 0, False)):
+    got = haltrule.verdict(txt, rc)[0]
+    if got != exp:
+        case("16.1-table-" + name.replace(" ", "-"), False, f"(halted={got}, want {exp})")
+case("16.1-table-13", not [1 for n, ok in res if n.startswith("16.1-table-") and not ok], "(13 rule rows on haltrule.verdict)")
+
 # ---- HALT-SH: fresh shared state = no read; stale = inline read
 LS.update(txt="0\trefs/heads/filing/go/200\n", rc=0)
 reset_snap()
