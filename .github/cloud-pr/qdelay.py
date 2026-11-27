@@ -50,7 +50,9 @@ def run_mode():
         print("::warning::QDELAY unknown for run %s (http %s)" % (rid, st))
         return 0
     jobs = d.get("jobs") or []
-    j = next((x for x in jobs if x.get("runner_name") == me and x.get("status") == "in_progress"), None) or \
+    jk = os.environ.get("GITHUB_JOB", "")
+    j = next((x for x in jobs if me and x.get("runner_name") == me), None) or \
+        next((x for x in jobs if x.get("name") == jk), None) or \
         next((x for x in jobs if x.get("status") == "in_progress"), None) or (jobs[0] if jobs else {})
     c, s = ts(j.get("created_at")), ts(j.get("started_at"))
     delay = (s - c) if (c is not None and s is not None) else None
