@@ -1389,8 +1389,12 @@ def open_pr_for_branch(gid):
     the fresh taken list nor the fork has anything for the step (W6 mintfail: a PR younger than the taken list header
     was missed and a re-run pushed onto it)."""
     tl = taken_list()
-    if tl is not None and gid not in tl and fork_head(gid) is None:
-        return None
+    if tl is not None and gid not in tl:
+        h = fork_head(gid)
+        if h is None:
+            return None
+        if staged_info() and staged_check(gid, h) == "":
+            return None                  # P2c: a valid staged head; submit() reads its PRs in one call (state=all)
     out = our_prs_on_branch(gid, "open")
     return out[0] if out else None
 
@@ -2095,6 +2099,83 @@ class pr_gate:
             self.f.close()
 
 
+# P2c (Lead 20:56 UTC 27 Nov): the gate (w12 lemmaready) stages the PR head itself, in the SAME multi-ref push as the
+# ready ref, so the opener makes no head push (the fork's 6 pushes a minute then go to the gate's bundles). The ready
+# commit's message carries "Staged-Head: <head> <parent> <unix time> <nonce>". The opener REBUILDS that commit from its
+# own copy of the proof: parent's tree + only REL = blob of PROOF, author and committer Leg0shii at that time, the
+# message "<ID>\n\nGate-Staged: w12-<nonce>\n\nCo-Authored-By: ..." . Only when the rebuilt sha equals the fork's head
+# is the head used (so its diff is exactly the proof file on that parent, by construction). The parent must be an
+# upstream base: the unit's base, the drain's newest base, or a fork upbase/<sha8> ref at it (refs made only by the
+# drain's REST create at an upstream sha); its trees come from a blobless fetch of upstream (origin). Anything else:
+# the head is refused (fail closed, alert STAGED-BAD), no PR from it. No Staged-Head line: the old paths, unchanged.
+STAGED_RE = re.compile(r"(?m)^Staged-Head: ([0-9a-f]{40}) ([0-9a-f]{40}) (\d{9,11}) ([0-9a-f]{12})\s*$")
+STAGED = {}
+
+
+def staged_info():
+    m = STAGED_RE.search(os.environ.get("READY_MSG", ""))
+    return m.groups() if m else None
+
+
+def staged_check(gid, head):
+    """None: this unit has no staged head (no Staged-Head line, or the fork head is not the staged sha: old paths).
+    "": the fork head is the gate's staged commit, rebuilt here bit for bit. Else why it is refused (fail closed)."""
+    si = staged_info()
+    if not si or si[0] != head:
+        if si:
+            log("STAGED", gid, f"fork head {head[:12]} is not the staged {si[0][:12]}: old existing-branch path")
+        return None
+    if gid in STAGED:
+        return STAGED[gid]
+    t = time.time()
+    v = _staged_rebuild(gid, *si)
+    STG["staged"] = round(time.time() - t, 3)
+    STAGED[gid] = v
+    if v:
+        log("STAGED-BAD", gid, head[:12], v)
+        d = os.environ.get("PR_GATE_DIR")
+        if d:
+            try:
+                with open(os.path.join(d, "stagedbad"), "a") as o:
+                    o.write(f"{time.time():.0f} {gid} {head} {v[:120]}\n")
+            except OSError:
+                pass
+    else:
+        log("STAGED", gid, head[:12], f"rebuilt bit for bit on {si[1][:12]} in {STG['staged']} s: PR from the gate's head, no push")
+    return v
+
+
+def _staged_rebuild(gid, head, parent, ts, nonce):
+    base = git("rev-parse", "HEAD").stdout.strip()
+    nb = newest_base()
+    ok_parent = parent == base or (nb and nb.get("sha") == parent)
+    if not ok_parent:
+        r = run(["git"] + (auth_cfg() if PR_TOKEN else []) + ["ls-remote", f"https://github.com/{FORK}.git",
+                                                              f"refs/heads/upbase/{parent[:8]}"], timeout=30)
+        if r.returncode:
+            return "upbase read failed"
+        if r.stdout.split()[:1] != [parent]:
+            return f"parent {parent[:12]} is not an upstream base (no fork upbase ref at it)"
+    if git("cat-file", "-e", f"{parent}^{{tree}}").returncode:
+        r = git("fetch", "-q", "--depth=1", "--filter=blob:none", "origin", parent, timeout=120)
+        if r.returncode or git("cat-file", "-e", f"{parent}^{{tree}}").returncode:
+            return f"parent {parent[:12]} not fetchable from upstream"
+    if git("cat-file", "-e", f"{parent}:{REL}").returncode == 0:
+        return "file already on the staged parent"
+    blob = git("hash-object", "-w", PROOF).stdout.strip()
+    try:
+        tree = treebuild.tree_with_file(TREE, parent, REL, blob)
+    except Exception as e:
+        return "tree rebuild failed: " + str(e)[:80]
+    msg = f"{gid}\n\nGate-Staged: w12-{nonce}\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\n"
+    cenv = dict(os.environ, GIT_AUTHOR_NAME=HANDLE, GIT_COMMITTER_NAME=HANDLE, GIT_AUTHOR_EMAIL=EMAIL,
+                GIT_COMMITTER_EMAIL=EMAIL, GIT_AUTHOR_DATE=f"{ts} +0000", GIT_COMMITTER_DATE=f"{ts} +0000")
+    c = git("commit-tree", tree, "-p", parent, "-m", msg, env=cenv).stdout.strip()
+    if c != head:
+        return f"rebuilt {c[:12]} differs from the fork head {head[:12]}"
+    return ""
+
+
 def submit(gid, lease):
     # Lead 06:12 (W6 mintfail): the head branch Leg0shii:<ID> is created once with a create-only push and never
     # forced. If it exists: our open PR on it = done; our closed PR on it = stop (nothing reopens, I5); neither = the
@@ -2104,6 +2185,27 @@ def submit(gid, lease):
         head = fork_head(gid)
         STG["head"] = round(time.time() - t_hd, 3)
         if head:
+            sv = staged_check(gid, head)
+            if sv:
+                return None, "staged head refused: " + sv
+            if sv == "":                     # P2c: rebuilt bit for bit; the unit's file on upstream main is checked too
+                if git("cat-file", "-e", f"HEAD:{REL}").returncode == 0:
+                    return None, "file already in upstream main"
+                why = newest_base_check(git("rev-parse", "HEAD").stdout.strip())
+                if why:
+                    return None, why
+                if DRY:
+                    return dry_final(gid, lease, head)
+                out = gh(["api", f"repos/{UP}/pulls?head={HANDLE}:{gid}&state=all", "--jq", r'.[] | "\(.state) \(.html_url)"'])
+                if out.returncode:
+                    raise RuntimeError(f"PR lookup failed rc={out.returncode}")
+                prs = [l.split() for l in out.stdout.splitlines() if len(l.split()) == 2]
+                op = [u for st, u in prs if st == "open"]
+                if op:
+                    return op[0], "ok (our PR on the staged branch)"
+                if prs:
+                    return None, "our PR on this branch was closed: no reopen (I5)"
+                return create_pr(gid, lease)
             op = our_prs_on_branch(gid, "open")
             if op:
                 return op[0], "ok (our PR on the existing branch)"

@@ -38,14 +38,17 @@ jobs:
           [ -n "${PR_TOKEN:-}" ] || { echo "::error::no PR_TOKEN"; exit 1; }
           export PC_TAG=$(echo "${GITHUB_REF_NAME#pushcanary-run/}" | tr -cd 'a-z0-9' | cut -c1-12)
           git --version; nproc
-          if [[ "$PC_TAG" == pb* ]]; then
+          if [[ "$PC_TAG" == sc* ]]; then
+            python3 -I src/.github/cloud-pr/stagecanary.py; rc=$?          # P2c: gate-staged heads, opener side
+          elif [[ "$PC_TAG" == pb* ]]; then
             python3 -I src/.github/cloud-pr/pushbatch_canary.py; rc=$?      # lane pushbatch: 60 units, PUSH_BATCH_S=10
           else
             python3 -I src/.github/cloud-pr/pushcanary.py; rc=$?
           fi
           b=$(echo -n "x-access-token:$PR_TOKEN" | base64 -w0)
           u="https://github.com/$GITHUB_REPOSITORY.git"; h="http.https://github.com/.extraheader=AUTHORIZATION: basic $b"
-          refs=$(git -C src -c "$h" ls-remote "$u" | awk '$2 ~ /^refs\/heads\/((pushcanary(-run)?|upbase)\/|utest\/L-drill-)/{print $2}')
+          refs=$(git -C src -c "$h" ls-remote "$u" | awk '$2 ~ /^refs\/heads\/((pushcanary(-run)?|stagecanary)\/|utest\/L-drill-)/{print $2}')
+          # upbase/ refs are kept (P2c, w12 21:10 UTC 27 Nov): the live drain and the gate's staged heads build on them
           # ONE multi-ref delete push (GitHub: at most 6 pushes a minute per repository)
           [ -z "$refs" ] || { git -C src -c "$h" push -q "$u" --delete $refs && echo "deleted $(echo $refs | wc -w) refs in one push"; }
           exit $rc

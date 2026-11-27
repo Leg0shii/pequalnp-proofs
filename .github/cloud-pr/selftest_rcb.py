@@ -592,7 +592,9 @@ if hasattr(S, "dry_final"):
         case("dryfinal-halted-WOULD-REFUSE", why.startswith("would refuse before create: halted:") and not REQ, f"({why[:70]})")
         # (e) the dry return in submit() is after the commit build and before push_branch, and goes through dry_final
         src = open(S.__file__).read()
-        body = src[src.index("def submit(gid, lease):"):src.index("def dry_final(")]
+        # P2c: the staged-head branch of submit() has its own dry return (no push there at all); the build path
+        # starts at t_cm
+        body = src[src.index("    t_cm = time.time()", src.index("def submit(gid, lease):")):src.index("def dry_final(")]
         case("dryfinal-dry-return-before-push", body.index("return dry_final(") < body.index("push_branch(") and
              body.count("if DRY:") == 1 and body.index("commit-tree") < body.index("return dry_final("), "")
     except Exception as e:
