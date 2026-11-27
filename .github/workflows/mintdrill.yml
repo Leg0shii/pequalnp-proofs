@@ -17,4 +17,5 @@ jobs:
         run: python3 -I .github/cloud-pr/mintdrill.py "$GITHUB_WORKSPACE" | tee drill.txt; grep -q '^PREFLIGHT PASS' drill.txt
       - name: Summary
         if: always()
-        run: { echo '### mintdrill'; echo '```'; grep -v '^ok' drill.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+        run: |
+          { echo '### mintdrill'; echo '```'; grep -v '^ok' drill.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
