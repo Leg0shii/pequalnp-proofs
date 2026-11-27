@@ -9,7 +9,7 @@ duplicates open pushes toolkit ref alert/dupopen-<epoch> with message `DUP-OPEN 
 bus alert channel). Taken list stale (over 180 s): per-PR file search for PRs under 10 min old, else skip.
 Env: PR_TOKEN (close, toolkit push), MINUTES (58), DRY=1 (no close, no push), FIXTURE (json list of our PRs, tests).
 """
-import base64, hashlib, json, os, re, subprocess, sys, tempfile, time
+import base64, hashlib, json, os, re, subprocess, sys, tempfile, threading, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import haltrule                                    # Lead 16.1: the one stop/go rule (shared with submit, drain, gate)
 
@@ -37,11 +37,46 @@ def log(*a):
     print(time.strftime("%H:%M:%S"), *a, flush=True)
 
 
+PROG = {"t": time.time(), "step": "start", "busy": None}   # Lead 07:53: loop progress for the beat thread
+
+
 def sh(*a, timeout=120, env=None):
+    """every network call goes through here. Lead 07:53 (8 min stall): subprocess.run's timeout kills only the child;
+    a killed git can leave its helper (git-remote-https) running. So the call runs in its own process group and the
+    WHOLE group is killed at the timeout; the call returns at most 5 s after it. A call over 20 s is logged by name."""
+    import signal
+    me = threading.current_thread() is threading.main_thread()
+    if me:
+        PROG["busy"], PROG["step"] = time.time(), " ".join(str(x) for x in a if not str(x).startswith("http."))[:60]
     try:
-        return subprocess.run(a, capture_output=True, text=True, timeout=timeout, env=env)
-    except subprocess.TimeoutExpired:
-        return subprocess.CompletedProcess(a, 1, "", "timeout")
+        p = subprocess.Popen(a, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                             env=env, start_new_session=True)
+        try:
+            t0 = time.time()
+            out, err = p.communicate(timeout=timeout)
+            if time.time() - t0 > 20:                 # names the call in the job log when GitHub is slow
+                log(f"slow {time.time() - t0:.0f}s:", " ".join(str(x) for x in a if not str(x).startswith("http."))[:80])
+            return subprocess.CompletedProcess(a, p.returncode, out, err)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            try:
+                p.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                for f in (p.stdout, p.stderr):
+                    try:
+                        f.close()
+                    except OSError:
+                        pass
+            log("timeout", timeout, "s:", " ".join(str(x) for x in a if not str(x).startswith("http."))[:80])
+            return subprocess.CompletedProcess(a, 1, "", "timeout")
+    except OSError as e:
+        return subprocess.CompletedProcess(a, 1, "", repr(e))
+    finally:
+        if me:
+            PROG["t"], PROG["busy"] = time.time(), None
 
 
 def auth():
@@ -489,25 +524,64 @@ HB = {"t": 0.0}
 SPLIT = {"txt": ""}
 
 
+HBS = {"n": "-", "d": "-", "fresh": False, "pass_t": time.time()}
+BEAT_S, STUCK_S = 30, 150
+
+
 def heartbeat(n, d, fresh):
-    """Lead 18:45: liveness. Force-push toolkit ref status/dupclose every 30 s; message
-    `dupclose <epoch> open=N dups=D closed=C taken=fresh|stale run=<id>`. The infra box alerts DUPCLOSE-DEAD when the
-    newest one is older than 2 min and dispatches the workflow once."""
-    if DRY or time.time() - HB["t"] < 30:
-        return
-    HB["t"] = time.time()
-    g = os.path.join(W, "taken.git")
-    tree = subprocess.run(["git", "-C", g, "mktree"], input="", capture_output=True, text=True).stdout.strip()
+    """main loop: record the pass result for the beat thread (the beat itself is pushed by beat_loop)."""
+    HBS.update(n=n, d=d, fresh=fresh, pass_t=time.time())
+    PROG["t"] = time.time()
+
+
+def beat_msg(now=None):
+    """Lead 18:45 + 07:53: `dupclose <epoch> loop=<s> step=<..> ...`. loop = seconds since the main loop last made
+    progress (a call returned or a pass ended); over STUCK_S the line says loop=STUCK<s> and names the call it is in."""
+    now = time.time() if now is None else now
+    age = int(now - PROG["t"])
+    busy = f" in={int(now - PROG['busy'])}s" if PROG.get("busy") else ""
+    loop = f"loop=STUCK{age}" if age > STUCK_S else f"loop={age}"
+    step = re.sub(r"\s+", "_", PROG.get("step") or "-")[:60]
+    return (f"dupclose {int(now)} {loop}{busy} step={step} pass_age={int(now - HBS['pass_t'])} open={HBS['n']} dups={HBS['d']} "
+            f"closed={len(CLOSED)} taken={'fresh' if HBS['fresh'] else 'stale'} "
+            f"{SPLIT['txt']} br={BR['deleted']}/{len(BR['cand'])}/{BR['kept']} badref={BADREF.get('n', '-')} "
+            f"taken_age={'-' if TKST['age'] is None else int(TKST['age'])}{'p' if TKST.get('partial') else ''} "
+            f"pages={OPEN.get('pages', '-')} openlist={OPEN.get('src', '-')} rej10={REJ.get('n', '-')} "
+            f"rl={HB.get('rl', '?')} rl_pr={HB.get('rlp', '?')} tok={'read' if os.environ.get('READ_TOKEN') else 'pr'} "
+            f"run={os.environ.get('GITHUB_RUN_ID', '-')}")
+
+
+def beat_once(push=None):
+    """one beat from the beat thread: its own bare repo, every call with a timeout (sh kills the process group)."""
+    g = os.path.join(W, "beat.git")
+    if not os.path.isdir(g):
+        sh("git", "init", "-q", "--bare", g, timeout=30)
+    if time.time() - HB.get("rl_t", 0) >= 120:        # rate_limit calls are free; read every 2 min, not every beat
+        HB["rl_t"] = time.time()
+        HB["rl"] = sh("gh", "api", "rate_limit", "--jq", ".resources.core.remaining", env=rdenv(), timeout=20).stdout.strip() or "?"
+        HB["rlp"] = sh("gh", "api", "rate_limit", "--jq", r'"\(.resources.core.remaining)/\(.resources.core.reset)"',
+                       env=ghenv(), timeout=20).stdout.strip() or "?"
+    msg = beat_msg()
+    if push is not None:
+        return push(msg)
     env = dict(os.environ, GIT_AUTHOR_NAME="dupclose", GIT_AUTHOR_EMAIL="dupclose@localhost",
                GIT_COMMITTER_NAME="dupclose", GIT_COMMITTER_EMAIL="dupclose@localhost")
-    rl = sh("gh", "api", "rate_limit", "--jq", ".resources.core.remaining", env=rdenv(), timeout=30).stdout.strip() or "?"
-    # 19:50: PR_TOKEN (Leg0shii, shared with PR creation and the PC) hit 0; rate_limit calls are free
-    rlp = sh("gh", "api", "rate_limit", "--jq", r'"\(.resources.core.remaining)/\(.resources.core.reset)"', env=ghenv(), timeout=30).stdout.strip() or "?"
-    msg = (f"dupclose {int(time.time())} open={n} dups={d} closed={len(CLOSED)} taken={'fresh' if fresh else 'stale'} "
-           f"{SPLIT['txt']} br={BR['deleted']}/{len(BR['cand'])}/{BR['kept']} badref={BADREF.get('n', '-')} taken_age={'-' if TKST['age'] is None else int(TKST['age'])}{'p' if TKST.get('partial') else ''} pages={OPEN.get('pages', '-')} openlist={OPEN.get('src', '-')} rej10={REJ.get('n', '-')} rl={rl} rl_pr={rlp} tok={'read' if os.environ.get('READ_TOKEN') else 'pr'} "
-           f"run={os.environ.get('GITHUB_RUN_ID', '-')}")
-    c = subprocess.run(["git", "-C", g, "commit-tree", tree, "-m", msg], capture_output=True, text=True, env=env).stdout.strip()
-    sh("git", *auth(), "-C", g, "push", "-q", "-f", TK, f"{c}:refs/heads/status/dupclose", timeout=60)
+    tree = subprocess.run(["git", "-C", g, "mktree"], input="", capture_output=True, text=True, timeout=30).stdout.strip()
+    c = subprocess.run(["git", "-C", g, "commit-tree", tree, "-m", msg], capture_output=True, text=True, env=env,
+                       timeout=30).stdout.strip()
+    return sh("git", *auth(), "-C", g, "push", "-q", "-f", TK, f"{c}:refs/heads/status/dupclose", timeout=45).returncode == 0
+
+
+def beat_loop(stop=lambda: False, every=None, push=None):
+    """Lead 07:53: the beat runs in its own thread, so it keeps beating (and shows loop=STUCK) while one call of the
+    main loop hangs; a beat that fails never touches the loop."""
+    while not stop():
+        if not DRY:
+            try:
+                beat_once(push)
+            except Exception as e:
+                log("beat failed:", repr(e)[:100])
+        time.sleep(BEAT_S if every is None else every)
 
 
 FORK = "https://github.com/Leg0shii/pequalnp-proofs-fork.git"
@@ -928,6 +1002,8 @@ if __name__ == "__main__" and sys.argv[1:2] == ["measure"]:
     sys.exit(0)
 if __name__ == "__main__":
     once = sys.argv[1:2] == ["once"]
+    if not once:
+        threading.Thread(target=beat_loop, daemon=True).start()
     while True:
         try:
             n, d, fresh = one_pass()
