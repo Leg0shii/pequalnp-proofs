@@ -670,35 +670,54 @@ if __name__ == "__main__" and sys.argv[1:2] == ["selftest-merged"]:
     print("MERGED SELFTEST", "OK" if a and b and c and d else "FAIL", a, b, c, d)
     sys.exit(0 if a and b and c and d else 1)
 if __name__ == "__main__" and sys.argv[1:2] == ["selftest-halt"]:
-    # Lead 05:10 fixture: one "proved first" rejection -> one filing/stop push + REJ-HALT; the same PR again -> nothing;
-    # a close with only our own comment -> nothing; a rejection closed before the newest filing/go -> nothing
+    # Lead 05:10 fixture, rule of 15bd76d6 (Lead 06:12): one "proved first" rejection -> one filing/stop push +
+    # REJ-HALT; the same PR again -> nothing; a close with only our own comment -> nothing; any maker comment -> halt;
+    # a rejection NAMED by one of our REJ-HALT stops -> nothing (lifted by a later go or not); a rejection NOT named ->
+    # halt, even if closed before the newest filing/go (no clock compare). Hermetic: toolkit refs are faked in memory.
     import tempfile as _tf
     now_s = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     old_s = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 120))
     pr = lambda n, body, who="checker", ca=now_s: {"number": n, "closedAt": ca, "mergedAt": None,
                                                   "comments": [{"body": body, "user": {"login": who}}]}
-    pushes = []
+    pushes, REFS, FMSG = [], {}, {}
     real = sh
     def fake(*a, **k):
+        a = list(a)
         if "push" in a:
-            pushes.append(a[-1]); return subprocess.CompletedProcess(a, 0, "", "")
-        return real(*a, **k)
+            sha, ref = a[-1].split(":", 1)
+            pushes.append(a[-1]); REFS[ref] = sha
+            return subprocess.CompletedProcess(a, 0, "", "")
+        if "ls-remote" in a:
+            pat = [x for x in a if x.startswith("refs/")][0].split("*")[0]
+            return subprocess.CompletedProcess(a, 0, "".join(f"{h}\t{r}\n" for r, h in REFS.items() if r.startswith(pat)), "")
+        if "fetch" in a:
+            return subprocess.CompletedProcess(a, 0, "", "")
+        if "log" in a and a[-1] in FMSG:
+            return subprocess.CompletedProcess(a, 0, FMSG[a[-1]] + "\n", "")
+        if a[0] == "git" and ("log" in a or "init" in a):
+            return real(*a, **k)
+        return subprocess.CompletedProcess(a, 1, "", "selftest: no network")
     sh = fake
     DRY = False
-    def case(prs, go_epoch):
+    def ref(kind, epoch, msg):
+        h = "%040x" % (len(REFS) + 1); REFS[f"refs/heads/filing/{kind}/{epoch}"] = h; FMSG[h] = msg
+    def case(prs):
         f = _tf.NamedTemporaryFile("w", suffix=".json", delete=False); json.dump(prs, f); f.close()
         os.environ["FIXTURE_CLOSED"] = f.name
-        os.environ["FIXTURE_FILING"] = f"x\trefs/heads/filing/go/{go_epoch}\n" if go_epoch else ""
+        os.environ["FIXTURE_FILING"] = "".join(f"{h}\t{r}\n" for r, h in REFS.items() if "/filing/go/" in r)
         n0 = len(pushes); REJ["t"] = 0; rej_burst()
         return [x for x in pushes[n0:]]
-    r1 = case([pr(101, "This step was proved first by #99")], 0)
+    r1 = case([pr(101, "This step was proved first by #99")])
     a = sum("filing/stop/" in x for x in r1) == 1 and sum("alert/rejhalt-" in x for x in r1) == 1
-    b = case([pr(101, "This step was proved first by #99")], 0) == []
-    c = case([pr(102, "closing my duplicate", who=HANDLE)], 0) == []
-    d = case([pr(103, "any maker comment")], 0) != []
-    e = case([pr(104, "proved first", ca=old_s)], int(time.time()) - 30) == []
-    print("HALT SELFTEST", "OK" if all((a, b, c, d, e)) else "FAIL", a, b, c, d, e)
-    sys.exit(0 if all((a, b, c, d, e)) else 1)
+    b = case([pr(101, "This step was proved first by #99")]) == []
+    c = case([pr(102, "closing my duplicate", who=HANDLE)]) == []
+    d = case([pr(103, "any maker comment")]) != []
+    t0 = int(time.time())
+    ref("stop", t0 + 5, "filing stop: REJ-HALT 1 104"); ref("go", t0 + 6, "filing go: Lead")
+    e = case([pr(104, "proved first", ca=old_s)]) == []                     # named by a stop (lifted): nothing
+    f_ = sum("filing/stop/" in x for x in case([pr(105, "proved first", ca=old_s)])) == 1   # not named, before the go: halt
+    print("HALT SELFTEST", "OK" if all((a, b, c, d, e, f_)) else "FAIL", a, b, c, d, e, f_)
+    sys.exit(0 if all((a, b, c, d, e, f_)) else 1)
 if __name__ == "__main__" and sys.argv[1:2] == ["measure"]:
     # Lead 19:30 item 2: one full sweep, print the split and what rule v2 would close; closes nothing
     sp, close2, exposed = exposure(open_prs())
