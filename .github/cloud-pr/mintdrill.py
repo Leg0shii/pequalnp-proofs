@@ -268,7 +268,10 @@ def child_close(src, w):
         cur = [state_at(p) for p in allp if visible(p)]
         cur = sorted([p for p in cur if not p.get("closed_at")], key=lambda p: -p["number"])
         return cur[(k - 1) * 100:k * 100]
-    D._page = page
+    def counted_page(k):
+        out["open_reads"] = out.get("open_reads", 0) + 1
+        return page(k)
+    D._page = counted_page
 
     def cmts(p):                          # Y3: a comment exists from its created_at on
         return [c for c in p.get("comments", []) if not c.get("created_at") or tt(c["created_at"]) <= clock[0]]
@@ -368,6 +371,18 @@ def child_close(src, w):
         if a[0] == "git" and "fetch" in a and "status/taken" in s and "taken_hdr_age" in w:      # TAKEN-STALE drill
             ok = w["taken_hdr_age"] is not None
             return subprocess.CompletedProcess(a, 0 if ok else 1, "", "" if ok else "fatal: couldn't find remote ref")
+        if a[0] == "git" and "show" in a and "open.json" in s:              # 16.7: takenpub's open list (W6 format + lease, ref)
+            oj = w.get("open_json")
+            if not oj or PASS[0] in oj.get("missing_passes", []):
+                return subprocess.CompletedProcess(a, 128, "", "fatal: path 'open.json' does not exist")
+            cur = [state_at(p) for p in allp if visible(p)]
+            rows = [[p["number"], p["user"]["login"], (p.get("head") or {}).get("sha", ""), int(tt(p["created_at"])),
+                     sorted({u for u in [D.title_unit(p.get("title"))] if u}), int(bool(re.search(r"(?m)^Lease:\s*\S", p.get("body") or ""))),
+                     (p.get("head") or {}).get("ref", "")][:oj.get("width", 7)] for p in cur if not p.get("closed_at")]
+            return subprocess.CompletedProcess(a, 0, json.dumps({"t": int(clock[0] - oj.get("age", 10)),
+                                                                 "full_t": int(clock[0] - oj.get("full_age", 100)), "prs": rows}), "")
+        if a[0] == "git" and "fetch" in a and "status/taken" in s and "open_json" in w and "taken_hdr_age" not in w:
+            return subprocess.CompletedProcess(a, 0, "", "")
         if a[0] == "git" and "show" in a and "status/taken" in s and "taken_hdr_age" in w:
             return subprocess.CompletedProcess(a, 0, f"# updated {int(clock[0] - w['taken_hdr_age'])} 05:00:00 steps 0\n", "")
         if a[0] == "git" and "ls-remote" in a and PASS[0] in w.get("tk_lsremote_fail_passes", []):
@@ -398,7 +413,7 @@ def child_close(src, w):
         out["unexpected"].append(s[:80])
         return subprocess.CompletedProcess(a, 1, "", "unexpected")
     def patch(D):
-        D._page = page
+        D._page = counted_page
         D.sh = sh
         D.auth = lambda: []
         if "taken_hdr_age" not in w:
@@ -523,7 +538,7 @@ def body_bad(prs, ex):
     return bad
 
 
-def judge_close(name, w, r, must_close, must_keep=(), must_push=None, no_push=False, max_reads=None, go_count=None, last_stop=None, halted=None, stop_count=None, cache_max=None, self_halted=None, must_delete=None, keep_branch=(), push_count=None):
+def judge_close(name, w, r, must_close, must_keep=(), must_push=None, no_push=False, max_reads=None, go_count=None, last_stop=None, halted=None, stop_count=None, cache_max=None, self_halted=None, must_delete=None, keep_branch=(), push_count=None, max_open_reads=None, max_reads_all=None):
     if r.get("crash"):
         return False, "crash " + " | ".join(r["crash"])
     bad = []
@@ -549,6 +564,12 @@ def judge_close(name, w, r, must_close, must_keep=(), must_push=None, no_push=Fa
             bad.append(f"caches over cap {big}")
     if halted is not None and r.get("halted") != halted:
         bad.append("filing " + ("NOT halted" if halted else "still halted") + " at the end")
+    if max_open_reads is not None and r.get("open_reads", 0) > max_open_reads:
+        bad.append(f"{r.get('open_reads', 0)} open-list page reads (cap {max_open_reads})")
+    if max_reads_all is not None:
+        tot = r.get("open_reads", 0) + r.get("closed_reads", 0) + r.get("comment_reads", 0) + r.get("issue_reads", 0)
+        if tot > max_reads_all:
+            bad.append(f"{tot} GitHub reads in all (cap {max_reads_all})")
     for pre, want in (push_count or {}).items():
         got = sum(1 for p in r["pushes"] if p.startswith(pre))
         if got != want:
@@ -576,7 +597,7 @@ def judge_close(name, w, r, must_close, must_keep=(), must_push=None, no_push=Fa
         nr = r.get("closed_reads", 0) + r.get("comment_reads", 0) + r.get("issue_reads", 0)
         if nr > max_reads:
             bad.append(f"{nr} GitHub reads (cap {max_reads})")
-    reads = "" if "closed_reads" not in r else f" reads={r.get('closed_reads', 0)}+{r.get('comment_reads', 0)}+{r.get('issue_reads', 0)}"
+    reads = "" if "closed_reads" not in r else f" reads={r.get('closed_reads', 0)}+{r.get('comment_reads', 0)}+{r.get('issue_reads', 0)} open={r.get('open_reads', 0)}"
     gos = sum(1 for p in r["pushes"] if "filing/go/" in p)
     reads += "" if not r.get("caches") or not cache_max else " caches=" + ",".join(f"{k}:{v}" for k, v in r["caches"].items())
     return (not bad), "; ".join(bad) or f"closed {sorted(r['closed'])}" + (" halt" if any("filing/stop" in p for p in r["pushes"]) else "") + (f" go={gos}" if gos else "") + reads
@@ -791,6 +812,21 @@ def cases():
     for nm, age, want in (("TS1", 90, 2), ("TS2", 10, 0), ("TS3", None, 2)):
         out.append(("hostile/" + nm, "close", {"closed_pulls": five, "taken_hdr_age": age, "passes": [0, 20, 60, 120, 300, 320]},
                     {"must_close": [], "no_push": True, "push_count": {"refs/heads/alert/takenstale-": want}}))
+    # 16.7 (Lead 06:40): 5,100 open PRs for one hour; the closer reads takenpub's open.json + its newest page
+    w51 = [rival_pr(60000 + i, "Prove L-meta-%d" % (90000 + i), created=-7200 + i) for i in range(5100)]
+    hour = list(range(0, 3601, 20))
+    out.append(("hostile/OL1", "close", {"open_pulls": w51, "closed_pulls": five, "passes": hour, "open_json": {"age": 15}},
+                {"must_close": [], "no_push": True, "max_reads_all": 600, "push_count": {"refs/heads/alert/openliststale-": 0}}))
+    # OL2: open.json stale (header 300 s old) -> own sweep + OPENLIST-STALE once per 5 min; OL3: missing; OL4: old format
+    for nm, oj in (("OL2", {"age": 300}), ("OL3", {"missing_passes": list(range(40))}), ("OL4", {"age": 15, "width": 5})):
+        out.append(("hostile/" + nm, "close", {"open_pulls": w51[:300], "closed_pulls": five, "passes": list(range(0, 601, 20)), "open_json": oj},
+                    {"must_close": [], "no_push": True, "push_count": {"refs/heads/alert/openliststale-": 3}}))
+    # OL5: our duplicate behind a rival's lower PR is still closed when the rows come from open.json (rival not on the newest page)
+    r55 = rival_pr(61000, "Prove L-meta-91999", created=-7000)
+    o55 = our_pr(61001, "L-meta-91999", created=-60)
+    out.append(("hostile/OL5", "close", {"open_pulls": [r55] + w51[:150] + [o55], "closed_pulls": five, "passes": [0, 20, 40],
+                                         "open_json": {"age": 15}, "taken_map": {"L-meta-91999": (61000, "rival1")}},
+                {"must_close": [61001], "no_push": True, "push_count": {"refs/heads/alert/openliststale-": 0}}))
     # B9 partial failures. B9a: gh pr close times out AFTER the close happened (our own duplicate, CI comment) -> no halt
     d1, d2 = our_pr(50300, "L-meta-93300", created=-200), our_pr(50301, "L-meta-93300", created=-100)
     d2["comments"] = [{"body": "CI: build started", "user": {"login": "ci-bot"}, "created_at": iso(T0 - 50)}]

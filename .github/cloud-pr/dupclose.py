@@ -87,8 +87,61 @@ def _row(x):
             "body": x.get("body") or ""}
 
 
+OPENLIST = {"alerted": -1e18, "why": "-"}
+OPENLIST_MAX_AGE, OPENLIST_FULL_MAX = 120, 900     # 16.7: open.json header / last full sweep older than this = stale
+
+
+def open_list():
+    """16.7 (b): takenpub's open.json on toolkit status/taken (W6): (rows like _row, "ok") or (None, why). Stale or
+    missing or a row without the Lease flag and head ref -> None (the caller falls back to its own sweep)."""
+    try:
+        if os.environ.get("FIXTURE_OPENLIST") is not None:
+            txt = os.environ["FIXTURE_OPENLIST"]
+        else:
+            g = os.path.join(W, "taken.git")
+            if not os.path.isdir(g):
+                sh("git", "init", "-q", "--bare", g)
+            if sh("git", *auth(), "-C", g, "fetch", "-q", "--depth=1", TK, "+refs/heads/status/taken:refs/heads/status/taken").returncode:
+                return None, "status/taken unreadable"
+            r = sh("git", "-C", g, "show", "refs/heads/status/taken:open.json")
+            if r.returncode:
+                return None, "no open.json"
+            txt = r.stdout
+        d = json.loads(txt)
+        age, fage = time.time() - int(d["t"]), time.time() - int(d.get("full_t") or 0)
+        if age > OPENLIST_MAX_AGE or fage > OPENLIST_FULL_MAX:
+            return None, f"stale t={int(age)}s full={int(fage)}s"
+        rows = {}
+        for x in d["prs"]:
+            if not isinstance(x, list) or len(x) < 7:
+                return None, "rows without lease/head ref"
+            n, who, sha, created, units, lease, ref = x[:7]
+            us = [u for u in units if isinstance(u, str)]
+            m = ID_RX.search((ref or "").replace("_", "-"))
+            gid = us[0] if len(us) == 1 else (m.group(1) if m else None)
+            rows[int(n)] = {"n": int(n), "gid": gid, "author": who, "lease": bool(lease),
+                            "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(created)) if created else "",
+                            "title": gid or "", "body": "Lease: (open.json)" if lease else ""}
+        return rows, "ok"
+    except Exception as e:
+        return None, "bad open.json " + type(e).__name__
+
+
 def open_prs():
-    """{number: row} of all open upstream PRs: full sweep every FULL_S (drops closed ones), else the newest pages."""
+    """{number: row} of all open upstream PRs. 16.7: takenpub's open.json + our newest page (1 read per pass) while it
+    is fresh; else (alert OPENLIST-STALE once per 5 min) our own sweep: full every FULL_S, else the newest pages."""
+    lst, why = open_list()
+    OPENLIST["why"] = why
+    if lst is not None:
+        for x in _page(1):                            # the newest 100 with title and body (our new PRs within 20 s)
+            lst[x["number"]] = _row(x)
+        OPEN["prs"], OPEN["pages"], OPEN["src"] = lst, 1, "list"
+        return OPEN["prs"]
+    if time.time() - OPENLIST["alerted"] >= 300 and not DRY:
+        OPENLIST["alerted"] = time.time()
+        alert_ref(f"OPENLIST-STALE {why}", "openliststale")
+        log("OPENLIST-STALE", why, "(own sweep)")
+    OPEN["src"] = "own"
     full = time.time() - OPEN["t"] >= OPEN.get("every", FULL_S)
     got, k = {}, 1
     while True:
@@ -446,7 +499,7 @@ def heartbeat(n, d, fresh):
     # 19:50: PR_TOKEN (Leg0shii, shared with PR creation and the PC) hit 0; rate_limit calls are free
     rlp = sh("gh", "api", "rate_limit", "--jq", r'"\(.resources.core.remaining)/\(.resources.core.reset)"', env=ghenv(), timeout=30).stdout.strip() or "?"
     msg = (f"dupclose {int(time.time())} open={n} dups={d} closed={len(CLOSED)} taken={'fresh' if fresh else 'stale'} "
-           f"{SPLIT['txt']} br={BR['deleted']}/{len(BR['cand'])}/{BR['kept']} badref={BADREF.get('n', '-')} taken_age={'-' if TKST['age'] is None else int(TKST['age'])} pages={OPEN.get('pages', '-')} rej10={REJ.get('n', '-')} rl={rl} rl_pr={rlp} tok={'read' if os.environ.get('READ_TOKEN') else 'pr'} "
+           f"{SPLIT['txt']} br={BR['deleted']}/{len(BR['cand'])}/{BR['kept']} badref={BADREF.get('n', '-')} taken_age={'-' if TKST['age'] is None else int(TKST['age'])} pages={OPEN.get('pages', '-')} openlist={OPEN.get('src', '-')} rej10={REJ.get('n', '-')} rl={rl} rl_pr={rlp} tok={'read' if os.environ.get('READ_TOKEN') else 'pr'} "
            f"run={os.environ.get('GITHUB_RUN_ID', '-')}")
     c = subprocess.run(["git", "-C", g, "commit-tree", tree, "-m", msg], capture_output=True, text=True, env=env).stdout.strip()
     sh("git", *auth(), "-C", g, "push", "-q", "-f", TK, f"{c}:refs/heads/status/dupclose", timeout=60)
