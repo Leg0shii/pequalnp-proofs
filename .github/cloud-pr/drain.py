@@ -30,6 +30,10 @@ if not re.fullmatch(r"ready|loadtest", PREFIX):
     sys.exit(f"DRAIN_PREFIX {PREFIX!r}: only ready or loadtest")
 CHILD_DRY = "0" if PREFIX == "ready" else "1"
 STATE_REF = "drain-state" if PREFIX == "ready" else f"drain-state-{PREFIX}"
+if PREFIX == "loadtest" and os.environ.get("GITHUB_RUN_ID"):
+    # infra 09:02 (r3 45968532320): parallel canaries force-pushed the one drain-state-loadtest ref (3 failed pushes in a row,
+    # job red) and each run loaded the others' seen units at start. A loadtest drain keeps its own state per run attempt.
+    STATE_REF += f"-{os.environ['GITHUB_RUN_ID']}-{os.environ.get('GITHUB_RUN_ATTEMPT', '1')}"
 T0 = time.time()
 LOCK = threading.Lock(); FETCH = threading.Lock()
 SEEN = {}            # (step, sha) -> (result, epoch)
@@ -106,7 +110,7 @@ def save_seen(seen=None, grants=None, unleased=None):
     if not DRY:
         r = sh("git", *auth(), "-C", SRC, "push", "-q", "-f", URL, f"{c}:refs/heads/{STATE_REF}", timeout=120)
         if r.returncode:
-            raise RuntimeError("state push rc=%d %s" % (r.returncode, r.stderr.strip()[-100:]))
+            raise RuntimeError("state push rc=%d %s" % (r.returncode, " | ".join(r.stderr.strip().splitlines())[-300:]))
 
 
 # w12 speed fix 1 (Lead 06:30): the drain-state push (2-5 s) ran inside LOCK once per finished unit, so every worker
@@ -147,7 +151,7 @@ def save_now(why="tick"):
             with LOCK:
                 _SV["dirty"] = True                   # retried at the next tick
             _SV["fails"] += 1
-            log("state save failed", f"({why}, {_SV['fails']} in a row)", repr(e)[:120])
+            log("state save failed", f"({why}, {_SV['fails']} in a row)", repr(e)[:400])
             if _SV["fails"] == 3:
                 _alert("drain-state push failed 3 times in a row (filing continues; a re-run is idempotent)")
             return False
@@ -425,8 +429,8 @@ def one(sid, sha, prefix=None, extra=None):
     # Lead 19:14: the per-stage seconds of every unit in the drain log (prep = fetch of the ready commit + upstream
     # checkout before submit.py starts)
     for l in (r.stdout or "").splitlines():
-        if " TIMES " in l or " gate: " in l or " SKIP " in l or " halted: " in l or "WOULD-CREATE " in l or "SIGHT-TO-CREATE " in l:
-            log(sid, l.strip()[:200], f"prep={t_sub - T_ONE.get(sid, t_sub):.1f}" if " TIMES " in l else "")
+        if " TIMES " in l or " gate: " in l or " SKIP " in l or " halted: " in l or "WOULD-CREATE " in l or "SIGHT-TO-CREATE " in l or "COMMIT-STAGES" in l:
+            log(sid, l.strip()[:900], f"prep={t_sub - T_ONE.get(sid, t_sub):.1f}" if " TIMES " in l else "")
     res = dict(l.split("=", 1) for l in open(outp).read().splitlines() if "=" in l) if os.path.exists(outp) else {}
     tail = (r.stdout + r.stderr).strip().splitlines()[-1:] or [""]
     now = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
@@ -529,7 +533,8 @@ def main():
             time.sleep(0.5)
         log(f"WARM {time.time() - t_w:.1f} s: refresher copies", "ready" if all(os.path.exists(os.path.join(W, x))
             for x in ("rival_snap.json", "halt.json")) else "NOT ready (released anyway)", "- units released now")
-        if PREFIX == "loadtest":           # rehearsal marker for the builder: toolkit ref drill/warm-<epoch>
+        if PREFIX == "loadtest" and os.environ.get("DRILL_GAPS_REF"):   # rehearsal marker for the builder: toolkit ref
+            # drill/warm-<epoch>, only in -drill runs (W8 08:36: a lane canary with warm must not look like a rehearsal)
             ok = alert_ref(f"WARM drain run {os.environ.get('GITHUB_RUN_ID', '?')} released units at {time.time():.0f}",
                            "warm", prefix="drill")
             log("WARM marker ref drill/warm-*", "pushed" if ok else "push FAILED")
@@ -589,17 +594,19 @@ TK = "https://github.com/Leg0shii/pnp-toolkit.git"
 STALL_S = float(os.environ.get("PR_STALL_S", "60"))
 ALERTED = {}             # kind -> epoch of the last alert (at most one per kind per 5 min)
 LAST_DONE = [0.0]
+LAST_IDLE = [0.0]        # Lead 09:02 (r3 false PR-STALL): last loop tick with nothing in flight
 
 
-def stall_alerts(now, n_inflight, last_done, t_start, stall_until):
+def stall_alerts(now, n_inflight, last_done, t_start, stall_until, last_idle=0.0):
     """RC-b 6 (Lead 06:22): PR-STALL by name within 60 s. (kind, message) list for this drain loop tick:
     prstall-bucket   GitHub refused a create (403/429): every worker stops creating until stall_until
     prstall-noprogress  units in flight and none finished for STALL_S seconds (the drain is stuck)"""
     out = []
     if stall_until > now:
         out.append(("prstall-bucket", f"PR-STALL bucket: GitHub refused a create, no PR for {stall_until - now:.0f} s"))
-    if n_inflight and now - max(last_done, t_start) > STALL_S:
-        out.append(("prstall-noprogress", f"PR-STALL no unit finished for {now - max(last_done, t_start):.0f} s, {n_inflight} in flight"))
+    busy = max(last_done, t_start, last_idle)   # an idle gap (nothing in flight, e.g. between mint slices) is no stall
+    if n_inflight and now - busy > STALL_S:
+        out.append(("prstall-noprogress", f"PR-STALL no unit finished for {now - busy:.0f} s, {n_inflight} in flight"))
     return [(k, m) for k, m in out if now - ALERTED.get(k, 0) >= 300]
 
 
@@ -649,7 +656,9 @@ def stall_tick(n_inflight):
             log(m, "(alert ref pushed)" if ok else "(alert ref push FAILED)")
     except OSError:
         pass
-    for kind, msg in stall_alerts(time.time(), n_inflight, LAST_DONE[0], T0, su):
+    if not n_inflight:
+        LAST_IDLE[0] = time.time()
+    for kind, msg in stall_alerts(time.time(), n_inflight, LAST_DONE[0], T0, su, LAST_IDLE[0]):
         ALERTED[kind] = time.time()
         ok = DRY or alert_ref(msg, kind)
         log(msg.split(":")[0] if kind == "prstall-bucket" else "PR-STALL", msg, "(alert ref pushed)" if ok else "(alert ref push FAILED)")

@@ -4,10 +4,19 @@ on:
   push:
     branches: [main, desk-budget, gateway-v1]
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: commit to test (empty = the caller's commit)
+        type: string
+        default: ''
 jobs:
   nodesk:
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
       - run: python3 .github/cloud-pr/nodesk.py

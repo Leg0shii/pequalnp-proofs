@@ -1,0 +1,156 @@
+# lane-ci (W8, Lead 08:17 UTC 27 Nov, team/board/README.md): every lane proves itself on GitHub's real runner.
+# On every pull request to gateway-v1 INSIDE the fork (head repo = this repo; a PR from another repo runs nothing, so
+# no secret ever reaches outside code) and on dispatch: mintdrill, nodesk, preflight-live and the dry loadcanary, on
+# the PR head sha. The run ends with ONE line a lane pastes into its board file (job "line", also artifact lane-ci-line):
+#   LANE-CI <sha8> head=<h8> w<N>x<M> warm=<S>s first_would_push=<s>s after release, dry=.. race_p95=.. guards_p95=..
+#   tree_p95=.. total_p95=.. results=.. alerts=.. reads run=.. pr=.. run=<id> verdict=ok|SLOW|BAD suites mintdrill=..
+# team/infra/preflight.sh step "canary" requires verdict=ok from the newest such run on the sha (artifact lane-ci-canary).
+# Dispatch works once this file is on main (GitHub's rule); until then open a PR to gateway-v1 or push loadcanary/<sha8>-w28.
+name: lane-ci
+on:
+  pull_request:
+    branches: [gateway-v1]
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: commit or branch to test (empty = the dispatched branch)
+        type: string
+        default: ''
+      workers:
+        description: DRAIN_WORKERS (empty = the LOADCANARY_WORKERS variable, else 28)
+        type: string
+        default: ''
+      slots:
+        description: DRAIN_PR_SLOTS (empty = the LOADCANARY_SLOTS variable, else 8)
+        type: string
+        default: ''
+      warm_s:
+        description: DRAIN_WARM_S
+        type: string
+        default: '0'
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+# Canaries run side by side (Lead 08:36): loadcanary.yml's group is per branch (loadcanary-<branch>), so a lane never
+# waits on the rehearsal or on another lane. Cap (W8): job "queue" lets this canary start only while fewer than 3
+# canaries (loadcanary runs + other lane-ci canaries) are queued or running: the run-token read pool (5000/h) is shared
+# with the live opener. Polls every 20 s, up to 40 min; still full: no canary, the line says so, re-run the run.
+# Merge gate: job "line" FAILS unless the LANE-CI verdict is ok and every suite passed.
+# Read budget (Lead 08:49): while the fork ref wave/on exists (the Lead sets and deletes it) job "wave" fails and NOTHING
+# else runs (no suite, no canary): the wave's opener owns the read pool. The check is a git ls-remote (no REST read).
+concurrency:                       # never the group "loadcanary" (a caller sharing a called workflow's group deadlocks)
+  group: lane-ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+jobs:
+  wave:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Refuse while the wave is on (fork ref wave/on)
+        shell: bash
+        run: |
+          o=$(git ls-remote "https://github.com/${{ github.repository }}.git" 'refs/heads/wave/*') || { echo "::error::ls-remote failed: not starting"; exit 1; }
+          # create-only switch (infra 08:59, no ref deletes): wave/on-<epoch> and wave/off-<epoch>; ON while the newest on is newer
+          # than the newest off (same rule as 16.1 stop/go); a bare wave/on also counts as ON
+          on=$(printf '%s\n' "$o" | sed -n 's#.*refs/heads/wave/on-\([0-9]*\)$#\1#p' | sort -n | tail -1)
+          off=$(printf '%s\n' "$o" | sed -n 's#.*refs/heads/wave/off-\([0-9]*\)$#\1#p' | sort -n | tail -1)
+          if printf '%s\n' "$o" | grep -q 'refs/heads/wave/on$' || { [ -n "$on" ] && [ "$on" -gt "${off:-0}" ]; }; then
+            echo "::error::wave is ON (wave/on-$on newer than wave/off-${off:-none}): no lane-ci runs until the Lead says WAVE OFF"; exit 1
+          fi
+          echo "wave off (on-${on:-none} off-${off:-none}): go"
+  mintdrill:
+    needs: wave
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    uses: ./.github/workflows/mintdrill.yml
+    with:
+      ref: ${{ github.event.pull_request.head.sha || inputs.ref }}
+  nodesk:
+    needs: wave
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    uses: ./.github/workflows/nodesk.yml
+    with:
+      ref: ${{ github.event.pull_request.head.sha || inputs.ref }}
+  preflight-live:
+    needs: wave
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    uses: ./.github/workflows/preflight-live.yml
+    secrets: inherit
+    with:
+      ref: ${{ github.event.pull_request.head.sha || inputs.ref }}
+  queue:
+    needs: wave
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      go: ${{ steps.wait.outputs.go }}
+      why: ${{ steps.wait.outputs.why }}
+    steps:
+      - name: Wait until fewer than 3 canaries are queued or running
+        id: wait
+        env:
+          GH_TOKEN: ${{ github.token }}
+          R: ${{ github.repository }}
+        shell: bash
+        run: |
+          busy() {   # prints what holds the canary queue, nothing when it is free
+            gh api "repos/$R/actions/workflows/loadcanary.yml/runs?per_page=20" \
+              --jq '.workflow_runs[] | select(.status != "completed") | "loadcanary run \(.id) \(.status)"'
+            for id in $(gh api "repos/$R/actions/workflows/lane-ci.yml/runs?per_page=20" --jq ".workflow_runs[] | select(.status != \"completed\" and .id != $GITHUB_RUN_ID) | .id"); do
+              gh api "repos/$R/actions/runs/$id/jobs" --jq '.jobs[] | select((.name | startswith("canary")) and .status != "completed") | "lane-ci run '"$id"' canary \(.status)"'
+            done
+          }
+          t0=$(date +%s)
+          while :; do
+            all=$(busy 2>&1); n=$(printf '%s' "$all" | grep -c .); b=$(printf '%s' "$all" | head -3 | paste -sd';' -)
+            [ "$n" -lt 3 ] && { echo "start: $n other canaries running after $(( $(date +%s) - t0 )) s ${b:+($b)}"; echo "go=true" >> "$GITHUB_OUTPUT"; exit 0; }
+            [ $(( $(date +%s) - t0 )) -ge 2400 ] && break
+            echo "$(date -u +%T) waiting, $n running: $b"; sleep 20
+          done
+          echo "go=false" >> "$GITHUB_OUTPUT"; echo "why=3 canaries busy for 40 min ($b): re-run this run" >> "$GITHUB_OUTPUT"
+  canary:
+    needs: queue
+    if: needs.queue.outputs.go == 'true'
+    uses: ./.github/workflows/loadcanary.yml
+    secrets: inherit
+    with:
+      ref: ${{ github.event.pull_request.head.sha || inputs.ref }}
+      workers: ${{ inputs.workers }}
+      slots: ${{ inputs.slots }}
+      warm_s: ${{ inputs.warm_s || '0' }}
+  line:
+    needs: [wave, mintdrill, nodesk, preflight-live, queue, canary]
+    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: One line for the board file
+        env:
+          LINE: ${{ needs.canary.outputs.line }}
+          R_MD: ${{ needs.mintdrill.result }}
+          R_ND: ${{ needs.nodesk.result }}
+          R_PL: ${{ needs['preflight-live'].result }}
+          R_LC: ${{ needs.canary.result }}
+          R_WAVE: ${{ needs.wave.result }}
+          Q_WHY: ${{ needs.queue.outputs.why }}
+        shell: bash
+        run: |
+          l="${LINE:-LANE-CI ? verdict=BAD (no canary line, canary job $R_LC${Q_WHY:+, $Q_WHY})} suites mintdrill=$R_MD nodesk=$R_ND preflight-live=$R_PL canary=$R_LC"
+          echo "$l"; echo "$l" > line.txt
+          { echo '### LANE-CI (paste into team/board/<lane>.md)'; echo '```'; echo "$l"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          [ "$R_WAVE" = success ] || { echo "::error::wave/on is set (or its check failed): lane-ci did not run"; exit 1; }
+          ok=1
+          case "$l" in *" verdict=ok "*|*" verdict=ok") ;; *) echo "::error::LANE-CI verdict is not ok: no merge"; ok=0;; esac
+          for x in "mintdrill $R_MD" "nodesk $R_ND" "preflight-live $R_PL"; do
+            [ "${x#* }" = success ] || { echo "::error::suite ${x% *} is ${x#* }: no merge"; ok=0; }
+          done
+          [ $ok = 1 ]
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lane-ci-line
+          path: line.txt
+          retention-days: 14
