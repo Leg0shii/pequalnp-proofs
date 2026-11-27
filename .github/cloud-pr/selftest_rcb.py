@@ -553,6 +553,56 @@ if hasattr(S, "sight_line"):
 else:
     case("07:31-sight-to-create-logged", False, "(no sight_line)")
 
+# ---- lane dryfinal (Lead 09:03): a dry run makes the final checks of the create (halt, rival_now(final=True) under
+# the 16.12 bound) and returns before the push and the create. Fixture: a snapshot over the bound = WOULD-REFUSE.
+if hasattr(S, "dry_final"):
+    sv = (S.run, S.filing_halted, S.stopped, S.log, S.push_branch, S.create_pr, S.gh)
+    logs, calls = [], []
+    S.log = lambda *a: logs.append(" ".join(map(str, a))); S.stopped = lambda: False
+    S.push_branch = lambda *a: calls.append("push") or None
+    S.create_pr = lambda *a: calls.append("create") or ("u", "ok")
+    def frun_df(cmd, timeout=300, env=None, cwd=None):
+        calls.append(" ".join(cmd[:3]))
+        return fake_run(cmd, timeout, env, cwd)
+    S.run = frun_df
+    os.environ.pop("PR_GATE_DIR", None)
+    try:
+        # (a) over the bound: every newest-page read takes 7 s (d > 6 s), no refresher: SNAP-SLOW = WOULD-REFUSE
+        reset_snap(); PULLS.clear(); add_pr(74001, CLK[0] - 5, "Prove L-meta-74001"); S.STG.clear()
+        S.filing_halted = lambda *a: (False, ""); REQ = []; S.gh = page_lat(7.0)
+        r, why = S.dry_final("L-meta-74999", None, "c" * 40)
+        wr = [l for l in logs if l.startswith("WOULD-REFUSE L-meta-74999") and " SKIP " in l]
+        case("dryfinal-snapshot-over-bound-WOULD-REFUSE", r == "dry-run" and why.startswith("would refuse") and wr
+             and "rival check failed" in wr[0] and not [l for l in logs if l.startswith("WOULD-CREATE")] and "final" in S.STG
+             and not [x for x in calls if x in ("push", "create") or x.startswith("gh api -i")],
+             f"({wr[0][:90] if wr else why[:90]}, final={S.STG.get('final')}, page reads {len(REQ)})")
+        # (b) fresh read: clear = WOULD-CREATE after the final check, final= timed, no push, no create
+        logs.clear(); calls.clear(); reset_snap(); REQ = []; S.gh = page_lat(0.5); S.STG.clear()
+        r, why = S.dry_final("L-meta-74999", None, "c" * 40)
+        case("dryfinal-fresh-WOULD-CREATE", r == "dry-run" and why.startswith("would push") and "final" in S.STG
+             and [l for l in logs if l.startswith("WOULD-CREATE L-meta-74999")] and not [l for l in logs if l.startswith("WOULD-REFUSE")]
+             and len(REQ) >= 1 and not [x for x in calls if x in ("push", "create")], f"(final={S.STG.get('final')}, why={why[:50]})")
+        # (c) a rival PR on the unit, seen only at the final check
+        logs.clear(); reset_snap(); add_pr(74002, CLK[0] - 1, "Prove L-meta-74999"); S.STG.clear()
+        r, why = S.dry_final("L-meta-74999", None, "c" * 40)
+        case("dryfinal-rival-WOULD-REFUSE", why.startswith("would refuse before create: rival PR open: #74002"), f"({why[:70]})")
+        # (d) halted at the final check: WOULD-REFUSE halted, also for a leased PR (no rival read then)
+        logs.clear(); REQ.clear(); S.filing_halted = lambda *a: (True, "stop/1800000000 >= go")
+        r, why = S.dry_final("L-meta-74999", "lease-z", "c" * 40)
+        case("dryfinal-halted-WOULD-REFUSE", why.startswith("would refuse before create: halted:") and not REQ, f"({why[:70]})")
+        # (e) the dry return in submit() is after the commit build and before push_branch, and goes through dry_final
+        src = open(S.__file__).read()
+        body = src[src.index("def submit(gid, lease):"):src.index("def dry_final(")]
+        case("dryfinal-dry-return-before-push", body.index("return dry_final(") < body.index("push_branch(") and
+             body.count("if DRY:") == 1 and body.index("commit-tree") < body.index("return dry_final("), "")
+    except Exception as e:
+        case("dryfinal-snapshot-over-bound-WOULD-REFUSE", False, repr(e)[:120])
+    finally:
+        S.run, S.filing_halted, S.stopped, S.log, S.push_branch, S.create_pr, S.gh = sv
+        PULLS.clear(); reset_snap()
+else:
+    case("dryfinal-snapshot-over-bound-WOULD-REFUSE", False, "(no dry_final in this submit.py)")
+
 # ---- Lead 09:10: a refused head push (429/403) is a 16.13 refusal (stall for every worker, alert), then pushed again
 if hasattr(S, "push_branch"):
     PD = tempfile.mkdtemp(); svd = os.environ.get("PR_GATE_DIR"); os.environ["PR_GATE_DIR"] = PD

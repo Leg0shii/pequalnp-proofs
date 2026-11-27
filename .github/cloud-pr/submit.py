@@ -1808,9 +1808,7 @@ def submit(gid, lease):
     if why:
         return None, why
     if DRY:
-        tw = time.time()                 # rehearsal (Lead 08:12): the would-create time per unit, epoch to 0.001 s
-        log(f"WOULD-CREATE {gid} {tw:.3f}"); log(sight_line(gid, tw))
-        return "dry-run", f"would push {c[:12]} as {FORK}:{gid} and open the PR"
+        return dry_final(gid, lease, c)
     t = time.time()
     err = push_branch(c, gid)
     STG["push"] = round(time.time() - t, 1)
@@ -1890,6 +1888,40 @@ def newest_base():
         return d if d.get("sha") and d.get("dir") and os.path.isdir(d["dir"]) else None
     except Exception:
         return None
+
+
+def dry_final(gid, lease, c):
+    """lane dryfinal (Lead 09:03): a dry run makes the checks that create_pr() makes before its first create, in the
+    same order and with the same calls: STOP file, site status, then inside a PR slot (pr_gate, so the slot and bucket
+    waits are part of the time) the halt switch and, for an unleased PR, the final rival check rival_now(final=True)
+    under the 16.12 bound (SNAP-SLOW waits included). It returns before the push and the create. STG final = seconds for
+    these checks. A check that would stop the create logs WOULD-REFUSE (with SKIP, so the drain echoes it); else
+    WOULD-CREATE as before, now stamped after the final check. Dry only: create_pr() is unchanged."""
+    t_f = time.time()
+
+    def refuse(why):
+        STG["final"] = round(time.time() - t_f, 3)
+        log(f"WOULD-REFUSE {gid}: SKIP before create, {why}")
+        return "dry-run", f"would refuse before create: {why} (commit {c[:12]}, no push)"
+    if stopped():
+        return refuse("STOP file on upstream main")
+    sc = site_closed_now()
+    if sc:
+        return refuse("site-closed: " + sc)
+    with pr_gate() as g:
+        if getattr(g, "giveup", False):
+            return refuse("stall-giveup: four create refusals in this drain")
+        h, hwhy = filing_halted()
+        if h:
+            return refuse("halted: " + hwhy)
+        if not lease:
+            rv = rival_now(gid, SNAP_CREATE_AGE_S, final=True)
+            if rv:
+                return refuse(rv if rv.startswith("rival check failed") else "rival PR open: " + rv)
+        STG["final"] = round(time.time() - t_f, 3)
+        tw = time.time()                 # rehearsal (Lead 08:12): the would-create time per unit, epoch to 0.001 s
+        log(f"WOULD-CREATE {gid} {tw:.3f}"); log(sight_line(gid, tw))
+    return "dry-run", f"would push {c[:12]} as {FORK}:{gid} and open the PR"
 
 
 def pr_create_cmd(gid, body):
