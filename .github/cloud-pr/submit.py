@@ -705,6 +705,7 @@ def _build_snapshot(files):
     size, maxp = (100, 60) if full else (SNAP_PAGE, SNAP_MAX_PAGES)
     recent, seen_n = [], set()
     dur = {}
+    t_b0 = time.time(); nfr = [0]
 
     def page(k):
         # 16.7: read with If-None-Match: an unchanged page is a 304 and costs nothing of the run token's hourly
@@ -732,6 +733,7 @@ def _build_snapshot(files):
                 set(UNIT_TOKEN.findall(((p.get("head") or {}).get("ref") or "").replace("_", "-")))
             key = f"{p['number']}:{(p.get('head') or {}).get('sha') or ''}"
             if key not in files:
+                nfr[0] += 1
                 files[key] = sorted({u for u in map(file_unit, pr_files(p["number"])) if u})
             recent.append({"n": p["number"], "who": who, "units": sorted(us | set(files[key])),
                            "by_file": sorted(set(files[key]) - us)})
@@ -745,7 +747,8 @@ def _build_snapshot(files):
                 t_build = time.time()     # the snapshot is stamped at THAT request (usually a 304)
                 page(1)
             return {"t": t_build, "d": round(dur.get(1, 0.0), 3), "hdr": TL_HDR[0], "taken": tl, "recent": recent,
-                    "files": files, "rl": ghcond.STATS["remaining"], "full": full}
+                    "files": files, "rl": ghcond.STATS["remaining"], "full": full,
+                    "b": round(time.time() - t_b0, 2), "pages": len(dur), "fr": nfr[0]}
     raise RuntimeError(f"more than {maxp} pages of open PRs since the taken list (fail closed)")
 
 
@@ -889,7 +892,8 @@ def rival_snapshot(max_age=None, final=False):
             json.dump(snap, o)
         os.replace(f + ".tmp", f)
         log(f"rival snapshot: taken {len(snap['taken'])} rows (header {time.time() - snap['hdr']:.0f} s old), "
-            f"{len(snap['recent'])} open PRs since, file cache {len(snap['files'])}")
+            f"{len(snap['recent'])} open PRs since, file cache {len(snap['files'])}, build {snap.get('b')} s, "
+            f"{snap.get('pages')} page reads, {snap.get('fr')} files reads, full sweep {snap.get('full')}")
         return snap
 
 

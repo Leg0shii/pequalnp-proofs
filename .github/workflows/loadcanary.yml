@@ -101,4 +101,6 @@ jobs:
           print(f"LOADCANARY snap_age max={max(snap) if snap else float('nan'):.1f}s  cpu busy avg={st.mean(cpu) if cpu else float('nan'):.0f}% max={max(cpu) if cpu else 0}%  run-queue max={max(rq) if rq else 0}")
           EOF
           grep -i "refresher" drain.log | head -3
+          echo "refresher log: $(grep -c 'rival snapshot:' "$W/refresher.log" 2>/dev/null) builds"; grep 'rival snapshot:' "$W/refresher.log" 2>/dev/null | sed -n '1,3p;$p'
+          grep -v 'rival snapshot:' "$W/refresher.log" 2>/dev/null | tail -5
           exit $rc
