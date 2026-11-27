@@ -256,8 +256,21 @@ def filing_go():
     return max([int(x) for x in re.findall(r"/filing/go/(\d+)$", txt, re.M)] or [0])
 
 
+def next_ref_epoch(now, stop_epochs, go_epochs):
+    """Ref number for a new filing/stop/<n> or filing/go/<n> (red team V5, Lead 06:02): max(now, every existing
+    filing/stop + 1, every existing filing/go + 1). A new ref is then greater than every ref that existed when it was
+    written, so ref order = write order whatever the writers' clocks say (a fast clock cannot outrank a later write,
+    two writes in one second cannot collide). Pure: now = int(time.time()), the epochs read right before the push.
+    Copy unchanged into every writer of these refs (PC, Lead, infra)."""
+    return max([int(now)] + [int(e) + 1 for e in stop_epochs] + [int(e) + 1 for e in go_epochs])
+
+
 def filing_stop(msg):
-    """push toolkit ref filing/stop/<epoch> (the opener files nothing while it is newer than every filing/go)."""
+    """push toolkit ref filing/stop/<n> (the opener files nothing while it is newer than every filing/go); n by
+    next_ref_epoch over the refs read right before the push; refs unreadable -> n = now (a stop is still pushed)."""
+    sts, gos = all_refs("filing/stop"), all_refs("filing/go")
+    n = next_ref_epoch(time.time(), [e for e, _ in sts or []], [e for e, _ in gos or []]) if sts is not None and gos is not None \
+        else int(time.time())
     g = os.path.join(W, "taken.git")
     if not os.path.isdir(g):
         sh("git", "init", "-q", "--bare", g)
@@ -265,7 +278,7 @@ def filing_stop(msg):
     env = dict(os.environ, GIT_AUTHOR_NAME="dupclose", GIT_AUTHOR_EMAIL="dupclose@localhost",
                GIT_COMMITTER_NAME="dupclose", GIT_COMMITTER_EMAIL="dupclose@localhost")
     c = subprocess.run(["git", "-C", g, "commit-tree", tree, "-m", msg], capture_output=True, text=True, env=env).stdout.strip()
-    return sh("git", *auth(), "-C", g, "push", "-q", TK, f"{c}:refs/heads/filing/stop/{int(time.time())}").returncode == 0
+    return sh("git", *auth(), "-C", g, "push", "-q", TK, f"{c}:refs/heads/filing/stop/{n}").returncode == 0
 
 
 BLIND_TAG = "filing stop: BLIND"
@@ -299,6 +312,28 @@ def ref_message(sha, ref):
     return r.stdout.strip() if r.returncode == 0 else None
 
 
+MSGS = {}          # stop ref sha -> commit message (immutable, so cached; bounded by the number of stop refs)
+
+
+def stop_listed():
+    """PR numbers named by our REJ-HALT stop refs (any age): a rejection already halted for, lifted or not. Clock-free
+    replacement of 'closed after the newest filing/go' (V5). None if the stop refs cannot be read."""
+    sts = all_refs("filing/stop")
+    if sts is None:
+        return None
+    got = set()
+    for e, h in sts:
+        if h not in MSGS:
+            m = ref_message(h, f"refs/heads/filing/stop/{e}")
+            if m is None:
+                continue                              # unreadable: its PRs count as not halted for (fail closed)
+            MSGS[h] = m
+        m = re.match(r"filing stop: REJ-HALT \d+ ([\d ]+)", MSGS[h])
+        if m:
+            got.update(int(x) for x in m.group(1).split())
+    return got
+
+
 def blind_lift():
     """push filing/go/<epoch> + alert BLIND-LIFT if the newest filing/stop is our blind stop and newer than every go."""
     sts, gos = all_refs("filing/stop"), all_refs("filing/go")
@@ -319,7 +354,8 @@ def blind_lift():
                GIT_COMMITTER_NAME="dupclose", GIT_COMMITTER_EMAIL="dupclose@localhost")
     c = subprocess.run(["git", "-C", g, "commit-tree", tree, "-m", f"filing go: BLIND-LIFT of stop {st[0]} (two full scans, no rejection)"],
                        capture_output=True, text=True, env=env).stdout.strip()
-    ok = sh("git", *auth(), "-C", g, "push", "-q", TK, f"{c}:refs/heads/filing/go/{max(int(time.time()), st[0] + 1)}").returncode == 0
+    n = next_ref_epoch(time.time(), [e for e, _ in sts], [e for e, _ in gos])
+    ok = sh("git", *auth(), "-C", g, "push", "-q", TK, f"{c}:refs/heads/filing/go/{n}").returncode == 0
     if ok:
         alert_ref(f"BLIND-LIFT stop {st[0]}", "blindlift")
         REJ["clean"] = 0
@@ -450,14 +486,18 @@ def rej_burst():
     n = sum(1 for p in prs if not p.get("mergedAt") and p.get("closedAt") and now - t(p["closedAt"]) <= REJ_WIN
             and any("proved first" in (c.get("body") or "").lower() for c in p.get("comments") or []))
     # Lead 05:10 HALT ON ONE REJECTION: one of our PRs closed unmerged (not by dupclose) with a "proved first" comment
-    # or any comment by another login, closed after the newest filing/go ref -> filing/stop/<epoch> + REJ-HALT, once
+    # or any comment by another login, not yet named by one of our stops (Y7: no clock compare) -> filing/stop + REJ-HALT
     go = filing_go()
     # closed by another login (closedBy known) = a maker's close = a rejection, comment or not (Y3)
     hit = [p["number"] for p in prs if not p.get("mergedAt") and p.get("closedAt") and now - t(p["closedAt"]) <= REJ_WIN
-           and t(p["closedAt"]) > go and p["number"] not in HALTED
+           and p["number"] not in HALTED
            and ((p.get("closedBy") not in (None, HANDLE))
                 or any("proved first" in (c.get("body") or "").lower() or ((c.get("user") or {}).get("login") or HANDLE) != HANDLE
                        for c in p.get("comments") or []))]
+    if hit:                                           # Y7: already halted for (named by one of our stops) -> not new
+        listed = stop_listed() or set()
+        HALTED.update(x for x in hit if x in listed)
+        hit = [x for x in hit if x not in listed]
     scan = REJ.get("scan", "ok")
     blind = False
     if scan != "ok" and not hit and f"scan@{go}" not in HALTED:
