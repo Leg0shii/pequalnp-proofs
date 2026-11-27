@@ -234,6 +234,11 @@ def child_close(src, w):
     FIXREFS = [r if isinstance(r, str) else r["ref"] for r in w.get("toolkit_refs", [])]
     FIXSHA = {r["ref"]: "f%039d" % i for i, r in enumerate(w.get("toolkit_refs", [])) if not isinstance(r, str)}
     FIXMSG = {FIXSHA[r["ref"]]: r.get("msg", "") for r in w.get("toolkit_refs", []) if not isinstance(r, str)}
+    FIXBORN = {r["ref"]: T0 + r["born"] for r in w.get("toolkit_refs", []) if not isinstance(r, str) and "born" in r}
+
+    def live_refs():                       # toolkit refs that exist now (fixture refs from their birth, pushed refs)
+        b = lambda r: FIXBORN[r] if r in FIXBORN else (int(re.search(r"/(\d+)$", r).group(1)) if re.search(r"/(\d{9,})$", r) else 0)
+        return [r for r in FIXREFS if b(r) <= clock[0]] + list(PUSHED)
 
     def visible(p):                       # a PR exists from created_at on
         return D.time.mktime(time.strptime(p["created_at"][:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone <= clock[0]
@@ -296,6 +301,9 @@ def child_close(src, w):
             if "filing/stop/" in ref and out.setdefault("stop_fails", 0) < w.get("stop_push_fail", 0):
                 out["stop_fails"] += 1                                       # Y6: the stop push fails
                 return subprocess.CompletedProcess(a, 1, "", "remote rejected")
+            if ref in live_refs() and "-f" not in a:                          # Y7c: a ref name that exists is refused
+                out.setdefault("push_collisions", []).append(ref)
+                return subprocess.CompletedProcess(a, 1, "", "! [rejected] (already exists)")
             out["pushes"].append(ref); PUSHED[ref] = sha
             if "filing/stop/" in ref:
                 g = a[a.index("-C") + 1] if "-C" in a else None
@@ -304,7 +312,7 @@ def child_close(src, w):
             return subprocess.CompletedProcess(a, 0, "", "")
         if a[0] == "git" and "ls-remote" in a:                  # fixture refs ("ref" or {"ref", "msg"}) + what was pushed
             pats = [x.split("*")[0] for x in a if x.startswith("refs/")]
-            born = lambda r: int(re.search(r"/(\d+)$", r).group(1)) if re.search(r"/(\d{9,})$", r) else 0
+            born = lambda r: FIXBORN[r] if r in FIXBORN else (int(re.search(r"/(\d+)$", r).group(1)) if re.search(r"/(\d{9,})$", r) else 0)
             rows = [(FIXSHA.get(r, "0"), r) for r in FIXREFS if born(r) <= clock[0]] + [(v, k) for k, v in PUSHED.items()]
             return subprocess.CompletedProcess(a, 0, "".join(f"{h}\t{r}\n" for h, r in rows if any(r.startswith(x) for x in pats)), "")
         if a[0] == "git" and "fetch" in a and any("filing/stop/" in x for x in a):      # Y4j: a stop ref's commit
@@ -342,6 +350,8 @@ def child_close(src, w):
         except Exception as e:
             out["unexpected"].append("one_pass: " + repr(e)[:120])
     out["closed_at"] = {}
+    ep = lambda pat: [int(r.rsplit("/", 1)[1]) for r in live_refs() if r.startswith(pat) and r.rsplit("/", 1)[1].isdigit()]
+    out["halted"] = max(ep("refs/heads/filing/stop/") or [0]) > max(ep("refs/heads/filing/go/") or [0])
     return out
 
 
@@ -437,7 +447,7 @@ def body_bad(prs, ex):
     return bad
 
 
-def judge_close(name, w, r, must_close, must_keep=(), must_push=None, no_push=False, max_reads=None, go_count=None, last_stop=None):
+def judge_close(name, w, r, must_close, must_keep=(), must_push=None, no_push=False, max_reads=None, go_count=None, last_stop=None, halted=None):
     if r.get("crash"):
         return False, "crash " + " | ".join(r["crash"])
     bad = []
@@ -453,6 +463,10 @@ def judge_close(name, w, r, must_close, must_keep=(), must_push=None, no_push=Fa
         bad.append(f"I4 no {must_push} push")
     if no_push and any("filing/stop" in p for p in r["pushes"]):
         bad.append("false halt")
+    if halted is not None and r.get("halted") != halted:
+        bad.append("filing " + ("NOT halted" if halted else "still halted") + " at the end")
+    if r.get("push_collisions"):
+        bad.append(f"push to an existing ref {r['push_collisions'][:2]}")
     if go_count is not None:
         ng = sum(1 for p in r["pushes"] if "filing/go/" in p)
         if ng != go_count:
@@ -607,6 +621,19 @@ def cases():
                 {"must_close": [], "must_push": "refs/heads/filing/stop/", "go_count": 0, "last_stop": "filing stop: REJ-HALT"}))
     out.append(("hostile/Y4j2", "close", {"closed_pulls": five, "closed_fail_passes": [0, 1, 2], "passes": [0, 60, 120, 180, 240, 300],
                                           "unreadable_stops": True}, {"must_close": [], "must_push": "refs/heads/filing/stop/", "go_count": 0}))
+    # Y7 (red team V5, Lead 06:02): stop/go order without trusting clocks
+    rj7 = lambda n, at: ours_closed(n, "L-meta-%d" % (93100 + n % 100), at, by="makers-bot",
+                                    comments=[{"body": "REJECTED", "user": {"login": "makers-bot"}, "at": at + 1}])
+    out.append(("hostile/Y7a", "close", {"closed_pulls": five + [rj7(50110, -10)], "passes": [0],
+                                         "toolkit_refs": [{"ref": "refs/heads/filing/go/%d" % (T0 + 600), "msg": "filing go: fast clock", "born": -5}]},
+                {"must_close": [], "must_push": "refs/heads/filing/stop/", "halted": True}))
+    out.append(("hostile/Y7b", "close", {"closed_pulls": five + [rj7(50111, -120)], "passes": [0, 60],
+                                         "toolkit_refs": [{"ref": "refs/heads/filing/stop/%d" % (T0 + 600), "msg": "filing stop: REJ-HALT 1 50111", "born": -100},
+                                                          {"ref": "refs/heads/filing/go/%d" % (T0 + 601), "msg": "filing go: Lead", "born": 30}]},
+                {"must_close": [], "no_push": True, "halted": False}))
+    out.append(("hostile/Y7c", "close", {"closed_pulls": five + [rj7(50112, -5)], "passes": [0],
+                                         "toolkit_refs": [{"ref": "refs/heads/filing/stop/%d" % T0, "msg": "filing stop: REJ-HALT 1 49999", "born": -1}]},
+                {"must_close": [], "must_push": "refs/heads/filing/stop/", "halted": True, "last_stop": "50112"}))
     # Y5: a new dupclose job (empty CLOSED); our PR closed BY US 3 min ago, a CI-bot comment on it -> no halt
     out.append(("hostile/Y5", "close", {"closed_pulls": [ours_closed(50103, "L-meta-93004", -180, by=HANDLE,
                                                                      comments=[{"body": "build passed", "user": {"login": "ci-bot"}, "at": -170}])],
