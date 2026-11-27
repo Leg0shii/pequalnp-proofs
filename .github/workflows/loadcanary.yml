@@ -18,7 +18,7 @@ on:
       slots:
         description: DRAIN_PR_SLOTS
         type: string
-        default: '6'
+        default: '8'
 
 permissions:
   contents: read
@@ -52,7 +52,7 @@ jobs:
           PR_TOKEN: ${{ secrets.PR_TOKEN }}
           DRAIN_PREFIX: loadtest
           DRAIN_WORKERS: ${{ inputs.workers || vars.LOADCANARY_WORKERS || '28' }}
-          DRAIN_PR_SLOTS: ${{ inputs.slots || vars.LOADCANARY_SLOTS || '6' }}
+          DRAIN_PR_SLOTS: ${{ inputs.slots || vars.LOADCANARY_SLOTS || '8' }}
           DRAIN_REFRESHER: '1'
           DRAIN_LINGER: '20'
           DRAIN_MAX_S: '900'
