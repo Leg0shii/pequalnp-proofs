@@ -41,7 +41,7 @@ jobs:
           python3 -I src/.github/cloud-pr/pushcanary.py; rc=$?
           b=$(echo -n "x-access-token:$PR_TOKEN" | base64 -w0)
           u="https://github.com/$GITHUB_REPOSITORY.git"; h="http.https://github.com/.extraheader=AUTHORIZATION: basic $b"
-          for r in $(git -C src -c "$h" ls-remote "$u" | awk '$2 ~ /^refs\/heads\/pushcanary(-run)?\//{print $2}'); do
+          for r in $(git -C src -c "$h" ls-remote "$u" | awk '$2 ~ /^refs\/heads\/(pushcanary(-run)?|upbase)\//{print $2}'); do
             git -C src -c "$h" push -q "$u" --delete "$r" && echo "deleted $r"
           done
           exit $rc

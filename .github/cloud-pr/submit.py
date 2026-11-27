@@ -1143,14 +1143,56 @@ def auth_cfg():
     return ["-c", f"http.https://github.com/.extraheader=AUTHORIZATION: basic {b}"]
 
 
+def upbase_ref(base):
+    """W6 push canary + infra (08:50 UTC 27 Nov): the push sends only the new objects when the fork ADVERTISES a ref at
+    the commit's parent (the upstream base): git push then leaves out everything reachable from it (about 500 bytes).
+    A fork tip based on an older upstream left the whole tree in the pack (182-228 MB per unit, and lazy blob fetches
+    in a blobless clone). One ref refs/heads/upbase/<base sha8> per base, made once (REST create of a ref at the
+    upstream sha: a fork shares its objects with upstream), shared by the drain's workers through SNAP_DIR.
+    Returns the ref name, or None (then the old fork-tip base is used)."""
+    name = f"upbase/{base[:8]}"
+    mark = os.path.join(SNAP_DIR, f"upbase-{base[:12]}.ok")
+    if os.path.exists(mark):
+        return name
+    url = f"https://github.com/{FORK}.git"
+    try:
+        os.makedirs(SNAP_DIR, exist_ok=True)
+        with open(os.path.join(SNAP_DIR, "upbase.lock"), "w") as lk:
+            fcntl.flock(lk, fcntl.LOCK_EX)
+            if os.path.exists(mark):
+                return name
+            r = run(["git"] + auth_cfg() + ["ls-remote", url, f"refs/heads/{name}"], timeout=60)
+            have = r.returncode == 0 and r.stdout.split()[:1] == [base]
+            if not have:
+                r = run(["gh", "api", "-X", "POST", f"repos/{FORK}/git/refs", "-f", f"ref=refs/heads/{name}", "-f", f"sha={base}"],
+                        timeout=60, env=dict(os.environ, GH_TOKEN=PR_TOKEN))
+                have = r.returncode == 0 or "Reference already exists" in (r.stdout + r.stderr)
+                if not have:
+                    log("upbase: REST ref create refused:", (r.stderr or r.stdout).strip()[:150], "- pushing the base once")
+                    r = run(["git"] + auth_cfg() + ["-C", TREE, "push", "-q", url, f"{base}:refs/heads/{name}"], timeout=600)
+                    have = r.returncode == 0
+            if have:
+                open(mark, "w").write(f"{time.time():.0f}\n")
+                return name
+            log("upbase: no ref at the base:", (r.stderr or "").strip()[:150])
+    except Exception as e:
+        log("upbase failed:", repr(e)[:150])
+    return None
+
+
 def push_branch(c, gid):
     url = f"https://github.com/{FORK}.git"
-    # a recent fork branch as negotiation base, so the push sends only the new objects (not the whole tree)
-    refs = git("ls-remote", url, "refs/heads/L-*", timeout=120).stdout.split("\n")
-    nums = sorted(((int(m.group(1)), m.group(0)) for l in refs for m in [re.search(r"refs/heads/L-meta-(\d+)$", l)] if m),
-                  reverse=True)
-    if nums:
-        git("fetch", "-q", "--depth=1", url, f"{nums[0][1]}:refs/fork/tip", timeout=180)
+    t = time.time()
+    base = git("rev-parse", f"{c}^").stdout.strip()
+    ub = upbase_ref(base) if base else None
+    STG["upbase"] = round(time.time() - t, 3)
+    if not ub:
+        # fallback: a recent fork branch as negotiation base (its own base may be far behind: a large pack)
+        refs = git("ls-remote", url, "refs/heads/L-*", timeout=120).stdout.split("\n")
+        nums = sorted(((int(m.group(1)), m.group(0)) for l in refs for m in [re.search(r"refs/heads/L-meta-(\d+)$", l)] if m),
+                      reverse=True)
+        if nums:
+            git("fetch", "-q", "--depth=1", url, f"{nums[0][1]}:refs/fork/tip", timeout=180)
     for att in range(4):
         # create-only (Lead 06:12): the ref must not exist yet; an existing head is never rewritten
         r = run(["git"] + auth_cfg() + ["-C", TREE, "push", "-q", f"--force-with-lease=refs/heads/{gid}:", url,
