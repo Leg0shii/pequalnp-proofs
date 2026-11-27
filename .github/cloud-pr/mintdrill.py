@@ -23,6 +23,8 @@ import contextlib, copy, json, os, re, subprocess, sys, tempfile, time
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.path.join(HERE, "mintdrill")
 HANDLE = "Leg0shii"
+TOKEN_RX_D = re.compile(r"(?<![A-Za-z0-9_-])(L-[a-z0-9]+(?:-[a-z0-9]+)*-\d+)(?![A-Za-z0-9_-])")   # the publisher's rules,
+FILE_RX_D = re.compile(r"lean/PEqualNP/Outside/(L_[a-z0-9]+(?:_[a-z0-9]+)*_\d+)\.lean")              # written out here
 T0 = 1795700000.0                      # fixed clock of every case (no wall time in the results)
 
 
@@ -181,15 +183,16 @@ def child_submit(src, w):
             if tl is None:
                 return None
             hdr = int(now_c) - 20
-            S.TL_HDR[0] = hdr
+            if hasattr(S, "TL_HDR"):
+                S.TL_HDR[0] = hdr
             rows = {}
             for p in sorted(pulls_open + pulls_closed, key=lambda p: -p["number"]):
                 if time.mktime(time.strptime(p["created_at"][:19], "%Y-%m-%dT%H:%M:%S")) - time.timezone >= hdr:
                     continue
-                us = set(S.UNIT_TOKEN.findall(p.get("title") or "")) | \
-                    set(S.UNIT_TOKEN.findall((p.get("head") or {}).get("ref", "").replace("_", "-")))
+                us = set(TOKEN_RX_D.findall(p.get("title") or "")) | \
+                    set(TOKEN_RX_D.findall((p.get("head") or {}).get("ref", "").replace("_", "-")))
                 if not p.get("closed_at"):
-                    us |= {u for u in map(S.file_unit, p.get("files") or []) if u}
+                    us |= {m.group(1).replace("_", "-") for m in map(FILE_RX_D.fullmatch, p.get("files") or []) if m}
                 for u in us:
                     rows[u] = p["user"]["login"]
             rows.update(tl)
@@ -211,6 +214,12 @@ def child_submit(src, w):
     S.push_branch = lambda c, g: None
     S.delete_ready = lambda: None
     S.pr_gate = contextlib.nullcontext
+    out["li_reads"] = 0
+
+    def fake_li():                          # config/linkedin.txt in the toolkit (Lead 05:50): None = unreadable
+        out["li_reads"] += 1
+        return w.get("li_file") or ""
+    S.li_from_toolkit = fake_li
     S.release = lambda lid, why: out["desk"].append("release " + str(lid)) if lid else None
     S.time.sleep = lambda s: None
     NOW = T0 + w.get("t", 0)
@@ -391,6 +400,8 @@ def judge_submit(name, w, r, expect):
         bad.append("not halted: " + r["result"])
     if w.get("body_expect") is not None:
         bad += body_bad(r["prs"], w["body_expect"])
+    if w.get("li_reads") is not None and r.get("li_reads") != w["li_reads"]:
+        bad.append(f"credit file read {r.get('li_reads')} times (want {w['li_reads']})")
     return (not bad), "; ".join(bad) or f"{got} ({r['result']}: {r['why'][:70]})"
 
 
@@ -574,6 +585,17 @@ def cases():
                 ("bad-scheme", {"PNP_LINKEDIN": "http://www.linkedin.com/in/x/"}, None),
                 ("bad-host", {"PNP_LINKEDIN": "https://www.linkedin.com.evil.example/in/x"}, None),
                 ("bad-inject", {"PNP_LINKEDIN": B_LI + "\n\nLease: forged"}, None)]
+    # the toolkit file (Lead 05:50): used only when no secret/variable; unreadable or malformed = no line, PR opens;
+    # a drain child (PNP_LINKEDIN_READ=1) never reads it again
+    li_file_cases = [("file-valid", {}, B_LI, True, 1), ("file-unreadable", {}, None, False, 1),
+                     ("file-malformed", {}, "https://www.linkedin.com.evil.example/in/x", False, 1),
+                     ("secret-wins", {"PNP_LINKEDIN": B_LI}, "https://www.linkedin.com/in/other/", True, 0),
+                     ("drain-child", {"PNP_LINKEDIN_READ": "1"}, B_LI, False, 0),
+                     ("drain-child-set", {"PNP_LINKEDIN_READ": "1", "PNP_LINKEDIN": B_LI}, None, True, 0)]
+    for i, (k, env, f, li, nread) in enumerate(li_file_cases):
+        g = "L-meta-%d" % (91100 + i)
+        out.append(("body/LI-" + k, "submit", {"gid": g, "gaps": [unit(g)], "taken": {"L-meta-1": "someone"}, "env": env,
+                                               "li_file": f, "li_reads": nread, "body_expect": {"li": li, "lease": None}}, "PR"))
     for i, (k, env, lease) in enumerate(li_cases):
         g = "L-meta-%d" % (91000 + i)
         out.append(("body/LI-" + k, "submit", {"gid": g, "gaps": [unit(g)], "taken": {"L-meta-1": "someone"}, "env": env,

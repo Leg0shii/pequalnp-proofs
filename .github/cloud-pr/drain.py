@@ -40,6 +40,26 @@ def auth():
     return ["-c", f"http.https://github.com/.extraheader=AUTHORIZATION: basic {b}"]
 
 
+def linkedin_file():
+    """config/linkedin.txt on toolkit main: one authenticated blobless shallow fetch, 20 s in all; '' on any failure."""
+    if not PR_TOKEN:
+        return ""
+    import shutil
+    g = tempfile.mkdtemp(prefix="li-")
+    try:
+        sh("git", "init", "-q", "--bare", g, timeout=10)
+        sh("git", "-C", g, "remote", "add", "origin", "https://github.com/Leg0shii/pnp-toolkit.git", timeout=10)
+        t = time.time()
+        if sh("git", *auth(), "-C", g, "fetch", "-q", "--depth=1", "--filter=blob:none", "origin", "main", timeout=20).returncode:
+            return ""
+        r = sh("git", *auth(), "-C", g, "show", "FETCH_HEAD:config/linkedin.txt", timeout=max(1.0, 20 - (time.time() - t)))
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except Exception:
+        return ""
+    finally:
+        shutil.rmtree(g, ignore_errors=True)
+
+
 def load_seen():
     if sh("git", "-C", SRC, "fetch", "-q", "--depth", "1", URL, "+refs/heads/drain-state:refs/drain/state").returncode:
         return
@@ -206,8 +226,14 @@ def main():
     if halted():                 # Lead 05:10: one rejection halts all filing until the Lead's filing/go
         log("halted: drain files nothing,", _FH[2])
         return
+    # Lead 05:50 (signed): the credit line from config/linkedin.txt in the toolkit when neither the secret nor the
+    # variable gives one; read ONCE per drain, passed to every submit child; a failure means no line. Never logged.
+    if not os.environ.get("PNP_LINKEDIN", "").strip():
+        os.environ["PNP_LINKEDIN"] = linkedin_file()
+    os.environ["PNP_LINKEDIN_READ"] = "1"
     load_seen()
-    log("drain start,", len(SEEN), "branches already done in the last 6 h")
+    log("drain start,", len(SEEN), "branches already done in the last 6 h",
+        "(credit line set)" if os.environ["PNP_LINKEDIN"] else "(no credit line)")
     inflight = {}; idle = None
     with ThreadPoolExecutor(WORKERS) as ex:
         while time.time() - T0 < MAX_S:

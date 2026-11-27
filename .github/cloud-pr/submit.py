@@ -30,14 +30,49 @@ SIZE_LIMIT = 524288
 DESC = "Proof written by an AI worker."
 FOOTER = "\n\n\U0001F916 Generated with [Claude Code](https://claude.com/claude-code)"
 # Owner 05:22 UTC 27 Nov: the makers' optional credit line (PULL_REQUEST_TEMPLATE.md, tools/pnp.sh PNP_LINKEDIN). The address
-# comes ONLY from the fork secret PNP_LINKEDIN (never from a file in a repository); unset or malformed = no line, and the
-# body is then byte for byte what it was before. The Lease paragraph and the footer keep their place and form.
-_LI = os.environ.get("PNP_LINKEDIN", "").strip()
-LI = f"\n\n**LinkedIn profile**: {_LI}" if re.fullmatch(r"https://www\.linkedin\.com/in/[A-Za-z0-9%._-]+/?", _LI) else ""
+# comes from the fork secret or variable PNP_LINKEDIN, else (Lead 05:50, signed) from config/linkedin.txt in the private
+# toolkit, read ONCE per drain by drain.py (children get PNP_LINKEDIN_READ=1 and never read it again) or once by a
+# single-unit run. Unset, unreadable, slow (20 s) or malformed = no line, and the body is then byte for byte what it was
+# before; the PR opens either way. The Lease paragraph and the footer keep their place and form. Never logged.
+LI_RX = r"https://www\.linkedin\.com/in/[A-Za-z0-9%._-]+/?"
+_LIV = []
+
+
+def li_from_toolkit():
+    """config/linkedin.txt on toolkit main: one authenticated blobless shallow fetch, 20 s in all; '' on any failure."""
+    if not os.environ.get("PR_TOKEN"):
+        return ""
+    import shutil
+    g = tempfile.mkdtemp(prefix="li-")
+    try:
+        a = auth_cfg()
+        subprocess.run(["git", "init", "-q", "--bare", g], capture_output=True, timeout=10)
+        subprocess.run(["git", "-C", g, "remote", "add", "origin", TK_URL], capture_output=True, timeout=10)
+        t = time.time()
+        r = subprocess.run(["git", *a, "-C", g, "fetch", "-q", "--depth=1", "--filter=blob:none", "origin", "main"],
+                           capture_output=True, text=True, timeout=20)
+        if r.returncode:
+            return ""
+        r = subprocess.run(["git", *a, "-C", g, "show", "FETCH_HEAD:config/linkedin.txt"], capture_output=True, text=True,
+                           timeout=max(1.0, 20 - (time.time() - t)))
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except Exception:
+        return ""
+    finally:
+        shutil.rmtree(g, ignore_errors=True)
+
+
+def li_line():
+    if not _LIV:
+        v = os.environ.get("PNP_LINKEDIN", "").strip()
+        if not v and os.environ.get("PNP_LINKEDIN_READ") != "1":
+            v = li_from_toolkit()
+        _LIV.append(f"\n\n**LinkedIn profile**: {v}" if re.fullmatch(LI_RX, v) else "")
+    return _LIV[0]
 
 
 def pr_body(lease):
-    return DESC + LI + (f"\n\nLease: {lease}" if lease else "") + FOOTER
+    return DESC + li_line() + (f"\n\nLease: {lease}" if lease else "") + FOOTER
 
 ID = os.environ["ID"]; MOD = os.environ["MOD"]; PROOF = os.environ["PROOF"]; TREE = os.environ["TREE"]
 W = os.environ.get("W", tempfile.mkdtemp())
