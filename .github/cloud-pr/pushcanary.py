@@ -73,20 +73,21 @@ def main():
     for r in res:
         if "commit" not in r:
             continue
-        v = os.path.join(W, "v-" + r["gid"])
+        v = os.path.join(W, "v-" + r["gid"]); tv = time.time()
         head = f"pushcanary/{TAG}/{r['gid']}"
         import base64
         hdr = "AUTHORIZATION: basic " + base64.b64encode(f"x-access-token:{os.environ['PR_TOKEN']}".encode()).decode()
-        c = sh("git", "-c", f"http.https://github.com/.extraheader={hdr}", "clone", "-q", "--no-local", "--depth", "2",
+        c = sh("git", "-c", f"http.https://github.com/.extraheader={hdr}", "clone", "-q", "--no-local", "--single-branch",
                "--branch", head, f"https://github.com/{FORK}.git", v)
         if c.returncode:
             bad.append(f"{r['gid']}: fresh clone failed: {c.stderr.strip()[:120]}"); continue
         tip = sh("git", "-C", v, "rev-parse", "HEAD").stdout.strip()
+        ncm = sh("git", "-C", v, "rev-list", "--count", "HEAD").stdout.strip()
         par = sh("git", "-C", v, "rev-parse", "HEAD~1").stdout.strip()
         fs = sh("git", "-C", v, "fsck", "--full", "--no-dangling")
         diff = sh("git", "-C", v, "diff", "--name-only", "HEAD~1", "HEAD").stdout.split()
         want = [f"lean/PEqualNP/Outside/{r['mod']}.lean"]
-        line = f"tip={tip[:12]} pushed={r['commit'][:12]} parent={par[:12]} fsck_rc={fs.returncode} diff={diff}"
+        line = f"commits={ncm} verify_s={time.time() - tv:.1f} tip={tip[:12]} pushed={r['commit'][:12]} parent={par[:12]} fsck_rc={fs.returncode} diff={diff}"
         print(f"PUSHCANARY verify {r['gid']} {line}", flush=True)
         if tip != r["commit"]:
             bad.append(f"{r['gid']}: branch tip is not the pushed commit")

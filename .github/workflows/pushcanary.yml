@@ -40,10 +40,8 @@ jobs:
           git --version; nproc
           python3 -I src/.github/cloud-pr/pushcanary.py; rc=$?
           b=$(echo -n "x-access-token:$PR_TOKEN" | base64 -w0)
-          for i in 1 2 3; do
-            git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $b" push -q "https://github.com/$GITHUB_REPOSITORY.git" \
-              --delete "refs/heads/pushcanary/$PC_TAG/L-drill-$PC_TAG-$i" && echo "deleted pushcanary/$PC_TAG/L-drill-$PC_TAG-$i"
+          u="https://github.com/$GITHUB_REPOSITORY.git"; h="http.https://github.com/.extraheader=AUTHORIZATION: basic $b"
+          for r in $(git -C src -c "$h" ls-remote "$u" | awk '$2 ~ /^refs\/heads\/pushcanary(-run)?\//{print $2}'); do
+            git -C src -c "$h" push -q "$u" --delete "$r" && echo "deleted $r"
           done
-          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $b" push -q "https://github.com/$GITHUB_REPOSITORY.git" \
-            --delete "refs/heads/$GITHUB_REF_NAME" && echo "deleted $GITHUB_REF_NAME"
           exit $rc
