@@ -59,13 +59,19 @@ jobs:
         run: |
           set -uo pipefail
           [ -n "${PR_TOKEN:-}" ] || { echo "::error::no PR_TOKEN secret: stop"; exit 1; }
+          # workers from the branch name loadcanary/<x>-w<N> (Lead 07:14: runs at 14, 20, 28)
+          case "$GITHUB_REF_NAME" in *-w[0-9]*) export DRAIN_WORKERS=${GITHUB_REF_NAME##*-w};; esac
+          echo "workers $DRAIN_WORKERS slots $DRAIN_PR_SLOTS"
           nproc; free -m | head -2
           vmstat -n 2 > cpu.log &
           vm=$!
+          # what the CPU is spent on: every 0.5 s, the running (R) processes by command name
+          ( while :; do ps -eo stat=,comm= | awk '$1 ~ /^R/ {print $2}'; echo "--"; sleep 0.5; done ) > run.log &
+          ps_loop=$!
           t0=$(date +%s)
           python3 -I "$SRC/.github/cloud-pr/drain.py" 2>&1 | tee drain.log
           rc=${PIPESTATUS[0]}
-          kill $vm 2>/dev/null
+          kill $vm $ps_loop 2>/dev/null
           echo "drain rc=$rc wall=$(( $(date +%s) - t0 )) s"
           python3 - <<'EOF'
           import re, statistics as st
@@ -87,6 +93,11 @@ jobs:
           rq = [int(l.split()[0]) for l in open("cpu.log").read().splitlines() if l.split() and l.split()[0].isdigit()]
           print(f"LOADCANARY units={len(prep)} results={res}")
           print(f"LOADCANARY prep p50={pct(prep, .5):.1f}s p95={pct(prep, .95):.1f}s  submit total p50={pct(tot, .5):.1f}s p95={pct(tot, .95):.1f}s")
+          import collections
+          cnt = collections.Counter(l.strip() for l in open("run.log") if l.strip() and l.strip() != "--")
+          tot_r = sum(cnt.values()) or 1
+          print("LOADCANARY cpu by command (share of running-process samples): " +
+                ", ".join(f"{k} {100 * v / tot_r:.0f}%" for k, v in cnt.most_common(8)))
           print(f"LOADCANARY snap_age max={max(snap) if snap else float('nan'):.1f}s  cpu busy avg={st.mean(cpu) if cpu else float('nan'):.0f}% max={max(cpu) if cpu else 0}%  run-queue max={max(rq) if rq else 0}")
           EOF
           grep -i "refresher" drain.log | head -3
