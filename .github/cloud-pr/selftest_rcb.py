@@ -631,6 +631,36 @@ if hasattr(S, "runtoken_empty"):
 else:
     case("09:29-runtoken-empty-reads-go-to-PR_TOKEN", False, "(no fallback: an empty run token = every read fails closed)")
 
+# ---- Lead 09:40 (lane movingmain, part 2): a rival PR that left the open list (merged or closed) holds its unit 60 s
+if hasattr(S, "RIVAL_GONE_S"):
+    S.time.time = lambda: CLK[0]
+    S.time.sleep = lambda s: CLK.__setitem__(0, CLK[0] + s)
+    S.gh = orig
+    reset_snap(); PULLS.clear(); TL_ROWS.pop("L-meta-76999", None)
+    add_pr(76001, CLK[0] - 5, "Prove L-meta-76999")
+    r0 = RN("L-meta-76999", 2)
+    PULLS.clear(); CLK[0] += 3; t_g = CLK[0]           # the rival PR merged: gone from the open list
+    rg = RN("L-meta-76999", 2)                          # the first build that misses it (t)
+    out = {}
+    for dt in (1, 59, 61):
+        CLK[0] = t_g + dt
+        out[dt] = RN("L-meta-76999", 2)
+    case("09:40-gone-rival-held-60s", bool(r0) and bool(rg) and "left the open list" in (rg or "") and bool(out[1]) and bool(out[59])
+         and out[61] is None, f"(open {r0}, t {rg}, t+1 {out[1]}, t+59 {out[59]}, t+61 {out[61]})")
+    TL_ROWS["L-meta-76999"] = "rival9"; S._TL.clear(); S.TL_T[0] = 0.0
+    CLK[0] = t_g + 62
+    rt = RN("L-meta-76999", 2)
+    TL_ROWS.pop("L-meta-76999", None)
+    case("09:40-gone-after-60s-taken-list-still-rules", bool(rt) and rt.startswith("taken list"), f"({rt})")
+    reset_snap(); PULLS.clear(); add_pr(76002, CLK[0] - 5, "Prove L-meta-76998")
+    RN("L-meta-76998", 2); CLK[0] += 3
+    add_pr(76003, CLK[0] - 1, "Prove L-meta-76997")
+    rr = RN("L-meta-76998", 2)                          # still open: the open PR rules, nothing gone
+    case("09:40-open-rival-not-gone", (rr or "").startswith("#76002"), f"({rr})")
+    PULLS.clear(); reset_snap()
+else:
+    case("09:40-gone-rival-held-60s", False, "(no RIVAL_GONE_S in this submit.py)")
+
 bad = [n for n, ok in res if not ok]
 print(f"RCB SELFTEST OK {len(res)}" if not bad else "RCB SELFTEST FAIL " + " ".join(bad))
 sys.exit(1 if bad else 0)
