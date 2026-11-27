@@ -1,0 +1,76 @@
+# preflight-live (HARDENING 14 W8): the two preflight checks that need the Action itself. Read-only: GitHub reads only.
+# No desk, no data host, no push, no PR. team/infra/preflight.sh accepts a sha only with a green run of this workflow on it.
+#   secrets   B13: every secrets./vars. name the workflows use exists (the static half fails when a workflow uses a name
+#             not listed below), PR_TOKEN answers and can push the fork and read the toolkit; the run logs its queue delay.
+#   fakedrift B15: one real response per GitHub endpoint the fork scripts use, field sets diffed against the replay fakes.
+#             Daily (schedule, default branch) and on every push that touches the scripts. Capture kept 14 days.
+name: preflight-live
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 4 * * *'
+  push:
+    branches: ['main', 'gateway-*', 'claude/**']
+    paths: ['.github/workflows/**', '.github/cloud-pr/**']
+permissions:
+  contents: read
+  actions: read
+defaults:
+  run:
+    shell: bash
+jobs:
+  secrets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Static check (every secret used is listed here, no silent skip)
+        run: python3 -I .github/cloud-pr/secretcheck.py static "$GITHUB_WORKSPACE" | tee static.txt
+      - name: Live check (each secret exists, PR_TOKEN works)
+        if: always()
+        env:
+          SECRETCHECK_NAMES: PR_TOKEN,PNP_LINKEDIN
+          SC_PR_TOKEN: ${{ secrets.PR_TOKEN }}
+          SC_PNP_LINKEDIN: ${{ secrets.PNP_LINKEDIN || vars.PNP_LINKEDIN }}
+        run: python3 -I .github/cloud-pr/secretcheck.py live | tee live.txt
+      - name: Queue delay
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -I .github/cloud-pr/qdelay.py run | tee qd.txt
+      - name: Summary
+        if: always()
+        run: |
+          { echo '### secretcheck'; echo '```'; cat static.txt live.txt qd.txt 2>/dev/null | grep -v '^info'; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+  fakedrift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Capture and diff
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p cap
+          python3 -I .github/cloud-pr/fakedrift.py capture cap/real.json
+          python3 -I .github/cloud-pr/fakedrift.py diff cap/real.json "$GITHUB_WORKSPACE" | tee drift.txt
+      - name: Keep the capture
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fakedrift-capture
+          path: cap/real.json
+          retention-days: 14
+      - name: Queue delay
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -I .github/cloud-pr/qdelay.py run
+      - name: Summary
+        if: always()
+        run: |
+          { echo '### fakedrift'; echo '```'; grep -v '^info' drift.txt 2>/dev/null; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
