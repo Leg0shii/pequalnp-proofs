@@ -313,3 +313,80 @@
 5	10000/01000/00111/00111/10111	m=10?	ok c>=5	370.4s	M: or(y2,y4) or(y3,g0) or(x1,g1) or(x2,x3) or(x4,y1) or(x0,g4) and(y0,g5) or(g3,g4) and(g2,g7) or(g6,g8)
 5	10000/01000/00111/00111/11111	m=9	ok c>=4	53.3s	M: and(x1,y1) or(x2,y0) or(y3,y4) or(y2,g2) or(x0,g3) or(x3,g1) and(g4,g5) or(x4,g6) or(g0,g7)
 5	10000/11000/10110/11101/11101	m=10?	ok c>=5	444.6s	M: or(x1,y2) or(x2,y1) or(x3,x4) or(y4,g1) or(y2,g3) or(y3,g2) and(g0,g1) and(g4,g5) or(g6,g7) or(y0,g8)
+5	10000/01100/01110/01101/10011	m=13?	ok c>=8	311.4s	M: 
+5	10000/11000/00110/10110/01101	m=15?	TIMEOUT c<= ? at 9	606.5s	M: or(x3,y1) or(x0,g0) or(y0,g0) or(x2,g2) or(y2,y3) or(y4,g1) or(y2,g5) and(x0,g6) or(g3,g7) and(x1,g8) or(x4,y0) and(g3,g4) and(g6,g10) or(g11,g12) or(g9,g13)
+5	00000/10000/01100/01010/10110	m=11?	ok c>=6	435.2s	M: or(x1,y2) and(x3,y3) or(x4,y1) or(y2,y3) or(x3,g3) or(g0,g2) and(g2,g4) or(y0,g6) or(x2,g7) and(g5,g8) or(g1,g9)
+5	11000/10100/11110/01011/00111	m=18?	TIMEOUT c<= ? at 12	600.1s	M: 
+5	00000/10000/10000/11100/11011	m=11?	ok c>=6	448.0s	M: or(x2,y2) or(x1,g0) and(y0,g1) or(x3,g2) or(y0,y1) or(y3,y4) or(g4,g5) and(x4,g6) or(g1,g4) and(g3,g8) or(g7,g9)
+5	00000/11000/10110/01110/11110	m=11?	ok c>=6	539.6s	M: and(x4,y1) or(y2,g0) or(x1,g1) or(x4,y1) or(x2,g3) or(x3,y0) or(y3,g2) and(g4,g5) or(g4,g5) or(g6,g7) and(g8,g9)
+5	10000/01000/10100/00011/01011	m=10?	ok c>=5	524.2s	M: or(x2,y1) or(x4,y0) or(x1,g1) or(y2,g2) or(y3,y4) or(x0,g4) or(x3,g1) and(g0,g3) and(g5,g6) or(g7,g8)
+5	00000/10000/11100/11010/00111	m=13?	ok c>=8	386.3s	M: or(x2,y0) or(x3,y2) or(x4,y1) or(y0,g1) or(y4,g1) or(x1,g4) or(g2,g3) and(g2,g4) or(x2,g7) and(g0,g5) or(g8,g9) or(y3,g10) and(g6,g11)
+5	10000/10000/11100/01110/11101	m=13?	ok c>=8	533.5s	M: or(x4,y3) or(y1,y2) or(y3,g0) or(x2,g2) and(y4,g0) and(g1,g3) or(g4,g5) or(x3,g6) or(g1,g3) or(x0,g8) or(x1,g9) or(y0,g7) and(g10,g11)
+5	10000/01100/01100/01011/11011	m=12?	ok c>=7	774.5s	M: or(x4,y2) and(x4,g0) or(x3,g1) or(y1,y3) or(y1,g0) or(x0,g4) or(x2,y0) or(x1,g6) or(y4,g3) and(g2,g8) and(g5,g7) or(g9,g10)
+5	00000/11000/11000/10110/01111	m=10?	ok c>=5	607.1s	M: or(x3,y1) or(x4,y0) or(y4,g0) or(g0,g1) and(g1,g2) or(x1,g4) or(x2,g5) or(y2,y3) or(g6,g7) and(g3,g8)
+5	00000/10000/01000/11110/10111	m=12?	ok c>=7	392.5s	M: or(y0,y3) or(x2,g0) or(x3,y4) or(y2,g1) and(x1,g3) and(x3,g3) and(y0,g4) or(y1,g6) or(g2,g3) or(g5,g7) or(x4,g9) and(g8,g10)
+5	00000/11000/11000/10110/11111	m=8	ok c>=3	32.6s	M: or(x1,x2) or(y2,y3) or(y0,g1) and(x3,g2) or(x4,g3) or(y0,y1) and(g0,g5) or(g4,g6)
+5	00000/11000/11000/11110/11110	m=8	ok c>=3	19.1s	M: or(x1,x2) or(y0,y1) or(y3,g1) or(y2,g2) and(g0,g1) or(x3,g4) or(x4,g5) and(g3,g6)
+5	00000/10000/01100/01010/01110	m=9	ok c>=4	277.7s	M: or(x2,x4) or(y1,y2) or(y1,y3) or(x1,g2) or(x3,x4) or(y0,g4) and(g0,g1) and(g3,g5) or(g6,g7)
+5	10000/01100/01011/11011/11111	m=13?	ok c>=8	726.3s	M: or(x0,x4) or(x2,x3) or(x3,g0) or(y1,y3) or(y4,g3) and(g1,g4) or(x4,g5) or(y1,y2) or(g2,g7) and(x1,g8) and(y0,g8) or(g6,g10) or(g9,g11)
+5	00000/10000/01000/11110/11111	m=9	ok c>=4	157.5s	M: or(x2,y0) or(x3,g0) or(y2,g0) or(y3,g2) and(x3,g3) or(y1,g4) or(x1,g5) and(g1,g6) or(x4,g7)
+5	00000/10000/01000/00111/00111	m=8	ok c>=3	5.4s	M: or(x1,y2) and(x2,y1) or(x3,y0) or(x4,g2) or(y3,y4) or(g0,g4) and(g3,g5) or(g1,g6)
+5	00000/10000/10000/11100/01111	m=10?	ok c>=5	304.1s	M: or(x4,y0) or(y3,y4) or(x2,g1) or(y1,y2) and(x3,g3) or(x3,g3) or(x1,g5) or(g2,g6) and(g0,g7) or(g4,g8)
+5	00000/10000/10000/11100/11111	m=7	ok c>=2	3.5s	M: or(x1,x2) or(y0,y2) and(y0,g0) or(y1,g1) and(x3,g3) or(x4,g2) or(g4,g5)
+5	00000/10000/10000/01110/01110	m=7	ok c>=2	0.7s	M: or(x3,x4) or(y1,y3) or(x2,g1) or(y0,g0) or(y2,g2) or(x1,g4) and(g3,g5)
+5	10000/01000/10100/00011/11011	m=12?	ok c>=7	301.9s	M: 
+5	00000/10000/10000/01110/11110	m=8	ok c>=3	35.3s	M: or(x1,x2) or(x3,x4) or(x4,g0) and(y0,g2) or(y1,y3) or(y2,g4) and(g1,g5) or(g3,g6)
+5	00000/10000/01000/00111/10111	m=9	ok c>=4	92.4s	M: or(x1,x4) or(x3,x4) or(y2,y3) or(y4,g2) or(x2,g3) and(y0,g0) or(y1,g1) and(g4,g6) or(g5,g7)
+5	00000/10000/01000/00111/11111	m=8	ok c>=3	7.3s	M: or(x3,y0) or(y2,y4) or(y3,g1) or(x1,g2) and(x2,y1) or(x4,g4) and(g0,g3) or(g5,g6)
+5	10000/01000/00111/10111/10111	m=10?	ok c>=5	580.9s	M: or(x4,y1) or(x3,g0) or(x0,g1) or(x1,y2) or(x2,g1) and(y0,g2) or(y3,y4) or(g3,g6) and(g4,g7) or(g5,g8)
+5	10000/01100/01100/01011/00111	m=13?	ok c>=8	311.1s	M: 
+5	10000/11100/01110/10011/11111	m=13?	ok c>=8	1011.8s	M: and(x1,y3) or(x1,y3) or(x3,y2) or(y1,g2) or(y4,g1) or(g0,g3) and(g3,g4) or(x4,g6) or(g1,g5) or(x0,g8) or(x2,y0) and(g9,g10) or(g7,g11)
+5	00000/11000/11000/11110/11101	m=12?	ok c>=7	320.0s	M: or(x3,y4) or(x4,y3) and(y2,g0) or(y2,g0) or(x1,g3) or(y0,y1) or(g1,g4) or(x2,g6) and(g1,g3) and(g5,g7) or(g2,g9) or(g8,g10)
+5	10000/10000/11100/01110/10011	m=13?	ok c>=8	410.3s	M: or(x0,x1) or(x4,y0) or(y1,y2) or(y3,g2) and(x3,g3) or(x4,g0) or(y3,y4) or(x2,g6) and(y0,g5) or(g1,g2) and(g7,g9) or(g4,g10) or(g8,g11)
+5	00000/10000/01000/10111/10111	m=9	ok c>=4	161.6s	M: or(x3,x4) or(x1,g0) or(y1,g0) or(y2,y4) or(x2,g3) and(y0,g1) or(y3,g4) and(g2,g6) or(g5,g7)
+5	00000/10000/01100/01010/11110	m=11?	ok c>=6	338.4s	M: or(x1,y2) or(y1,y3) or(y1,g0) or(x4,g2) or(y2,g1) and(x4,g4) or(x2,g5) and(x3,g1) or(y0,g6) and(g3,g8) or(g7,g9)
+5	11000/10100/11110/01011/10111	m=19?	TIMEOUT c<= ? at 13	600.1s	M: 
+5	10000/01100/01110/01101/11011	m=17?	TIMEOUT c<= ? at 11	761.1s	M: or(x1,y4) or(x3,y3) and(x2,g1) and(x4,y1) and(y4,g1) or(y0,g4) and(x0,g5) or(g1,g3) or(g5,g7) or(g0,g8) or(x2,g9) or(y1,y2) or(x4,g11) or(g2,g12) or(g4,g6) or(g13,g14) and(g10,g15)
+5	00000/11000/10110/01110/10101	m=14?	TIMEOUT c<= ? at 8	601.8s	M: 
+5	10000/01000/10100/00011/00111	m=11?	ok c>=6	300.1s	M: 
+5	00000/10000/10000/01110/01101	m=9	ok c>=4	311.0s	M: or(x3,y0) or(y1,y2) or(x2,g1) or(x1,g2) or(y3,g3) or(y4,g3) and(x4,g5) and(g0,g4) or(g6,g7)
+5	00000/10000/11100/11010/10111	m=14?	TIMEOUT c<= ? at 8	600.1s	M: 
+5	10000/01000/00111/10111/01111	m=11?	ok c>=6	300.1s	M: 
+5	00000/11000/11000/11110/00111	m=10?	ok c>=5	306.7s	M: or(x4,y0) or(y1,g0) or(x3,g1) or(y2,y3) or(x1,g3) or(x2,y4) or(x3,g5) and(g1,g6) or(g4,g7) and(g2,g8)
+5	10000/01100/01011/00111/01111	m=14?	TIMEOUT c<= ? at 8	600.1s	M: 
+5	00000/10000/01100/01010/01001	m=10?	ok c>=5	300.4s	M: 
+5	10000/11000/10110/11101/11011	m=14?	TIMEOUT c<= ? at 8	1071.0s	M: and(x1,y1) and(x3,y2) or(x4,y3) or(x3,g2) and(x4,y3) or(y0,g1) or(y1,y4) or(y2,g3) or(g0,g4) or(g5,g8) and(g6,g7) or(x2,g10) and(g7,g11) or(g9,g12)
+5	10000/11000/00110/10110/11101	m=14?	TIMEOUT c<= ? at 8	1012.8s	M: or(x2,y1) or(x3,y0) or(x4,y2) or(x1,g2) or(g0,g1) and(y0,g4) or(x4,g5) or(y2,y4) or(x3,g7) or(x0,g8) or(y3,g3) and(g4,g10) and(g6,g9) or(g11,g12)
+5	10000/01100/01110/01101/11111	m=11?	ok c>=6	385.1s	M: and(x3,y4) or(y1,y2) or(x0,g1) or(y3,g1) and(x2,g3) or(x3,y0) or(x1,g5) or(x4,g0) and(g2,g6) or(g7,g8) or(g4,g9)
+5	00000/10000/10000/01110/11101	m=10?	ok c>=5	333.6s	M: or(x3,y0) or(x4,y3) or(x4,g0) or(y4,g0) and(g1,g3) or(x1,g4) or(x2,y2) or(g5,g6) or(y1,g7) and(g2,g8)
+5	10000/01100/01100/01011/10111	m=14?	TIMEOUT c<= ? at 8	600.1s	M: 
+5	10000/01000/10100/00011/10111	m=11?	ok c>=6	386.8s	M: or(y0,y2) or(x1,g0) or(x2,y1) or(y3,y4) or(x0,g3) or(x4,y0) or(x3,g5) or(x4,g2) and(g1,g7) and(g4,g6) or(g8,g9)
+5	00000/10000/01000/10111/01111	m=10?	ok c>=5	509.5s	M: or(x3,y1) or(x1,g0) or(x2,y2) or(x4,y0) or(x4,g0) or(y3,y4) and(g1,g3) or(g2,g5) and(g4,g7) or(g6,g8)
+5	10000/11100/01110/01011/01011	m=14?	TIMEOUT c<= ? at 8	600.1s	M: 
+5	00000/10000/10000/01110/01111	m=9	ok c>=4	129.7s	M: or(x4,y0) or(x3,g0) or(y1,y2) and(y4,g0) or(y3,g3) or(x1,g4) or(x2,g2) or(g5,g6) and(g1,g7)
+5	00000/10000/10000/01110/11111	m=7	ok c>=2	2.7s	M: or(x2,y2) or(y3,g0) or(x1,g1) or(x3,y0) or(y1,g2) and(g3,g4) or(x4,g5)
+5	00000/10000/10000/11110/11110	m=8	ok c>=3	20.3s	M: or(x1,x2) or(y0,y2) and(y0,g0) or(x3,g2) or(x4,g3) or(y1,y3) or(g1,g5) and(g4,g6)
+5	10000/01000/00111/10111/11111	m=10?	ok c>=5	451.1s	M: or(x0,x3) and(y0,g0) or(y2,y4) or(x1,g2) or(x2,y1) or(x3,g4) or(x4,g1) or(y3,g3) and(g5,g7) or(g6,g8)
+5	00000/10000/01000/10111/11111	m=9	ok c>=4	117.1s	M: or(x1,y1) or(x2,y0) or(y0,y2) or(y4,g2) and(g0,g1) or(x4,g4) or(y3,g3) and(x3,g6) or(g5,g7)
+5	00000/10000/01000/11111/11111	m=5	ok-trivial	0.4s	M: or(x1,y1) or(x2,y0) and(g0,g1) or(x4,g2) or(x3,g3)
+5	00000/10000/01100/01010/11001	m=11?	ok c>=6	301.1s	M: 
+5	11000/10100/11110/01011/01111	m=19?	TIMEOUT c<= ? at 13	601.7s	M: 
+5	00000/10000/11100/11010/01111	m=14?	TIMEOUT c<= ? at 8	600.1s	M: 
+5	10000/10000/11100/01110/01011	m=14?	TIMEOUT c<= ? at 8	779.2s	M: or(x1,x2) or(x0,g0) and(x4,y4) or(y1,y3) or(y2,g3) and(x3,g4) and(y0,g1) or(y1,y2) and(x2,g7) and(x4,g3) or(g2,g5) or(g8,g10) or(g9,g11) or(g6,g12)
+5	10000/11000/00110/10110/01111	m=13?	ok c>=8	316.9s	M: 
+5	10000/01000/00111/11111/11111	m=9	ok c>=4	130.1s	M: and(x0,y0) and(x1,y1) or(y3,y4) or(y2,g2) and(x2,g3) or(x3,g0) or(x4,g4) or(g5,g6) or(g1,g7)
+5	00000/10000/11000/11000/00111	m=9	ok c>=4	144.4s	M: or(x4,y0) or(y0,y1) or(y3,y4) or(y2,g2) or(x1,g3) or(x2,x3) and(g0,g4) and(g1,g5) or(g6,g7)
+5	10000/01000/10100/00011/01111	m=12?	ok c>=7	300.6s	M: 
+5	10000/01100/01100/01011/01111	m=11?	ok c>=6	454.9s	M: or(x1,x2) or(x4,y0) or(y1,y3) or(x0,g2) or(x3,g1) or(x4,g0) or(y1,y2) or(y4,g3) and(g4,g7) and(g5,g6) or(g8,g9)
+5	10000/01100/01110/11101/11101	m=13?	ok c>=8	471.8s	M: or(y1,y2) and(x1,g0) and(x2,g0) or(x3,g2) or(x4,g3) or(x0,g4) and(x2,y3) and(y0,g5) or(y4,g0) and(g4,g8) or(g1,g9) or(g7,g10) or(g6,g11)
+5	10000/11000/10110/11101/00111	m=17?	TIMEOUT c<= ? at 11	603.8s	M: 
+5	00000/11000/11000/11110/10111	m=11?	ok c>=6	729.8s	M: or(x1,x2) or(x3,g0) or(y0,y4) or(y2,y3) and(x3,g3) or(y0,g4) or(y1,g5) and(g1,g6) or(g2,g3) and(x4,g8) or(g7,g9)
+5	10000/01100/01011/00111/11111	m=14?	TIMEOUT c<= ? at 8	681.5s	M: or(y3,y4) or(y1,g0) and(x2,g1) or(y2,g0) and(x3,g3) or(x4,g4) or(y0,g2) or(y1,y2) or(g2,g5) or(g5,g6) and(x0,g9) and(x1,g7) or(g8,g10) or(g11,g12)
+5	00000/11000/11000/11110/11111	m=8	ok c>=3	35.1s	M: or(x1,x3) or(x2,g0) or(y2,y3) and(x3,g2) or(y0,y1) and(g1,g4) or(x4,g5) or(g3,g6)
+5	00000/11000/11000/00111/00111	m=8	ok c>=3	7.0s	M: or(x1,x2) or(x3,y1) or(x4,y0) or(y3,y4) or(y2,g3) or(g0,g4) or(g1,g2) and(g5,g6)
+5	00000/10000/01100/01010/00101	m=10?	ok c>=5	385.5s	M: or(x1,y2) or(x2,y0) or(y1,y3) and(x3,g2) or(y1,g0) or(y4,g0) and(x4,g5) and(g1,g4) or(g3,g7) or(g6,g8)
+5	00000/10000/11100/11010/11111	m=10?	ok c>=5	330.1s	M: or(x4,y0) and(x1,g0) or(x2,x4) or(x3,g1) or(y1,g0) or(y2,g4) or(y3,g4) and(g2,g5) and(g3,g6) or(g7,g8)
+5	10000/01000/10111/10111/10111	m=10?	ok c>=5	320.9s	M: and(x0,y0) or(x4,y1) or(y0,y4) or(y2,y3) or(g0,g1) or(x3,g4) or(x2,g5) or(g2,g3) or(x1,g7) and(g6,g8)
+5	10000/11000/00110/10110/11111	m=10?	ok c>=5	335.7s	M: or(x3,y1) or(x2,g0) or(y2,y3) or(x1,g2) or(x3,g3) or(x0,g4) and(g1,g3) or(x4,g6) and(y0,g5) or(g7,g8)
+5	00000/10000/11000/11000/10111	m=10?	ok c>=5	312.5s	M: or(x1,x4) or(x4,y0) or(y2,y3) or(x2,g2) or(y4,g3) or(x3,g4) and(y0,g0) or(y1,g1) or(g5,g6) and(g7,g8)
+5	00000/10000/10000/11110/11101	m=11?	ok c>=6	479.8s	M: or(x2,x3) or(x3,y0) or(y0,y1) or(y2,g2) or(y3,g3) or(y4,g3) and(x4,g5) and(g0,g4) or(x1,g7) and(g1,g8) or(g6,g9)
