@@ -1,0 +1,7 @@
+2	2	00/00	0	true	0	true	M: 	C: 
+2	2	10/10	0	true	0	true	M: 	C: 
+2	2	00/10	1	true	1	true	M: and(x1,y0)	C: and(x1,y0)
+2	2	00/11	0	true	0	true	M: 	C: 
+2	2	10/01	3	true	3	true	M: and(x0,y0) and(x1,y1) or(g0,g1)	C: and(x0,y0) and(x1,y1) or(g0,g1)
+2	2	10/11	1	true	1	true	M: or(x1,y0)	C: or(x1,y0)
+2	2	11/11	1	true	1	true	M: or(x0,x1)	C: or(x0,x1)
