@@ -210,6 +210,7 @@ fn find(n: usize, target: u64, k: usize, allow_not: bool, timeout: f32) -> Optio
 
 /// Least size, searching down from an upper bound. Returns (best size, exact?, circuit).
 fn least(n: usize, target: u64, ub: usize, allow_not: bool, timeout: f32, floor: usize) -> (usize, bool, Vec<Gate>) {
+    if let Some(Some(c0)) = find(n, target, 0, allow_not, timeout) { return (0, true, c0); }
     let mut best = ub;
     let mut circ: Vec<Gate> = Vec::new();
     // get a circuit at ub first
