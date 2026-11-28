@@ -1,0 +1,3660 @@
+import PEqualNP.Defs
+
+-- Exhaustion certificate: a kernel-run search over sets of 6-bit wire masks (a set is a Nat
+-- bitset), with a soundness proof that every circuit of the statement is covered by the search.
+
+namespace PEqualNP.Outside.L_meta_50101
+
+open PEqualNP.CircuitLowerBounds
+
+def elems (S : Nat) : List Nat := (List.range 64).filter (fun a => S.testBit a)
+
+def aoHas (S v : Nat) : Bool :=
+  (elems S).any (fun a => (elems S).any (fun c => (a &&& c == v) || (a ||| c == v)))
+
+def notHas (S v : Nat) : Bool := (elems S).any (fun a => 63 ^^^ a == v)
+
+def hit (A B C S : Nat) : Bool := S.testBit A && S.testBit B && S.testBit C
+
+def miss (A B C S : Nat) : Nat :=
+  (if S.testBit A then 0 else 1) + (if S.testBit B then 0 else 1) + (if S.testBit C then 0 else 1)
+
+def reach (A B C : Nat) : Nat → Nat → Nat → Bool
+  | 0, _, S => hit A B C S
+  | k+1, b, S => hit A B C S || (decide (miss A B C S ≤ k+1) &&
+      (reach A B C k b S || (decide (0 < b) && reach A B C k (b-1) S) ||
+       (List.range 64).any (fun v => !S.testBit v &&
+         ((aoHas S v && reach A B C k b (S ||| 2^v)) ||
+          (decide (0 < b) && notHas S v && reach A B C k (b-1) (S ||| 2^v))))))
+
+def body (A B C k b b' S v : Nat) : Bool :=
+  !S.testBit v && ((aoHas S v && reach A B C k b (S ||| 2^v)) ||
+    (decide (0 < b) && notHas S v && reach A B C k b' (S ||| 2^v)))
+
+theorem reach_succ (A B C k b b' S : Nat) (hb : b' = b - 1) : reach A B C (k+1) b S =
+    (hit A B C S || (decide (miss A B C S ≤ k+1) &&
+      (reach A B C k b S || (decide (0 < b) && reach A B C k b' S) ||
+       (List.range 64).any (body A B C k b b' S)))) := by
+  subst hb
+  rfl
+
+theorem mem_elems {S a : Nat} : a ∈ elems S ↔ a < 64 ∧ S.testBit a = true := by
+  simp [elems, List.mem_filter, List.mem_range]
+
+theorem bits32 : ∀ a < 64, ∀ c < 64, a &&& c < 64 ∧ a ||| c < 64 ∧ 63 ^^^ a < 64 := by
+  decide +kernel
+
+theorem uniq32 : ∀ m < 64, ∀ a < 64, (∀ t : Fin 6, m.testBit t.val = a.testBit t.val) → m = a := by
+  decide +kernel
+
+theorem t31 : ∀ t : Fin 6, (63 : Nat).testBit t.val = true := by decide
+
+theorem or_pow_self {S v : Nat} (h : S.testBit v = true) : S ||| 2^v = S := by
+  apply Nat.eq_of_testBit_eq
+  intro i
+  rw [Nat.testBit_or, Nat.testBit_two_pow]
+  by_cases hi : v = i
+  · subst hi; simp [h]
+  · simp [hi]
+
+theorem testBit_or_pow (S v x : Nat) : (S ||| 2^v).testBit x = (S.testBit x || decide (v = x)) := by
+  rw [Nat.testBit_or, Nat.testBit_two_pow]
+
+theorem miss_step (A B C S v : Nat) (hAB : A ≠ B) (hAC : A ≠ C) (hBC : B ≠ C) :
+    miss A B C S ≤ miss A B C (S ||| 2^v) + 1 := by
+  unfold miss
+  rw [testBit_or_pow, testBit_or_pow, testBit_or_pow]
+  by_cases a : S.testBit A = true <;> by_cases b : S.testBit B = true <;>
+    by_cases c : S.testBit C = true <;> by_cases x : v = A <;> by_cases y : v = B <;>
+    by_cases z : v = C <;> simp_all
+
+theorem miss_of_hit {A B C S : Nat} (h : hit A B C S = true) : miss A B C S = 0 := by
+  simp only [hit, Bool.and_eq_true] at h
+  simp [miss, h.1.1, h.1.2, h.2]
+
+theorem reach_hit {A B C S : Nat} (k b : Nat) (h : hit A B C S = true) : reach A B C k b S = true := by
+  cases k with
+  | zero => simpa [reach] using h
+  | succ k => simp [reach, h]
+
+theorem reach_miss {A B C S k b : Nat} (h : reach A B C k b S = true) :
+    hit A B C S = true ∨ miss A B C S ≤ k := by
+  cases k with
+  | zero => left; simpa [reach] using h
+  | succ k =>
+    simp only [reach, Bool.or_eq_true, Bool.and_eq_true, decide_eq_true_eq] at h
+    rcases h with h | ⟨h, _⟩
+    · exact Or.inl h
+    · exact Or.inr h
+
+def stepW (w : List Bool) (g : Gate) : List Bool :=
+  w ++ [g.op.eval (g.inputs.map fun i => w.getD i false)]
+
+theorem classify (S L : Nat) (W : Fin 6 → List Bool) (g : Gate)
+    (h31 : S.testBit 63 = true) (h0 : S.testBit 0 = true)
+    (hinv : ∀ i < L, ∃ m, m < 64 ∧ S.testBit m = true ∧ ∀ t, (W t).getD i false = m.testBit t.val)
+    (hop : g.op ∈ ({GateOp.and, GateOp.or, GateOp.not} : Set GateOp)) (hlen : g.inputs.length ≤ 2)
+    (hin : ∀ i ∈ g.inputs, i < L) :
+    ∃ v, v < 64 ∧ (∀ t, g.op.eval (g.inputs.map fun i => (W t).getD i false) = v.testBit t.val) ∧
+      (S.testBit v = true ∨ (g.op ≠ GateOp.not ∧ aoHas S v = true) ∨
+        (g.op = GateOp.not ∧ notHas S v = true)) := by
+  obtain ⟨op, ins⟩ := g
+  simp only [Set.mem_insert_iff, Set.mem_singleton_iff] at hop
+  simp only at hlen hin ⊢
+  match ins, hlen, hin with
+  | [], _, _ =>
+    rcases hop with rfl | rfl | rfl
+    · exact ⟨63, by decide, fun t => by simp [GateOp.eval, t31 t], Or.inl h31⟩
+    · exact ⟨0, by decide, fun t => by simp [GateOp.eval], Or.inl h0⟩
+    · exact ⟨63, by decide, fun t => by simp [GateOp.eval, t31 t], Or.inl h31⟩
+  | [i], _, hin =>
+    obtain ⟨m, hm, hS, hw⟩ := hinv i (hin i (by simp))
+    rcases hop with rfl | rfl | rfl
+    · exact ⟨m, hm, fun t => by simp only [List.map_cons, List.map_nil, hw t]; simp [GateOp.eval], Or.inl hS⟩
+    · exact ⟨m, hm, fun t => by simp only [List.map_cons, List.map_nil, hw t]; simp [GateOp.eval], Or.inl hS⟩
+    · refine ⟨63 ^^^ m, (bits32 m hm m hm).2.2, fun t => ?_, Or.inr (Or.inr ⟨rfl, ?_⟩)⟩
+      · simp only [List.map_cons, List.map_nil, hw t]; simp [GateOp.eval, Nat.testBit_xor, t31 t]
+      · simp only [notHas, List.any_eq_true, beq_iff_eq]
+        exact ⟨m, mem_elems.mpr ⟨hm, hS⟩, rfl⟩
+  | [i, j], _, hin =>
+    obtain ⟨m, hm, hS, hw⟩ := hinv i (hin i (by simp))
+    obtain ⟨n, hn, hT, hv⟩ := hinv j (hin j (by simp))
+    rcases hop with rfl | rfl | rfl
+    · refine ⟨m &&& n, (bits32 m hm n hn).1, fun t => ?_, Or.inr (Or.inl ⟨(fun h => nomatch h), ?_⟩)⟩
+      · simp only [List.map_cons, List.map_nil, hw t, hv t]; simp [GateOp.eval, Nat.testBit_and]
+      · simp only [aoHas, List.any_eq_true, Bool.or_eq_true, beq_iff_eq]
+        exact ⟨m, mem_elems.mpr ⟨hm, hS⟩, n, mem_elems.mpr ⟨hn, hT⟩, Or.inl rfl⟩
+    · refine ⟨m ||| n, (bits32 m hm n hn).2.1, fun t => ?_, Or.inr (Or.inl ⟨(fun h => nomatch h), ?_⟩)⟩
+      · simp only [List.map_cons, List.map_nil, hw t, hv t]; simp [GateOp.eval, Nat.testBit_or]
+      · simp only [aoHas, List.any_eq_true, Bool.or_eq_true, beq_iff_eq]
+        exact ⟨m, mem_elems.mpr ⟨hm, hS⟩, n, mem_elems.mpr ⟨hn, hT⟩, Or.inr rfl⟩
+    · refine ⟨63 ^^^ m, (bits32 m hm m hm).2.2, fun t => ?_, Or.inr (Or.inr ⟨rfl, ?_⟩)⟩
+      · simp only [List.map_cons, List.map_nil, hw t]; simp [GateOp.eval, Nat.testBit_xor, t31 t]
+      · simp only [notHas, List.any_eq_true, beq_iff_eq]
+        exact ⟨m, mem_elems.mpr ⟨hm, hS⟩, rfl⟩
+  | _ :: _ :: _ :: _, hlen, _ => simp at hlen
+
+theorem sound (A B C : Nat) (hA : A < 64) (hB : B < 64) (hC : C < 64)
+    (hAB : A ≠ B) (hAC : A ≠ C) (hBC : B ≠ C) :
+    ∀ (gs : List Gate) (W : Fin 6 → List Bool) (L S k b : Nat),
+      (∀ t, (W t).length = L) → S.testBit 63 = true → S.testBit 0 = true →
+      (∀ i < L, ∃ m, m < 64 ∧ S.testBit m = true ∧ ∀ t, (W t).getD i false = m.testBit t.val) →
+      (∀ g ∈ gs, g.op ∈ ({GateOp.and, GateOp.or, GateOp.not} : Set GateOp) ∧ g.inputs.length ≤ 2) →
+      (∀ j < gs.length, ∀ i ∈ (gs.getD j ⟨GateOp.or, []⟩).inputs, i < L + j) →
+      gs.length ≤ k → PEqualNP.NotBracket.notCount ⟨gs, 0⟩ ≤ b →
+      ∀ p q r, p < L + gs.length → q < L + gs.length → r < L + gs.length →
+      (∀ t : Fin 6, (gs.foldl stepW (W t)).getD p false = A.testBit t.val ∧
+        (gs.foldl stepW (W t)).getD q false = B.testBit t.val ∧
+        (gs.foldl stepW (W t)).getD r false = C.testBit t.val) →
+      reach A B C k b S = true := by
+  intro gs
+  induction gs with
+  | nil =>
+    intro W L S k b _ _ _ hinv _ _ _ _ p q r hp hq hr ht
+    simp only [List.length_nil, Nat.add_zero, List.foldl_nil] at hp hq hr ht
+    apply reach_hit
+    obtain ⟨m1, h1, s1, w1⟩ := hinv p hp
+    obtain ⟨m2, h2, s2, w2⟩ := hinv q hq
+    obtain ⟨m3, h3, s3, w3⟩ := hinv r hr
+    have e1 : m1 = A := uniq32 m1 h1 A hA (fun t => by rw [← w1 t, (ht t).1])
+    have e2 : m2 = B := uniq32 m2 h2 B hB (fun t => by rw [← w2 t, (ht t).2.1])
+    have e3 : m3 = C := uniq32 m3 h3 C hC (fun t => by rw [← w3 t, (ht t).2.2])
+    subst e1 e2 e3
+    simp [hit, s1, s2, s3]
+  | cons g gs ih =>
+    intro W L S k b hlen h31 h0 hinv hfan hrb hk hb p q r hp hq hr ht
+    have hg := hfan g (by simp)
+    have hin : ∀ i ∈ g.inputs, i < L := by
+      intro i hi; have := hrb 0 (by simp) i (by simpa using hi); simpa using this
+    obtain ⟨v, hv, hval, hcls⟩ := classify S L W g h31 h0 hinv hg.1 hg.2 hin
+    let W' : Fin 6 → List Bool := fun t => stepW (W t) g
+    have hlen' : ∀ t, (W' t).length = L + 1 := by intro t; simp [W', stepW, hlen t]
+    have hinv' : ∀ i < L + 1, ∃ m, m < 64 ∧ (S ||| 2^v).testBit m = true ∧
+        ∀ t, (W' t).getD i false = m.testBit t.val := by
+      intro i hi
+      by_cases hiL : i < L
+      · obtain ⟨m, hm, hS, hw⟩ := hinv i hiL
+        refine ⟨m, hm, by rw [testBit_or_pow, hS, Bool.true_or], fun t => ?_⟩
+        simp only [W', stepW]
+        rw [List.getD_append _ _ _ _ (by rw [hlen t]; exact hiL)]
+        exact hw t
+      · have hiE : i = L := by omega
+        subst hiE
+        refine ⟨v, hv, by rw [testBit_or_pow]; simp, fun t => ?_⟩
+        simp only [W', stepW]
+        rw [List.getD_append_right _ _ _ _ (by rw [hlen t]), hlen t, Nat.sub_self]
+        exact hval t
+    have hfan' : ∀ g ∈ gs, g.op ∈ ({GateOp.and, GateOp.or, GateOp.not} : Set GateOp) ∧
+        g.inputs.length ≤ 2 := fun g' hg' => hfan g' (by simp [hg'])
+    have hrb' : ∀ j < gs.length, ∀ i ∈ (gs.getD j ⟨GateOp.or, []⟩).inputs, i < L + 1 + j := by
+      intro j hj i hi
+      have := hrb (j+1) (by simp; omega) i (by simpa using hi)
+      omega
+    have h31' : (S ||| 2^v).testBit 63 = true := by rw [testBit_or_pow, h31, Bool.true_or]
+    have h00' : (S ||| 2^v).testBit 0 = true := by rw [testBit_or_pow, h0, Bool.true_or]
+    simp only [List.length_cons] at hk hp hq hr
+    obtain ⟨k, rfl⟩ : ∃ k', k = k' + 1 := ⟨k - 1, by omega⟩
+    have ht' : ∀ t : Fin 6, (gs.foldl stepW (W' t)).getD p false = A.testBit t.val ∧
+        (gs.foldl stepW (W' t)).getD q false = B.testBit t.val ∧
+        (gs.foldl stepW (W' t)).getD r false = C.testBit t.val := fun t => ht t
+    have key : ∀ b', PEqualNP.NotBracket.notCount ⟨gs, 0⟩ ≤ b' →
+        reach A B C k b' (S ||| 2^v) = true := fun b' hb' =>
+      ih W' (L+1) (S ||| 2^v) k b' hlen' h31' h00' hinv' hfan' hrb' (by omega) hb' p q r
+        (by omega) (by omega) (by omega) ht'
+    have hbn : g.op = GateOp.not →
+        PEqualNP.NotBracket.notCount ⟨gs, 0⟩ ≤ b - 1 ∧ 0 < b := by
+      intro hn; simp [PEqualNP.NotBracket.notCount, List.filter_cons, hn] at hb ⊢; omega
+    have hbo : g.op ≠ GateOp.not →
+        PEqualNP.NotBracket.notCount ⟨gs, 0⟩ ≤ b := by
+      intro hn; simp [PEqualNP.NotBracket.notCount, List.filter_cons, hn] at hb ⊢; omega
+    have miss_ok : ∀ b', reach A B C k b' (S ||| 2^v) = true → miss A B C S ≤ k + 1 := by
+      intro b' hR
+      have := miss_step A B C S v hAB hAC hBC
+      rcases reach_miss hR with hh | hh
+      · have := miss_of_hit hh; omega
+      · omega
+    simp only [reach, Bool.or_eq_true, Bool.and_eq_true, decide_eq_true_eq]
+    right
+    by_cases hn : g.op = GateOp.not
+    · have hR := key (b-1) (hbn hn).1
+      refine ⟨miss_ok _ hR, ?_⟩
+      by_cases hsv : S.testBit v = true
+      · rw [or_pow_self hsv] at hR
+        exact Or.inl (Or.inr ⟨(hbn hn).2, hR⟩)
+      · right
+        rw [List.any_eq_true]
+        refine ⟨v, List.mem_range.mpr hv, ?_⟩
+        simp only [Bool.and_eq_true, Bool.or_eq_true, Bool.not_eq_true', decide_eq_true_eq]
+        refine ⟨by simpa using hsv, ?_⟩
+        rcases hcls with h | ⟨hn', h⟩ | ⟨_, h⟩
+        · exact absurd h hsv
+        · exact absurd hn hn'
+        · exact Or.inr ⟨⟨(hbn hn).2, h⟩, hR⟩
+    · have hR := key b (hbo hn)
+      refine ⟨miss_ok _ hR, ?_⟩
+      by_cases hsv : S.testBit v = true
+      · rw [or_pow_self hsv] at hR
+        exact Or.inl (Or.inl hR)
+      · right
+        rw [List.any_eq_true]
+        refine ⟨v, List.mem_range.mpr hv, ?_⟩
+        simp only [Bool.and_eq_true, Bool.or_eq_true, Bool.not_eq_true', decide_eq_true_eq]
+        refine ⟨by simpa using hsv, ?_⟩
+        rcases hcls with h | ⟨_, h⟩ | ⟨hn', h⟩
+        · exact absurd h hsv
+        · exact Or.inl ⟨h, hR⟩
+        · exact absurd hn' hn
+
+def S0 : Nat := 2^62 ||| 2^60 ||| 2^56 ||| 2^48 ||| 2^32 ||| 2^0 ||| 2^63
+
+theorem c3 : reach 2 35 42 4 2 S0 = false := by decide +kernel
+
+theorem c4 : reach 2 35 42 4 1 S0 = false := by decide +kernel
+
+theorem c5 : reach 2 35 42 4 1 (S0 ||| 2^1) = false := by decide +kernel
+
+theorem c2_d1 : body 2 35 42 4 2 1 S0 1 = false := by
+  have e : body 2 35 42 4 2 1 S0 1 = (!(S0).testBit 1 && ((aoHas S0 1 && reach 2 35 42 4 2 (S0 ||| 2^1)) ||
+      (decide (0 < 2) && notHas S0 1 && reach 2 35 42 4 1 (S0 ||| 2^1)))) := rfl
+  rw [c5] at e
+  exact e.trans (by decide +kernel)
+
+theorem c7 : reach 2 35 42 3 1 (S0 ||| 2^3) = false := by decide +kernel
+
+theorem c8 : reach 2 35 42 3 0 (S0 ||| 2^3) = false := by decide +kernel
+
+theorem c9 : reach 2 35 42 3 0 ((S0 ||| 2^3) ||| 2^1) = false := by decide +kernel
+
+theorem c6_d1 : body 2 35 42 3 1 0 (S0 ||| 2^3) 1 = false := by
+  have e : body 2 35 42 3 1 0 (S0 ||| 2^3) 1 = (!((S0 ||| 2^3)).testBit 1 && ((aoHas (S0 ||| 2^3) 1 && reach 2 35 42 3 1 ((S0 ||| 2^3) ||| 2^1)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^3) 1 && reach 2 35 42 3 0 ((S0 ||| 2^3) ||| 2^1)))) := rfl
+  rw [c9] at e
+  exact e.trans (by decide +kernel)
+
+theorem c11 : reach 2 35 42 2 1 ((S0 ||| 2^3) ||| 2^2) = false := by decide +kernel
+
+theorem c12 : reach 2 35 42 2 0 ((S0 ||| 2^3) ||| 2^2) = false := by decide +kernel
+
+theorem c13 : reach 2 35 42 2 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^1) = false := by decide +kernel
+
+theorem c10_d1 : body 2 35 42 2 1 0 ((S0 ||| 2^3) ||| 2^2) 1 = false := by
+  have e : body 2 35 42 2 1 0 ((S0 ||| 2^3) ||| 2^2) 1 = (!(((S0 ||| 2^3) ||| 2^2)).testBit 1 && ((aoHas ((S0 ||| 2^3) ||| 2^2) 1 && reach 2 35 42 2 1 (((S0 ||| 2^3) ||| 2^2) ||| 2^1)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^2) 1 && reach 2 35 42 2 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^1)))) := rfl
+  rw [c13] at e
+  exact e.trans (by decide +kernel)
+
+theorem c14 : reach 2 35 42 2 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^7) = false := by decide +kernel
+
+theorem c10_d7 : body 2 35 42 2 1 0 ((S0 ||| 2^3) ||| 2^2) 7 = false := by
+  have e : body 2 35 42 2 1 0 ((S0 ||| 2^3) ||| 2^2) 7 = (!(((S0 ||| 2^3) ||| 2^2)).testBit 7 && ((aoHas ((S0 ||| 2^3) ||| 2^2) 7 && reach 2 35 42 2 1 (((S0 ||| 2^3) ||| 2^2) ||| 2^7)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^2) 7 && reach 2 35 42 2 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^7)))) := rfl
+  rw [c14] at e
+  exact e.trans (by decide +kernel)
+
+theorem c15 : reach 2 35 42 2 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^15) = false := by decide +kernel
+
+theorem c10_d15 : body 2 35 42 2 1 0 ((S0 ||| 2^3) ||| 2^2) 15 = false := by
+  have e : body 2 35 42 2 1 0 ((S0 ||| 2^3) ||| 2^2) 15 = (!(((S0 ||| 2^3) ||| 2^2)).testBit 15 && ((aoHas ((S0 ||| 2^3) ||| 2^2) 15 && reach 2 35 42 2 1 (((S0 ||| 2^3) ||| 2^2) ||| 2^15)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^2) 15 && reach 2 35 42 2 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^15)))) := rfl
+  rw [c15] at e
+  exact e.trans (by decide +kernel)
+
+theorem c16 : reach 2 35 42 2 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^31) = false := by decide +kernel
+
+theorem c10_d31 : body 2 35 42 2 1 0 ((S0 ||| 2^3) ||| 2^2) 31 = false := by
+  have e : body 2 35 42 2 1 0 ((S0 ||| 2^3) ||| 2^2) 31 = (!(((S0 ||| 2^3) ||| 2^2)).testBit 31 && ((aoHas ((S0 ||| 2^3) ||| 2^2) 31 && reach 2 35 42 2 1 (((S0 ||| 2^3) ||| 2^2) ||| 2^31)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^2) 31 && reach 2 35 42 2 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^31)))) := rfl
+  rw [c16] at e
+  exact e.trans (by decide +kernel)
+
+theorem c17 : reach 2 35 42 2 1 (((S0 ||| 2^3) ||| 2^2) ||| 2^34) = false := by decide +kernel
+
+theorem c10_d34 : body 2 35 42 2 1 0 ((S0 ||| 2^3) ||| 2^2) 34 = false := by
+  have e : body 2 35 42 2 1 0 ((S0 ||| 2^3) ||| 2^2) 34 = (!(((S0 ||| 2^3) ||| 2^2)).testBit 34 && ((aoHas ((S0 ||| 2^3) ||| 2^2) 34 && reach 2 35 42 2 1 (((S0 ||| 2^3) ||| 2^2) ||| 2^34)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^2) 34 && reach 2 35 42 2 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^34)))) := rfl
+  rw [c17] at e
+  exact e.trans (by decide +kernel)
+
+theorem c18 : reach 2 35 42 2 1 (((S0 ||| 2^3) ||| 2^2) ||| 2^35) = false := by decide +kernel
+
+theorem c10_d35 : body 2 35 42 2 1 0 ((S0 ||| 2^3) ||| 2^2) 35 = false := by
+  have e : body 2 35 42 2 1 0 ((S0 ||| 2^3) ||| 2^2) 35 = (!(((S0 ||| 2^3) ||| 2^2)).testBit 35 && ((aoHas ((S0 ||| 2^3) ||| 2^2) 35 && reach 2 35 42 2 1 (((S0 ||| 2^3) ||| 2^2) ||| 2^35)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^2) 35 && reach 2 35 42 2 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^35)))) := rfl
+  rw [c18] at e
+  exact e.trans (by decide +kernel)
+
+theorem c19 : reach 2 35 42 2 1 (((S0 ||| 2^3) ||| 2^2) ||| 2^50) = false := by decide +kernel
+
+theorem c10_d50 : body 2 35 42 2 1 0 ((S0 ||| 2^3) ||| 2^2) 50 = false := by
+  have e : body 2 35 42 2 1 0 ((S0 ||| 2^3) ||| 2^2) 50 = (!(((S0 ||| 2^3) ||| 2^2)).testBit 50 && ((aoHas ((S0 ||| 2^3) ||| 2^2) 50 && reach 2 35 42 2 1 (((S0 ||| 2^3) ||| 2^2) ||| 2^50)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^2) 50 && reach 2 35 42 2 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^50)))) := rfl
+  rw [c19] at e
+  exact e.trans (by decide +kernel)
+
+theorem c20 : reach 2 35 42 2 1 (((S0 ||| 2^3) ||| 2^2) ||| 2^51) = false := by decide +kernel
+
+theorem c10_d51 : body 2 35 42 2 1 0 ((S0 ||| 2^3) ||| 2^2) 51 = false := by
+  have e : body 2 35 42 2 1 0 ((S0 ||| 2^3) ||| 2^2) 51 = (!(((S0 ||| 2^3) ||| 2^2)).testBit 51 && ((aoHas ((S0 ||| 2^3) ||| 2^2) 51 && reach 2 35 42 2 1 (((S0 ||| 2^3) ||| 2^2) ||| 2^51)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^2) 51 && reach 2 35 42 2 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^51)))) := rfl
+  rw [c20] at e
+  exact e.trans (by decide +kernel)
+
+theorem c21 : reach 2 35 42 2 1 (((S0 ||| 2^3) ||| 2^2) ||| 2^58) = false := by decide +kernel
+
+theorem c10_d58 : body 2 35 42 2 1 0 ((S0 ||| 2^3) ||| 2^2) 58 = false := by
+  have e : body 2 35 42 2 1 0 ((S0 ||| 2^3) ||| 2^2) 58 = (!(((S0 ||| 2^3) ||| 2^2)).testBit 58 && ((aoHas ((S0 ||| 2^3) ||| 2^2) 58 && reach 2 35 42 2 1 (((S0 ||| 2^3) ||| 2^2) ||| 2^58)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^2) 58 && reach 2 35 42 2 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^58)))) := rfl
+  rw [c21] at e
+  exact e.trans (by decide +kernel)
+
+theorem c22 : reach 2 35 42 2 1 (((S0 ||| 2^3) ||| 2^2) ||| 2^59) = false := by decide +kernel
+
+theorem c10_d59 : body 2 35 42 2 1 0 ((S0 ||| 2^3) ||| 2^2) 59 = false := by
+  have e : body 2 35 42 2 1 0 ((S0 ||| 2^3) ||| 2^2) 59 = (!(((S0 ||| 2^3) ||| 2^2)).testBit 59 && ((aoHas ((S0 ||| 2^3) ||| 2^2) 59 && reach 2 35 42 2 1 (((S0 ||| 2^3) ||| 2^2) ||| 2^59)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^2) 59 && reach 2 35 42 2 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^59)))) := rfl
+  rw [c22] at e
+  exact e.trans (by decide +kernel)
+
+theorem c23 : reach 2 35 42 2 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^61) = false := by decide +kernel
+
+theorem c10_d61 : body 2 35 42 2 1 0 ((S0 ||| 2^3) ||| 2^2) 61 = false := by
+  have e : body 2 35 42 2 1 0 ((S0 ||| 2^3) ||| 2^2) 61 = (!(((S0 ||| 2^3) ||| 2^2)).testBit 61 && ((aoHas ((S0 ||| 2^3) ||| 2^2) 61 && reach 2 35 42 2 1 (((S0 ||| 2^3) ||| 2^2) ||| 2^61)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^2) 61 && reach 2 35 42 2 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^61)))) := rfl
+  rw [c23] at e
+  exact e.trans (by decide +kernel)
+
+theorem c10_o : (List.range 64).all (fun v => v == 1 || v == 7 || v == 15 || v == 31 || v == 34 || v == 35 || v == 50 || v == 51 || v == 58 || v == 59 || v == 61 || !body 2 35 42 2 1 0 ((S0 ||| 2^3) ||| 2^2) v) = true := by decide +kernel
+
+theorem c10_a : ∀ v, v < 64 → body 2 35 42 2 1 0 ((S0 ||| 2^3) ||| 2^2) v = false := by
+  intro v hv
+  have h := List.all_eq_true.mp c10_o v (List.mem_range.mpr hv)
+  by_cases h1 : v = 1
+  · subst h1; exact c10_d1
+  by_cases h7 : v = 7
+  · subst h7; exact c10_d7
+  by_cases h15 : v = 15
+  · subst h15; exact c10_d15
+  by_cases h31 : v = 31
+  · subst h31; exact c10_d31
+  by_cases h34 : v = 34
+  · subst h34; exact c10_d34
+  by_cases h35 : v = 35
+  · subst h35; exact c10_d35
+  by_cases h50 : v = 50
+  · subst h50; exact c10_d50
+  by_cases h51 : v = 51
+  · subst h51; exact c10_d51
+  by_cases h58 : v = 58
+  · subst h58; exact c10_d58
+  by_cases h59 : v = 59
+  · subst h59; exact c10_d59
+  by_cases h61 : v = 61
+  · subst h61; exact c10_d61
+  simpa [h1, h7, h15, h31, h34, h35, h50, h51, h58, h59, h61] using h
+
+theorem c10 : reach 2 35 42 3 1 ((S0 ||| 2^3) ||| 2^2) = false := by
+  have e := reach_succ 2 35 42 2 1 0 ((S0 ||| 2^3) ||| 2^2) rfl
+  have h : (List.range 64).any (body 2 35 42 2 1 0 ((S0 ||| 2^3) ||| 2^2)) = false := by
+    apply List.any_eq_false.mpr
+    intro v hv
+    rw [c10_a v (List.mem_range.mp hv)]; decide
+  rw [c11, c12, h] at e
+  exact e.trans (by decide +kernel)
+
+theorem c6_d2 : body 2 35 42 3 1 0 (S0 ||| 2^3) 2 = false := by
+  have e : body 2 35 42 3 1 0 (S0 ||| 2^3) 2 = (!((S0 ||| 2^3)).testBit 2 && ((aoHas (S0 ||| 2^3) 2 && reach 2 35 42 3 1 ((S0 ||| 2^3) ||| 2^2)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^3) 2 && reach 2 35 42 3 0 ((S0 ||| 2^3) ||| 2^2)))) := rfl
+  rw [c10] at e
+  exact e.trans (by decide +kernel)
+
+theorem c24 : reach 2 35 42 3 0 ((S0 ||| 2^3) ||| 2^7) = false := by decide +kernel
+
+theorem c6_d7 : body 2 35 42 3 1 0 (S0 ||| 2^3) 7 = false := by
+  have e : body 2 35 42 3 1 0 (S0 ||| 2^3) 7 = (!((S0 ||| 2^3)).testBit 7 && ((aoHas (S0 ||| 2^3) 7 && reach 2 35 42 3 1 ((S0 ||| 2^3) ||| 2^7)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^3) 7 && reach 2 35 42 3 0 ((S0 ||| 2^3) ||| 2^7)))) := rfl
+  rw [c24] at e
+  exact e.trans (by decide +kernel)
+
+theorem c25 : reach 2 35 42 3 0 ((S0 ||| 2^3) ||| 2^15) = false := by decide +kernel
+
+theorem c6_d15 : body 2 35 42 3 1 0 (S0 ||| 2^3) 15 = false := by
+  have e : body 2 35 42 3 1 0 (S0 ||| 2^3) 15 = (!((S0 ||| 2^3)).testBit 15 && ((aoHas (S0 ||| 2^3) 15 && reach 2 35 42 3 1 ((S0 ||| 2^3) ||| 2^15)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^3) 15 && reach 2 35 42 3 0 ((S0 ||| 2^3) ||| 2^15)))) := rfl
+  rw [c25] at e
+  exact e.trans (by decide +kernel)
+
+theorem c26 : reach 2 35 42 3 0 ((S0 ||| 2^3) ||| 2^31) = false := by decide +kernel
+
+theorem c6_d31 : body 2 35 42 3 1 0 (S0 ||| 2^3) 31 = false := by
+  have e : body 2 35 42 3 1 0 (S0 ||| 2^3) 31 = (!((S0 ||| 2^3)).testBit 31 && ((aoHas (S0 ||| 2^3) 31 && reach 2 35 42 3 1 ((S0 ||| 2^3) ||| 2^31)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^3) 31 && reach 2 35 42 3 0 ((S0 ||| 2^3) ||| 2^31)))) := rfl
+  rw [c26] at e
+  exact e.trans (by decide +kernel)
+
+theorem c27 : reach 2 35 42 3 1 ((S0 ||| 2^3) ||| 2^35) = false := by decide +kernel
+
+theorem c6_d35 : body 2 35 42 3 1 0 (S0 ||| 2^3) 35 = false := by
+  have e : body 2 35 42 3 1 0 (S0 ||| 2^3) 35 = (!((S0 ||| 2^3)).testBit 35 && ((aoHas (S0 ||| 2^3) 35 && reach 2 35 42 3 1 ((S0 ||| 2^3) ||| 2^35)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^3) 35 && reach 2 35 42 3 0 ((S0 ||| 2^3) ||| 2^35)))) := rfl
+  rw [c27] at e
+  exact e.trans (by decide +kernel)
+
+theorem c28 : reach 2 35 42 3 1 ((S0 ||| 2^3) ||| 2^51) = false := by decide +kernel
+
+theorem c6_d51 : body 2 35 42 3 1 0 (S0 ||| 2^3) 51 = false := by
+  have e : body 2 35 42 3 1 0 (S0 ||| 2^3) 51 = (!((S0 ||| 2^3)).testBit 51 && ((aoHas (S0 ||| 2^3) 51 && reach 2 35 42 3 1 ((S0 ||| 2^3) ||| 2^51)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^3) 51 && reach 2 35 42 3 0 ((S0 ||| 2^3) ||| 2^51)))) := rfl
+  rw [c28] at e
+  exact e.trans (by decide +kernel)
+
+theorem c29 : reach 2 35 42 3 1 ((S0 ||| 2^3) ||| 2^59) = false := by decide +kernel
+
+theorem c6_d59 : body 2 35 42 3 1 0 (S0 ||| 2^3) 59 = false := by
+  have e : body 2 35 42 3 1 0 (S0 ||| 2^3) 59 = (!((S0 ||| 2^3)).testBit 59 && ((aoHas (S0 ||| 2^3) 59 && reach 2 35 42 3 1 ((S0 ||| 2^3) ||| 2^59)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^3) 59 && reach 2 35 42 3 0 ((S0 ||| 2^3) ||| 2^59)))) := rfl
+  rw [c29] at e
+  exact e.trans (by decide +kernel)
+
+theorem c6_o : (List.range 64).all (fun v => v == 1 || v == 2 || v == 7 || v == 15 || v == 31 || v == 35 || v == 51 || v == 59 || !body 2 35 42 3 1 0 (S0 ||| 2^3) v) = true := by decide +kernel
+
+theorem c6_a : ∀ v, v < 64 → body 2 35 42 3 1 0 (S0 ||| 2^3) v = false := by
+  intro v hv
+  have h := List.all_eq_true.mp c6_o v (List.mem_range.mpr hv)
+  by_cases h1 : v = 1
+  · subst h1; exact c6_d1
+  by_cases h2 : v = 2
+  · subst h2; exact c6_d2
+  by_cases h7 : v = 7
+  · subst h7; exact c6_d7
+  by_cases h15 : v = 15
+  · subst h15; exact c6_d15
+  by_cases h31 : v = 31
+  · subst h31; exact c6_d31
+  by_cases h35 : v = 35
+  · subst h35; exact c6_d35
+  by_cases h51 : v = 51
+  · subst h51; exact c6_d51
+  by_cases h59 : v = 59
+  · subst h59; exact c6_d59
+  simpa [h1, h2, h7, h15, h31, h35, h51, h59] using h
+
+theorem c6 : reach 2 35 42 4 1 (S0 ||| 2^3) = false := by
+  have e := reach_succ 2 35 42 3 1 0 (S0 ||| 2^3) rfl
+  have h : (List.range 64).any (body 2 35 42 3 1 0 (S0 ||| 2^3)) = false := by
+    apply List.any_eq_false.mpr
+    intro v hv
+    rw [c6_a v (List.mem_range.mp hv)]; decide
+  rw [c7, c8, h] at e
+  exact e.trans (by decide +kernel)
+
+theorem c2_d3 : body 2 35 42 4 2 1 S0 3 = false := by
+  have e : body 2 35 42 4 2 1 S0 3 = (!(S0).testBit 3 && ((aoHas S0 3 && reach 2 35 42 4 2 (S0 ||| 2^3)) ||
+      (decide (0 < 2) && notHas S0 3 && reach 2 35 42 4 1 (S0 ||| 2^3)))) := rfl
+  rw [c6] at e
+  exact e.trans (by decide +kernel)
+
+theorem c30 : reach 2 35 42 4 1 (S0 ||| 2^7) = false := by decide +kernel
+
+theorem c2_d7 : body 2 35 42 4 2 1 S0 7 = false := by
+  have e : body 2 35 42 4 2 1 S0 7 = (!(S0).testBit 7 && ((aoHas S0 7 && reach 2 35 42 4 2 (S0 ||| 2^7)) ||
+      (decide (0 < 2) && notHas S0 7 && reach 2 35 42 4 1 (S0 ||| 2^7)))) := rfl
+  rw [c30] at e
+  exact e.trans (by decide +kernel)
+
+theorem c31 : reach 2 35 42 4 1 (S0 ||| 2^15) = false := by decide +kernel
+
+theorem c2_d15 : body 2 35 42 4 2 1 S0 15 = false := by
+  have e : body 2 35 42 4 2 1 S0 15 = (!(S0).testBit 15 && ((aoHas S0 15 && reach 2 35 42 4 2 (S0 ||| 2^15)) ||
+      (decide (0 < 2) && notHas S0 15 && reach 2 35 42 4 1 (S0 ||| 2^15)))) := rfl
+  rw [c31] at e
+  exact e.trans (by decide +kernel)
+
+theorem c32 : reach 2 35 42 4 1 (S0 ||| 2^31) = false := by decide +kernel
+
+theorem c2_d31 : body 2 35 42 4 2 1 S0 31 = false := by
+  have e : body 2 35 42 4 2 1 S0 31 = (!(S0).testBit 31 && ((aoHas S0 31 && reach 2 35 42 4 2 (S0 ||| 2^31)) ||
+      (decide (0 < 2) && notHas S0 31 && reach 2 35 42 4 1 (S0 ||| 2^31)))) := rfl
+  rw [c32] at e
+  exact e.trans (by decide +kernel)
+
+theorem c2_o : (List.range 64).all (fun v => v == 1 || v == 3 || v == 7 || v == 15 || v == 31 || !body 2 35 42 4 2 1 S0 v) = true := by decide +kernel
+
+theorem c2_a : ∀ v, v < 64 → body 2 35 42 4 2 1 S0 v = false := by
+  intro v hv
+  have h := List.all_eq_true.mp c2_o v (List.mem_range.mpr hv)
+  by_cases h1 : v = 1
+  · subst h1; exact c2_d1
+  by_cases h3 : v = 3
+  · subst h3; exact c2_d3
+  by_cases h7 : v = 7
+  · subst h7; exact c2_d7
+  by_cases h15 : v = 15
+  · subst h15; exact c2_d15
+  by_cases h31 : v = 31
+  · subst h31; exact c2_d31
+  simpa [h1, h3, h7, h15, h31] using h
+
+theorem c2 : reach 2 35 42 5 2 S0 = false := by
+  have e := reach_succ 2 35 42 4 2 1 S0 rfl
+  have h : (List.range 64).any (body 2 35 42 4 2 1 S0) = false := by
+    apply List.any_eq_false.mpr
+    intro v hv
+    rw [c2_a v (List.mem_range.mp hv)]; decide
+  rw [c3, c4, h] at e
+  exact e.trans (by decide +kernel)
+
+theorem c34 : reach 2 35 42 4 0 S0 = false := by decide +kernel
+
+theorem c35 : reach 2 35 42 4 0 (S0 ||| 2^1) = false := by decide +kernel
+
+theorem c33_d1 : body 2 35 42 4 1 0 S0 1 = false := by
+  have e : body 2 35 42 4 1 0 S0 1 = (!(S0).testBit 1 && ((aoHas S0 1 && reach 2 35 42 4 1 (S0 ||| 2^1)) ||
+      (decide (0 < 1) && notHas S0 1 && reach 2 35 42 4 0 (S0 ||| 2^1)))) := rfl
+  rw [c35] at e
+  exact e.trans (by decide +kernel)
+
+theorem c36 : reach 2 35 42 4 0 (S0 ||| 2^3) = false := by decide +kernel
+
+theorem c33_d3 : body 2 35 42 4 1 0 S0 3 = false := by
+  have e : body 2 35 42 4 1 0 S0 3 = (!(S0).testBit 3 && ((aoHas S0 3 && reach 2 35 42 4 1 (S0 ||| 2^3)) ||
+      (decide (0 < 1) && notHas S0 3 && reach 2 35 42 4 0 (S0 ||| 2^3)))) := rfl
+  rw [c36] at e
+  exact e.trans (by decide +kernel)
+
+theorem c37 : reach 2 35 42 4 0 (S0 ||| 2^7) = false := by decide +kernel
+
+theorem c33_d7 : body 2 35 42 4 1 0 S0 7 = false := by
+  have e : body 2 35 42 4 1 0 S0 7 = (!(S0).testBit 7 && ((aoHas S0 7 && reach 2 35 42 4 1 (S0 ||| 2^7)) ||
+      (decide (0 < 1) && notHas S0 7 && reach 2 35 42 4 0 (S0 ||| 2^7)))) := rfl
+  rw [c37] at e
+  exact e.trans (by decide +kernel)
+
+theorem c38 : reach 2 35 42 4 0 (S0 ||| 2^15) = false := by decide +kernel
+
+theorem c33_d15 : body 2 35 42 4 1 0 S0 15 = false := by
+  have e : body 2 35 42 4 1 0 S0 15 = (!(S0).testBit 15 && ((aoHas S0 15 && reach 2 35 42 4 1 (S0 ||| 2^15)) ||
+      (decide (0 < 1) && notHas S0 15 && reach 2 35 42 4 0 (S0 ||| 2^15)))) := rfl
+  rw [c38] at e
+  exact e.trans (by decide +kernel)
+
+theorem c39 : reach 2 35 42 4 0 (S0 ||| 2^31) = false := by decide +kernel
+
+theorem c33_d31 : body 2 35 42 4 1 0 S0 31 = false := by
+  have e : body 2 35 42 4 1 0 S0 31 = (!(S0).testBit 31 && ((aoHas S0 31 && reach 2 35 42 4 1 (S0 ||| 2^31)) ||
+      (decide (0 < 1) && notHas S0 31 && reach 2 35 42 4 0 (S0 ||| 2^31)))) := rfl
+  rw [c39] at e
+  exact e.trans (by decide +kernel)
+
+theorem c33_o : (List.range 64).all (fun v => v == 1 || v == 3 || v == 7 || v == 15 || v == 31 || !body 2 35 42 4 1 0 S0 v) = true := by decide +kernel
+
+theorem c33_a : ∀ v, v < 64 → body 2 35 42 4 1 0 S0 v = false := by
+  intro v hv
+  have h := List.all_eq_true.mp c33_o v (List.mem_range.mpr hv)
+  by_cases h1 : v = 1
+  · subst h1; exact c33_d1
+  by_cases h3 : v = 3
+  · subst h3; exact c33_d3
+  by_cases h7 : v = 7
+  · subst h7; exact c33_d7
+  by_cases h15 : v = 15
+  · subst h15; exact c33_d15
+  by_cases h31 : v = 31
+  · subst h31; exact c33_d31
+  simpa [h1, h3, h7, h15, h31] using h
+
+theorem c33 : reach 2 35 42 5 1 S0 = false := by
+  have e := reach_succ 2 35 42 4 1 0 S0 rfl
+  have h : (List.range 64).any (body 2 35 42 4 1 0 S0) = false := by
+    apply List.any_eq_false.mpr
+    intro v hv
+    rw [c33_a v (List.mem_range.mp hv)]; decide
+  rw [c4, c34, h] at e
+  exact e.trans (by decide +kernel)
+
+theorem c42 : reach 2 35 42 3 0 ((S0 ||| 2^1) ||| 2^3) = false := by decide +kernel
+
+theorem c43 : reach 2 35 42 3 0 (((S0 ||| 2^1) ||| 2^3) ||| 2^2) = false := by decide +kernel
+
+theorem c41_d2 : body 2 35 42 3 0 0 ((S0 ||| 2^1) ||| 2^3) 2 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^1) ||| 2^3) 2 = (!(((S0 ||| 2^1) ||| 2^3)).testBit 2 && ((aoHas ((S0 ||| 2^1) ||| 2^3) 2 && reach 2 35 42 3 0 (((S0 ||| 2^1) ||| 2^3) ||| 2^2)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^1) ||| 2^3) 2 && reach 2 35 42 3 0 (((S0 ||| 2^1) ||| 2^3) ||| 2^2)))) := rfl
+  rw [c43] at e
+  exact e.trans (by decide +kernel)
+
+theorem c44 : reach 2 35 42 3 0 (((S0 ||| 2^1) ||| 2^3) ||| 2^33) = false := by decide +kernel
+
+theorem c41_d33 : body 2 35 42 3 0 0 ((S0 ||| 2^1) ||| 2^3) 33 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^1) ||| 2^3) 33 = (!(((S0 ||| 2^1) ||| 2^3)).testBit 33 && ((aoHas ((S0 ||| 2^1) ||| 2^3) 33 && reach 2 35 42 3 0 (((S0 ||| 2^1) ||| 2^3) ||| 2^33)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^1) ||| 2^3) 33 && reach 2 35 42 3 0 (((S0 ||| 2^1) ||| 2^3) ||| 2^33)))) := rfl
+  rw [c44] at e
+  exact e.trans (by decide +kernel)
+
+theorem c45 : reach 2 35 42 3 0 (((S0 ||| 2^1) ||| 2^3) ||| 2^35) = false := by decide +kernel
+
+theorem c41_d35 : body 2 35 42 3 0 0 ((S0 ||| 2^1) ||| 2^3) 35 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^1) ||| 2^3) 35 = (!(((S0 ||| 2^1) ||| 2^3)).testBit 35 && ((aoHas ((S0 ||| 2^1) ||| 2^3) 35 && reach 2 35 42 3 0 (((S0 ||| 2^1) ||| 2^3) ||| 2^35)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^1) ||| 2^3) 35 && reach 2 35 42 3 0 (((S0 ||| 2^1) ||| 2^3) ||| 2^35)))) := rfl
+  rw [c45] at e
+  exact e.trans (by decide +kernel)
+
+theorem c46 : reach 2 35 42 3 0 (((S0 ||| 2^1) ||| 2^3) ||| 2^49) = false := by decide +kernel
+
+theorem c41_d49 : body 2 35 42 3 0 0 ((S0 ||| 2^1) ||| 2^3) 49 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^1) ||| 2^3) 49 = (!(((S0 ||| 2^1) ||| 2^3)).testBit 49 && ((aoHas ((S0 ||| 2^1) ||| 2^3) 49 && reach 2 35 42 3 0 (((S0 ||| 2^1) ||| 2^3) ||| 2^49)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^1) ||| 2^3) 49 && reach 2 35 42 3 0 (((S0 ||| 2^1) ||| 2^3) ||| 2^49)))) := rfl
+  rw [c46] at e
+  exact e.trans (by decide +kernel)
+
+theorem c47 : reach 2 35 42 3 0 (((S0 ||| 2^1) ||| 2^3) ||| 2^51) = false := by decide +kernel
+
+theorem c41_d51 : body 2 35 42 3 0 0 ((S0 ||| 2^1) ||| 2^3) 51 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^1) ||| 2^3) 51 = (!(((S0 ||| 2^1) ||| 2^3)).testBit 51 && ((aoHas ((S0 ||| 2^1) ||| 2^3) 51 && reach 2 35 42 3 0 (((S0 ||| 2^1) ||| 2^3) ||| 2^51)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^1) ||| 2^3) 51 && reach 2 35 42 3 0 (((S0 ||| 2^1) ||| 2^3) ||| 2^51)))) := rfl
+  rw [c47] at e
+  exact e.trans (by decide +kernel)
+
+theorem c48 : reach 2 35 42 3 0 (((S0 ||| 2^1) ||| 2^3) ||| 2^57) = false := by decide +kernel
+
+theorem c41_d57 : body 2 35 42 3 0 0 ((S0 ||| 2^1) ||| 2^3) 57 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^1) ||| 2^3) 57 = (!(((S0 ||| 2^1) ||| 2^3)).testBit 57 && ((aoHas ((S0 ||| 2^1) ||| 2^3) 57 && reach 2 35 42 3 0 (((S0 ||| 2^1) ||| 2^3) ||| 2^57)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^1) ||| 2^3) 57 && reach 2 35 42 3 0 (((S0 ||| 2^1) ||| 2^3) ||| 2^57)))) := rfl
+  rw [c48] at e
+  exact e.trans (by decide +kernel)
+
+theorem c49 : reach 2 35 42 3 0 (((S0 ||| 2^1) ||| 2^3) ||| 2^59) = false := by decide +kernel
+
+theorem c41_d59 : body 2 35 42 3 0 0 ((S0 ||| 2^1) ||| 2^3) 59 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^1) ||| 2^3) 59 = (!(((S0 ||| 2^1) ||| 2^3)).testBit 59 && ((aoHas ((S0 ||| 2^1) ||| 2^3) 59 && reach 2 35 42 3 0 (((S0 ||| 2^1) ||| 2^3) ||| 2^59)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^1) ||| 2^3) 59 && reach 2 35 42 3 0 (((S0 ||| 2^1) ||| 2^3) ||| 2^59)))) := rfl
+  rw [c49] at e
+  exact e.trans (by decide +kernel)
+
+theorem c50 : reach 2 35 42 3 0 (((S0 ||| 2^1) ||| 2^3) ||| 2^61) = false := by decide +kernel
+
+theorem c41_d61 : body 2 35 42 3 0 0 ((S0 ||| 2^1) ||| 2^3) 61 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^1) ||| 2^3) 61 = (!(((S0 ||| 2^1) ||| 2^3)).testBit 61 && ((aoHas ((S0 ||| 2^1) ||| 2^3) 61 && reach 2 35 42 3 0 (((S0 ||| 2^1) ||| 2^3) ||| 2^61)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^1) ||| 2^3) 61 && reach 2 35 42 3 0 (((S0 ||| 2^1) ||| 2^3) ||| 2^61)))) := rfl
+  rw [c50] at e
+  exact e.trans (by decide +kernel)
+
+theorem c41_o : (List.range 64).all (fun v => v == 2 || v == 33 || v == 35 || v == 49 || v == 51 || v == 57 || v == 59 || v == 61 || !body 2 35 42 3 0 0 ((S0 ||| 2^1) ||| 2^3) v) = true := by decide +kernel
+
+theorem c41_a : ∀ v, v < 64 → body 2 35 42 3 0 0 ((S0 ||| 2^1) ||| 2^3) v = false := by
+  intro v hv
+  have h := List.all_eq_true.mp c41_o v (List.mem_range.mpr hv)
+  by_cases h2 : v = 2
+  · subst h2; exact c41_d2
+  by_cases h33 : v = 33
+  · subst h33; exact c41_d33
+  by_cases h35 : v = 35
+  · subst h35; exact c41_d35
+  by_cases h49 : v = 49
+  · subst h49; exact c41_d49
+  by_cases h51 : v = 51
+  · subst h51; exact c41_d51
+  by_cases h57 : v = 57
+  · subst h57; exact c41_d57
+  by_cases h59 : v = 59
+  · subst h59; exact c41_d59
+  by_cases h61 : v = 61
+  · subst h61; exact c41_d61
+  simpa [h2, h33, h35, h49, h51, h57, h59, h61] using h
+
+theorem c41 : reach 2 35 42 4 0 ((S0 ||| 2^1) ||| 2^3) = false := by
+  have e := reach_succ 2 35 42 3 0 0 ((S0 ||| 2^1) ||| 2^3) rfl
+  have h : (List.range 64).any (body 2 35 42 3 0 0 ((S0 ||| 2^1) ||| 2^3)) = false := by
+    apply List.any_eq_false.mpr
+    intro v hv
+    rw [c41_a v (List.mem_range.mp hv)]; decide
+  rw [c42, h] at e
+  exact e.trans (by decide +kernel)
+
+theorem c40_d3 : body 2 35 42 4 1 0 (S0 ||| 2^1) 3 = false := by
+  have e : body 2 35 42 4 1 0 (S0 ||| 2^1) 3 = (!((S0 ||| 2^1)).testBit 3 && ((aoHas (S0 ||| 2^1) 3 && reach 2 35 42 4 1 ((S0 ||| 2^1) ||| 2^3)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^1) 3 && reach 2 35 42 4 0 ((S0 ||| 2^1) ||| 2^3)))) := rfl
+  rw [c41] at e
+  exact e.trans (by decide +kernel)
+
+theorem c51 : reach 2 35 42 4 0 ((S0 ||| 2^1) ||| 2^7) = false := by decide +kernel
+
+theorem c40_d7 : body 2 35 42 4 1 0 (S0 ||| 2^1) 7 = false := by
+  have e : body 2 35 42 4 1 0 (S0 ||| 2^1) 7 = (!((S0 ||| 2^1)).testBit 7 && ((aoHas (S0 ||| 2^1) 7 && reach 2 35 42 4 1 ((S0 ||| 2^1) ||| 2^7)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^1) 7 && reach 2 35 42 4 0 ((S0 ||| 2^1) ||| 2^7)))) := rfl
+  rw [c51] at e
+  exact e.trans (by decide +kernel)
+
+theorem c52 : reach 2 35 42 4 0 ((S0 ||| 2^1) ||| 2^15) = false := by decide +kernel
+
+theorem c40_d15 : body 2 35 42 4 1 0 (S0 ||| 2^1) 15 = false := by
+  have e : body 2 35 42 4 1 0 (S0 ||| 2^1) 15 = (!((S0 ||| 2^1)).testBit 15 && ((aoHas (S0 ||| 2^1) 15 && reach 2 35 42 4 1 ((S0 ||| 2^1) ||| 2^15)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^1) 15 && reach 2 35 42 4 0 ((S0 ||| 2^1) ||| 2^15)))) := rfl
+  rw [c52] at e
+  exact e.trans (by decide +kernel)
+
+theorem c53 : reach 2 35 42 4 0 ((S0 ||| 2^1) ||| 2^31) = false := by decide +kernel
+
+theorem c40_d31 : body 2 35 42 4 1 0 (S0 ||| 2^1) 31 = false := by
+  have e : body 2 35 42 4 1 0 (S0 ||| 2^1) 31 = (!((S0 ||| 2^1)).testBit 31 && ((aoHas (S0 ||| 2^1) 31 && reach 2 35 42 4 1 ((S0 ||| 2^1) ||| 2^31)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^1) 31 && reach 2 35 42 4 0 ((S0 ||| 2^1) ||| 2^31)))) := rfl
+  rw [c53] at e
+  exact e.trans (by decide +kernel)
+
+theorem c54 : reach 2 35 42 4 1 ((S0 ||| 2^1) ||| 2^33) = false := by decide +kernel
+
+theorem c40_d33 : body 2 35 42 4 1 0 (S0 ||| 2^1) 33 = false := by
+  have e : body 2 35 42 4 1 0 (S0 ||| 2^1) 33 = (!((S0 ||| 2^1)).testBit 33 && ((aoHas (S0 ||| 2^1) 33 && reach 2 35 42 4 1 ((S0 ||| 2^1) ||| 2^33)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^1) 33 && reach 2 35 42 4 0 ((S0 ||| 2^1) ||| 2^33)))) := rfl
+  rw [c54] at e
+  exact e.trans (by decide +kernel)
+
+theorem c55 : reach 2 35 42 4 1 ((S0 ||| 2^1) ||| 2^49) = false := by decide +kernel
+
+theorem c40_d49 : body 2 35 42 4 1 0 (S0 ||| 2^1) 49 = false := by
+  have e : body 2 35 42 4 1 0 (S0 ||| 2^1) 49 = (!((S0 ||| 2^1)).testBit 49 && ((aoHas (S0 ||| 2^1) 49 && reach 2 35 42 4 1 ((S0 ||| 2^1) ||| 2^49)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^1) 49 && reach 2 35 42 4 0 ((S0 ||| 2^1) ||| 2^49)))) := rfl
+  rw [c55] at e
+  exact e.trans (by decide +kernel)
+
+theorem c56 : reach 2 35 42 4 1 ((S0 ||| 2^1) ||| 2^57) = false := by decide +kernel
+
+theorem c40_d57 : body 2 35 42 4 1 0 (S0 ||| 2^1) 57 = false := by
+  have e : body 2 35 42 4 1 0 (S0 ||| 2^1) 57 = (!((S0 ||| 2^1)).testBit 57 && ((aoHas (S0 ||| 2^1) 57 && reach 2 35 42 4 1 ((S0 ||| 2^1) ||| 2^57)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^1) 57 && reach 2 35 42 4 0 ((S0 ||| 2^1) ||| 2^57)))) := rfl
+  rw [c56] at e
+  exact e.trans (by decide +kernel)
+
+theorem c57 : reach 2 35 42 4 1 ((S0 ||| 2^1) ||| 2^61) = false := by decide +kernel
+
+theorem c40_d61 : body 2 35 42 4 1 0 (S0 ||| 2^1) 61 = false := by
+  have e : body 2 35 42 4 1 0 (S0 ||| 2^1) 61 = (!((S0 ||| 2^1)).testBit 61 && ((aoHas (S0 ||| 2^1) 61 && reach 2 35 42 4 1 ((S0 ||| 2^1) ||| 2^61)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^1) 61 && reach 2 35 42 4 0 ((S0 ||| 2^1) ||| 2^61)))) := rfl
+  rw [c57] at e
+  exact e.trans (by decide +kernel)
+
+theorem c40_o : (List.range 64).all (fun v => v == 3 || v == 7 || v == 15 || v == 31 || v == 33 || v == 49 || v == 57 || v == 61 || !body 2 35 42 4 1 0 (S0 ||| 2^1) v) = true := by decide +kernel
+
+theorem c40_a : ∀ v, v < 64 → body 2 35 42 4 1 0 (S0 ||| 2^1) v = false := by
+  intro v hv
+  have h := List.all_eq_true.mp c40_o v (List.mem_range.mpr hv)
+  by_cases h3 : v = 3
+  · subst h3; exact c40_d3
+  by_cases h7 : v = 7
+  · subst h7; exact c40_d7
+  by_cases h15 : v = 15
+  · subst h15; exact c40_d15
+  by_cases h31 : v = 31
+  · subst h31; exact c40_d31
+  by_cases h33 : v = 33
+  · subst h33; exact c40_d33
+  by_cases h49 : v = 49
+  · subst h49; exact c40_d49
+  by_cases h57 : v = 57
+  · subst h57; exact c40_d57
+  by_cases h61 : v = 61
+  · subst h61; exact c40_d61
+  simpa [h3, h7, h15, h31, h33, h49, h57, h61] using h
+
+theorem c40 : reach 2 35 42 5 1 (S0 ||| 2^1) = false := by
+  have e := reach_succ 2 35 42 4 1 0 (S0 ||| 2^1) rfl
+  have h : (List.range 64).any (body 2 35 42 4 1 0 (S0 ||| 2^1)) = false := by
+    apply List.any_eq_false.mpr
+    intro v hv
+    rw [c40_a v (List.mem_range.mp hv)]; decide
+  rw [c5, c35, h] at e
+  exact e.trans (by decide +kernel)
+
+theorem c1_d1 : body 2 35 42 5 2 1 S0 1 = false := by
+  have e : body 2 35 42 5 2 1 S0 1 = (!(S0).testBit 1 && ((aoHas S0 1 && reach 2 35 42 5 2 (S0 ||| 2^1)) ||
+      (decide (0 < 2) && notHas S0 1 && reach 2 35 42 5 1 (S0 ||| 2^1)))) := rfl
+  rw [c40] at e
+  exact e.trans (by decide +kernel)
+
+theorem c60 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^1) ||| 2^2) = false := by decide +kernel
+
+theorem c59_d2 : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^1) 2 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^1) 2 = (!(((S0 ||| 2^3) ||| 2^1)).testBit 2 && ((aoHas ((S0 ||| 2^3) ||| 2^1) 2 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^1) ||| 2^2)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^3) ||| 2^1) 2 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^1) ||| 2^2)))) := rfl
+  rw [c60] at e
+  exact e.trans (by decide +kernel)
+
+theorem c61 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^1) ||| 2^33) = false := by decide +kernel
+
+theorem c59_d33 : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^1) 33 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^1) 33 = (!(((S0 ||| 2^3) ||| 2^1)).testBit 33 && ((aoHas ((S0 ||| 2^3) ||| 2^1) 33 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^1) ||| 2^33)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^3) ||| 2^1) 33 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^1) ||| 2^33)))) := rfl
+  rw [c61] at e
+  exact e.trans (by decide +kernel)
+
+theorem c62 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^1) ||| 2^35) = false := by decide +kernel
+
+theorem c59_d35 : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^1) 35 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^1) 35 = (!(((S0 ||| 2^3) ||| 2^1)).testBit 35 && ((aoHas ((S0 ||| 2^3) ||| 2^1) 35 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^1) ||| 2^35)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^3) ||| 2^1) 35 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^1) ||| 2^35)))) := rfl
+  rw [c62] at e
+  exact e.trans (by decide +kernel)
+
+theorem c63 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^1) ||| 2^49) = false := by decide +kernel
+
+theorem c59_d49 : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^1) 49 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^1) 49 = (!(((S0 ||| 2^3) ||| 2^1)).testBit 49 && ((aoHas ((S0 ||| 2^3) ||| 2^1) 49 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^1) ||| 2^49)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^3) ||| 2^1) 49 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^1) ||| 2^49)))) := rfl
+  rw [c63] at e
+  exact e.trans (by decide +kernel)
+
+theorem c64 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^1) ||| 2^51) = false := by decide +kernel
+
+theorem c59_d51 : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^1) 51 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^1) 51 = (!(((S0 ||| 2^3) ||| 2^1)).testBit 51 && ((aoHas ((S0 ||| 2^3) ||| 2^1) 51 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^1) ||| 2^51)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^3) ||| 2^1) 51 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^1) ||| 2^51)))) := rfl
+  rw [c64] at e
+  exact e.trans (by decide +kernel)
+
+theorem c65 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^1) ||| 2^57) = false := by decide +kernel
+
+theorem c59_d57 : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^1) 57 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^1) 57 = (!(((S0 ||| 2^3) ||| 2^1)).testBit 57 && ((aoHas ((S0 ||| 2^3) ||| 2^1) 57 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^1) ||| 2^57)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^3) ||| 2^1) 57 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^1) ||| 2^57)))) := rfl
+  rw [c65] at e
+  exact e.trans (by decide +kernel)
+
+theorem c66 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^1) ||| 2^59) = false := by decide +kernel
+
+theorem c59_d59 : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^1) 59 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^1) 59 = (!(((S0 ||| 2^3) ||| 2^1)).testBit 59 && ((aoHas ((S0 ||| 2^3) ||| 2^1) 59 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^1) ||| 2^59)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^3) ||| 2^1) 59 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^1) ||| 2^59)))) := rfl
+  rw [c66] at e
+  exact e.trans (by decide +kernel)
+
+theorem c67 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^1) ||| 2^61) = false := by decide +kernel
+
+theorem c59_d61 : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^1) 61 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^1) 61 = (!(((S0 ||| 2^3) ||| 2^1)).testBit 61 && ((aoHas ((S0 ||| 2^3) ||| 2^1) 61 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^1) ||| 2^61)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^3) ||| 2^1) 61 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^1) ||| 2^61)))) := rfl
+  rw [c67] at e
+  exact e.trans (by decide +kernel)
+
+theorem c59_o : (List.range 64).all (fun v => v == 2 || v == 33 || v == 35 || v == 49 || v == 51 || v == 57 || v == 59 || v == 61 || !body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^1) v) = true := by decide +kernel
+
+theorem c59_a : ∀ v, v < 64 → body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^1) v = false := by
+  intro v hv
+  have h := List.all_eq_true.mp c59_o v (List.mem_range.mpr hv)
+  by_cases h2 : v = 2
+  · subst h2; exact c59_d2
+  by_cases h33 : v = 33
+  · subst h33; exact c59_d33
+  by_cases h35 : v = 35
+  · subst h35; exact c59_d35
+  by_cases h49 : v = 49
+  · subst h49; exact c59_d49
+  by_cases h51 : v = 51
+  · subst h51; exact c59_d51
+  by_cases h57 : v = 57
+  · subst h57; exact c59_d57
+  by_cases h59 : v = 59
+  · subst h59; exact c59_d59
+  by_cases h61 : v = 61
+  · subst h61; exact c59_d61
+  simpa [h2, h33, h35, h49, h51, h57, h59, h61] using h
+
+theorem c59 : reach 2 35 42 4 0 ((S0 ||| 2^3) ||| 2^1) = false := by
+  have e := reach_succ 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^1) rfl
+  have h : (List.range 64).any (body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^1)) = false := by
+    apply List.any_eq_false.mpr
+    intro v hv
+    rw [c59_a v (List.mem_range.mp hv)]; decide
+  rw [c9, h] at e
+  exact e.trans (by decide +kernel)
+
+theorem c58_d1 : body 2 35 42 4 1 0 (S0 ||| 2^3) 1 = false := by
+  have e : body 2 35 42 4 1 0 (S0 ||| 2^3) 1 = (!((S0 ||| 2^3)).testBit 1 && ((aoHas (S0 ||| 2^3) 1 && reach 2 35 42 4 1 ((S0 ||| 2^3) ||| 2^1)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^3) 1 && reach 2 35 42 4 0 ((S0 ||| 2^3) ||| 2^1)))) := rfl
+  rw [c59] at e
+  exact e.trans (by decide +kernel)
+
+theorem c69 : reach 2 35 42 3 0 ((S0 ||| 2^3) ||| 2^2) = false := by decide +kernel
+
+theorem c70 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^1) = false := by decide +kernel
+
+theorem c68_d1 : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^2) 1 = false := by
+  have e : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^2) 1 = (!(((S0 ||| 2^3) ||| 2^2)).testBit 1 && ((aoHas ((S0 ||| 2^3) ||| 2^2) 1 && reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^2) ||| 2^1)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^2) 1 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^1)))) := rfl
+  rw [c70] at e
+  exact e.trans (by decide +kernel)
+
+theorem c71 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^7) = false := by decide +kernel
+
+theorem c68_d7 : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^2) 7 = false := by
+  have e : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^2) 7 = (!(((S0 ||| 2^3) ||| 2^2)).testBit 7 && ((aoHas ((S0 ||| 2^3) ||| 2^2) 7 && reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^2) ||| 2^7)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^2) 7 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^7)))) := rfl
+  rw [c71] at e
+  exact e.trans (by decide +kernel)
+
+theorem c72 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^15) = false := by decide +kernel
+
+theorem c68_d15 : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^2) 15 = false := by
+  have e : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^2) 15 = (!(((S0 ||| 2^3) ||| 2^2)).testBit 15 && ((aoHas ((S0 ||| 2^3) ||| 2^2) 15 && reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^2) ||| 2^15)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^2) 15 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^15)))) := rfl
+  rw [c72] at e
+  exact e.trans (by decide +kernel)
+
+theorem c73 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^31) = false := by decide +kernel
+
+theorem c68_d31 : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^2) 31 = false := by
+  have e : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^2) 31 = (!(((S0 ||| 2^3) ||| 2^2)).testBit 31 && ((aoHas ((S0 ||| 2^3) ||| 2^2) 31 && reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^2) ||| 2^31)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^2) 31 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^31)))) := rfl
+  rw [c73] at e
+  exact e.trans (by decide +kernel)
+
+theorem c75 : reach 2 35 42 2 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^34) = false := by decide +kernel
+
+theorem c76 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^34) ||| 2^1) = false := by decide +kernel
+
+theorem c74_d1 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 1 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 1 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^34)).testBit 1 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 1 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^34) ||| 2^1)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 1 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^34) ||| 2^1)))) := rfl
+  rw [c76] at e
+  exact e.trans (by decide +kernel)
+
+theorem c77 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^34) ||| 2^7) = false := by decide +kernel
+
+theorem c74_d7 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 7 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 7 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^34)).testBit 7 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 7 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^34) ||| 2^7)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 7 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^34) ||| 2^7)))) := rfl
+  rw [c77] at e
+  exact e.trans (by decide +kernel)
+
+theorem c78 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^34) ||| 2^15) = false := by decide +kernel
+
+theorem c74_d15 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 15 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 15 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^34)).testBit 15 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 15 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^34) ||| 2^15)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 15 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^34) ||| 2^15)))) := rfl
+  rw [c78] at e
+  exact e.trans (by decide +kernel)
+
+theorem c79 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^34) ||| 2^29) = false := by decide +kernel
+
+theorem c74_d29 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 29 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 29 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^34)).testBit 29 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 29 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^34) ||| 2^29)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 29 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^34) ||| 2^29)))) := rfl
+  rw [c79] at e
+  exact e.trans (by decide +kernel)
+
+theorem c80 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^34) ||| 2^31) = false := by decide +kernel
+
+theorem c74_d31 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 31 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 31 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^34)).testBit 31 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 31 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^34) ||| 2^31)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 31 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^34) ||| 2^31)))) := rfl
+  rw [c80] at e
+  exact e.trans (by decide +kernel)
+
+theorem c81 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^34) ||| 2^35) = false := by decide +kernel
+
+theorem c74_d35 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 35 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 35 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^34)).testBit 35 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 35 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^34) ||| 2^35)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 35 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^34) ||| 2^35)))) := rfl
+  rw [c81] at e
+  exact e.trans (by decide +kernel)
+
+theorem c82 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^34) ||| 2^50) = false := by decide +kernel
+
+theorem c74_d50 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 50 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 50 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^34)).testBit 50 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 50 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^34) ||| 2^50)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 50 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^34) ||| 2^50)))) := rfl
+  rw [c82] at e
+  exact e.trans (by decide +kernel)
+
+theorem c83 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^34) ||| 2^51) = false := by decide +kernel
+
+theorem c74_d51 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 51 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 51 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^34)).testBit 51 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 51 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^34) ||| 2^51)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 51 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^34) ||| 2^51)))) := rfl
+  rw [c83] at e
+  exact e.trans (by decide +kernel)
+
+theorem c84 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^34) ||| 2^58) = false := by decide +kernel
+
+theorem c74_d58 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 58 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 58 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^34)).testBit 58 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 58 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^34) ||| 2^58)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 58 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^34) ||| 2^58)))) := rfl
+  rw [c84] at e
+  exact e.trans (by decide +kernel)
+
+theorem c85 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^34) ||| 2^59) = false := by decide +kernel
+
+theorem c74_d59 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 59 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 59 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^34)).testBit 59 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 59 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^34) ||| 2^59)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 59 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^34) ||| 2^59)))) := rfl
+  rw [c85] at e
+  exact e.trans (by decide +kernel)
+
+theorem c86 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^34) ||| 2^61) = false := by decide +kernel
+
+theorem c74_d61 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 61 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 61 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^34)).testBit 61 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 61 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^34) ||| 2^61)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^34) 61 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^34) ||| 2^61)))) := rfl
+  rw [c86] at e
+  exact e.trans (by decide +kernel)
+
+theorem c74_o : (List.range 64).all (fun v => v == 1 || v == 7 || v == 15 || v == 29 || v == 31 || v == 35 || v == 50 || v == 51 || v == 58 || v == 59 || v == 61 || !body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^34) v) = true := by decide +kernel
+
+theorem c74_a : ∀ v, v < 64 → body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^34) v = false := by
+  intro v hv
+  have h := List.all_eq_true.mp c74_o v (List.mem_range.mpr hv)
+  by_cases h1 : v = 1
+  · subst h1; exact c74_d1
+  by_cases h7 : v = 7
+  · subst h7; exact c74_d7
+  by_cases h15 : v = 15
+  · subst h15; exact c74_d15
+  by_cases h29 : v = 29
+  · subst h29; exact c74_d29
+  by_cases h31 : v = 31
+  · subst h31; exact c74_d31
+  by_cases h35 : v = 35
+  · subst h35; exact c74_d35
+  by_cases h50 : v = 50
+  · subst h50; exact c74_d50
+  by_cases h51 : v = 51
+  · subst h51; exact c74_d51
+  by_cases h58 : v = 58
+  · subst h58; exact c74_d58
+  by_cases h59 : v = 59
+  · subst h59; exact c74_d59
+  by_cases h61 : v = 61
+  · subst h61; exact c74_d61
+  simpa [h1, h7, h15, h29, h31, h35, h50, h51, h58, h59, h61] using h
+
+theorem c74 : reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^2) ||| 2^34) = false := by
+  have e := reach_succ 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^34) rfl
+  have h : (List.range 64).any (body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^34)) = false := by
+    apply List.any_eq_false.mpr
+    intro v hv
+    rw [c74_a v (List.mem_range.mp hv)]; decide
+  rw [c17, c75, h] at e
+  exact e.trans (by decide +kernel)
+
+theorem c68_d34 : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^2) 34 = false := by
+  have e : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^2) 34 = (!(((S0 ||| 2^3) ||| 2^2)).testBit 34 && ((aoHas ((S0 ||| 2^3) ||| 2^2) 34 && reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^2) ||| 2^34)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^2) 34 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^34)))) := rfl
+  rw [c74] at e
+  exact e.trans (by decide +kernel)
+
+theorem c88 : reach 2 35 42 2 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^35) = false := by decide +kernel
+
+theorem c89 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^35) ||| 2^1) = false := by decide +kernel
+
+theorem c87_d1 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 1 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 1 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^35)).testBit 1 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 1 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^35) ||| 2^1)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 1 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^35) ||| 2^1)))) := rfl
+  rw [c89] at e
+  exact e.trans (by decide +kernel)
+
+theorem c90 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^35) ||| 2^7) = false := by decide +kernel
+
+theorem c87_d7 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 7 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 7 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^35)).testBit 7 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 7 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^35) ||| 2^7)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 7 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^35) ||| 2^7)))) := rfl
+  rw [c90] at e
+  exact e.trans (by decide +kernel)
+
+theorem c91 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^35) ||| 2^15) = false := by decide +kernel
+
+theorem c87_d15 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 15 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 15 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^35)).testBit 15 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 15 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^35) ||| 2^15)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 15 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^35) ||| 2^15)))) := rfl
+  rw [c91] at e
+  exact e.trans (by decide +kernel)
+
+theorem c92 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^35) ||| 2^28) = false := by decide +kernel
+
+theorem c87_d28 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 28 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 28 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^35)).testBit 28 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 28 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^35) ||| 2^28)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 28 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^35) ||| 2^28)))) := rfl
+  rw [c92] at e
+  exact e.trans (by decide +kernel)
+
+theorem c93 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^35) ||| 2^31) = false := by decide +kernel
+
+theorem c87_d31 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 31 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 31 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^35)).testBit 31 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 31 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^35) ||| 2^31)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 31 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^35) ||| 2^31)))) := rfl
+  rw [c93] at e
+  exact e.trans (by decide +kernel)
+
+theorem c94 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^35) ||| 2^34) = false := by decide +kernel
+
+theorem c87_d34 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 34 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 34 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^35)).testBit 34 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 34 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^35) ||| 2^34)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 34 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^35) ||| 2^34)))) := rfl
+  rw [c94] at e
+  exact e.trans (by decide +kernel)
+
+theorem c95 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^35) ||| 2^50) = false := by decide +kernel
+
+theorem c87_d50 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 50 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 50 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^35)).testBit 50 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 50 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^35) ||| 2^50)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 50 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^35) ||| 2^50)))) := rfl
+  rw [c95] at e
+  exact e.trans (by decide +kernel)
+
+theorem c96 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^35) ||| 2^51) = false := by decide +kernel
+
+theorem c87_d51 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 51 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 51 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^35)).testBit 51 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 51 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^35) ||| 2^51)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 51 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^35) ||| 2^51)))) := rfl
+  rw [c96] at e
+  exact e.trans (by decide +kernel)
+
+theorem c97 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^35) ||| 2^58) = false := by decide +kernel
+
+theorem c87_d58 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 58 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 58 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^35)).testBit 58 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 58 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^35) ||| 2^58)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 58 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^35) ||| 2^58)))) := rfl
+  rw [c97] at e
+  exact e.trans (by decide +kernel)
+
+theorem c98 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^35) ||| 2^59) = false := by decide +kernel
+
+theorem c87_d59 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 59 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 59 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^35)).testBit 59 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 59 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^35) ||| 2^59)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 59 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^35) ||| 2^59)))) := rfl
+  rw [c98] at e
+  exact e.trans (by decide +kernel)
+
+theorem c99 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^35) ||| 2^61) = false := by decide +kernel
+
+theorem c87_d61 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 61 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 61 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^35)).testBit 61 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 61 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^35) ||| 2^61)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^35) 61 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^35) ||| 2^61)))) := rfl
+  rw [c99] at e
+  exact e.trans (by decide +kernel)
+
+theorem c87_o : (List.range 64).all (fun v => v == 1 || v == 7 || v == 15 || v == 28 || v == 31 || v == 34 || v == 50 || v == 51 || v == 58 || v == 59 || v == 61 || !body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^35) v) = true := by decide +kernel
+
+theorem c87_a : ∀ v, v < 64 → body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^35) v = false := by
+  intro v hv
+  have h := List.all_eq_true.mp c87_o v (List.mem_range.mpr hv)
+  by_cases h1 : v = 1
+  · subst h1; exact c87_d1
+  by_cases h7 : v = 7
+  · subst h7; exact c87_d7
+  by_cases h15 : v = 15
+  · subst h15; exact c87_d15
+  by_cases h28 : v = 28
+  · subst h28; exact c87_d28
+  by_cases h31 : v = 31
+  · subst h31; exact c87_d31
+  by_cases h34 : v = 34
+  · subst h34; exact c87_d34
+  by_cases h50 : v = 50
+  · subst h50; exact c87_d50
+  by_cases h51 : v = 51
+  · subst h51; exact c87_d51
+  by_cases h58 : v = 58
+  · subst h58; exact c87_d58
+  by_cases h59 : v = 59
+  · subst h59; exact c87_d59
+  by_cases h61 : v = 61
+  · subst h61; exact c87_d61
+  simpa [h1, h7, h15, h28, h31, h34, h50, h51, h58, h59, h61] using h
+
+theorem c87 : reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^2) ||| 2^35) = false := by
+  have e := reach_succ 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^35) rfl
+  have h : (List.range 64).any (body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^35)) = false := by
+    apply List.any_eq_false.mpr
+    intro v hv
+    rw [c87_a v (List.mem_range.mp hv)]; decide
+  rw [c18, c88, h] at e
+  exact e.trans (by decide +kernel)
+
+theorem c68_d35 : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^2) 35 = false := by
+  have e : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^2) 35 = (!(((S0 ||| 2^3) ||| 2^2)).testBit 35 && ((aoHas ((S0 ||| 2^3) ||| 2^2) 35 && reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^2) ||| 2^35)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^2) 35 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^35)))) := rfl
+  rw [c87] at e
+  exact e.trans (by decide +kernel)
+
+theorem c101 : reach 2 35 42 2 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^50) = false := by decide +kernel
+
+theorem c102 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^50) ||| 2^1) = false := by decide +kernel
+
+theorem c100_d1 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 1 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 1 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^50)).testBit 1 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 1 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^50) ||| 2^1)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 1 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^50) ||| 2^1)))) := rfl
+  rw [c102] at e
+  exact e.trans (by decide +kernel)
+
+theorem c103 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^50) ||| 2^7) = false := by decide +kernel
+
+theorem c100_d7 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 7 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 7 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^50)).testBit 7 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 7 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^50) ||| 2^7)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 7 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^50) ||| 2^7)))) := rfl
+  rw [c103] at e
+  exact e.trans (by decide +kernel)
+
+theorem c104 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^50) ||| 2^13) = false := by decide +kernel
+
+theorem c100_d13 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 13 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 13 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^50)).testBit 13 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 13 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^50) ||| 2^13)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 13 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^50) ||| 2^13)))) := rfl
+  rw [c104] at e
+  exact e.trans (by decide +kernel)
+
+theorem c105 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^50) ||| 2^15) = false := by decide +kernel
+
+theorem c100_d15 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 15 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 15 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^50)).testBit 15 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 15 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^50) ||| 2^15)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 15 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^50) ||| 2^15)))) := rfl
+  rw [c105] at e
+  exact e.trans (by decide +kernel)
+
+theorem c106 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^50) ||| 2^31) = false := by decide +kernel
+
+theorem c100_d31 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 31 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 31 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^50)).testBit 31 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 31 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^50) ||| 2^31)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 31 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^50) ||| 2^31)))) := rfl
+  rw [c106] at e
+  exact e.trans (by decide +kernel)
+
+theorem c107 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^50) ||| 2^34) = false := by decide +kernel
+
+theorem c100_d34 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 34 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 34 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^50)).testBit 34 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 34 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^50) ||| 2^34)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 34 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^50) ||| 2^34)))) := rfl
+  rw [c107] at e
+  exact e.trans (by decide +kernel)
+
+theorem c108 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^50) ||| 2^35) = false := by decide +kernel
+
+theorem c100_d35 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 35 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 35 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^50)).testBit 35 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 35 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^50) ||| 2^35)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 35 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^50) ||| 2^35)))) := rfl
+  rw [c108] at e
+  exact e.trans (by decide +kernel)
+
+theorem c109 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^50) ||| 2^51) = false := by decide +kernel
+
+theorem c100_d51 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 51 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 51 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^50)).testBit 51 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 51 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^50) ||| 2^51)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 51 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^50) ||| 2^51)))) := rfl
+  rw [c109] at e
+  exact e.trans (by decide +kernel)
+
+theorem c110 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^50) ||| 2^58) = false := by decide +kernel
+
+theorem c100_d58 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 58 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 58 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^50)).testBit 58 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 58 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^50) ||| 2^58)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 58 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^50) ||| 2^58)))) := rfl
+  rw [c110] at e
+  exact e.trans (by decide +kernel)
+
+theorem c111 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^50) ||| 2^59) = false := by decide +kernel
+
+theorem c100_d59 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 59 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 59 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^50)).testBit 59 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 59 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^50) ||| 2^59)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 59 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^50) ||| 2^59)))) := rfl
+  rw [c111] at e
+  exact e.trans (by decide +kernel)
+
+theorem c112 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^50) ||| 2^61) = false := by decide +kernel
+
+theorem c100_d61 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 61 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 61 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^50)).testBit 61 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 61 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^50) ||| 2^61)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^50) 61 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^50) ||| 2^61)))) := rfl
+  rw [c112] at e
+  exact e.trans (by decide +kernel)
+
+theorem c100_o : (List.range 64).all (fun v => v == 1 || v == 7 || v == 13 || v == 15 || v == 31 || v == 34 || v == 35 || v == 51 || v == 58 || v == 59 || v == 61 || !body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^50) v) = true := by decide +kernel
+
+theorem c100_a : ∀ v, v < 64 → body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^50) v = false := by
+  intro v hv
+  have h := List.all_eq_true.mp c100_o v (List.mem_range.mpr hv)
+  by_cases h1 : v = 1
+  · subst h1; exact c100_d1
+  by_cases h7 : v = 7
+  · subst h7; exact c100_d7
+  by_cases h13 : v = 13
+  · subst h13; exact c100_d13
+  by_cases h15 : v = 15
+  · subst h15; exact c100_d15
+  by_cases h31 : v = 31
+  · subst h31; exact c100_d31
+  by_cases h34 : v = 34
+  · subst h34; exact c100_d34
+  by_cases h35 : v = 35
+  · subst h35; exact c100_d35
+  by_cases h51 : v = 51
+  · subst h51; exact c100_d51
+  by_cases h58 : v = 58
+  · subst h58; exact c100_d58
+  by_cases h59 : v = 59
+  · subst h59; exact c100_d59
+  by_cases h61 : v = 61
+  · subst h61; exact c100_d61
+  simpa [h1, h7, h13, h15, h31, h34, h35, h51, h58, h59, h61] using h
+
+theorem c100 : reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^2) ||| 2^50) = false := by
+  have e := reach_succ 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^50) rfl
+  have h : (List.range 64).any (body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^50)) = false := by
+    apply List.any_eq_false.mpr
+    intro v hv
+    rw [c100_a v (List.mem_range.mp hv)]; decide
+  rw [c19, c101, h] at e
+  exact e.trans (by decide +kernel)
+
+theorem c68_d50 : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^2) 50 = false := by
+  have e : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^2) 50 = (!(((S0 ||| 2^3) ||| 2^2)).testBit 50 && ((aoHas ((S0 ||| 2^3) ||| 2^2) 50 && reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^2) ||| 2^50)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^2) 50 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^50)))) := rfl
+  rw [c100] at e
+  exact e.trans (by decide +kernel)
+
+theorem c114 : reach 2 35 42 2 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^51) = false := by decide +kernel
+
+theorem c115 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^51) ||| 2^1) = false := by decide +kernel
+
+theorem c113_d1 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 1 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 1 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^51)).testBit 1 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 1 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^51) ||| 2^1)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 1 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^51) ||| 2^1)))) := rfl
+  rw [c115] at e
+  exact e.trans (by decide +kernel)
+
+theorem c116 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^51) ||| 2^7) = false := by decide +kernel
+
+theorem c113_d7 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 7 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 7 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^51)).testBit 7 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 7 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^51) ||| 2^7)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 7 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^51) ||| 2^7)))) := rfl
+  rw [c116] at e
+  exact e.trans (by decide +kernel)
+
+theorem c117 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^51) ||| 2^12) = false := by decide +kernel
+
+theorem c113_d12 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 12 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 12 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^51)).testBit 12 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 12 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^51) ||| 2^12)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 12 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^51) ||| 2^12)))) := rfl
+  rw [c117] at e
+  exact e.trans (by decide +kernel)
+
+theorem c118 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^51) ||| 2^15) = false := by decide +kernel
+
+theorem c113_d15 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 15 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 15 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^51)).testBit 15 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 15 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^51) ||| 2^15)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 15 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^51) ||| 2^15)))) := rfl
+  rw [c118] at e
+  exact e.trans (by decide +kernel)
+
+theorem c119 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^51) ||| 2^31) = false := by decide +kernel
+
+theorem c113_d31 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 31 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 31 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^51)).testBit 31 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 31 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^51) ||| 2^31)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 31 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^51) ||| 2^31)))) := rfl
+  rw [c119] at e
+  exact e.trans (by decide +kernel)
+
+theorem c120 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^51) ||| 2^34) = false := by decide +kernel
+
+theorem c113_d34 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 34 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 34 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^51)).testBit 34 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 34 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^51) ||| 2^34)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 34 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^51) ||| 2^34)))) := rfl
+  rw [c120] at e
+  exact e.trans (by decide +kernel)
+
+theorem c121 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^51) ||| 2^35) = false := by decide +kernel
+
+theorem c113_d35 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 35 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 35 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^51)).testBit 35 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 35 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^51) ||| 2^35)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 35 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^51) ||| 2^35)))) := rfl
+  rw [c121] at e
+  exact e.trans (by decide +kernel)
+
+theorem c122 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^51) ||| 2^50) = false := by decide +kernel
+
+theorem c113_d50 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 50 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 50 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^51)).testBit 50 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 50 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^51) ||| 2^50)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 50 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^51) ||| 2^50)))) := rfl
+  rw [c122] at e
+  exact e.trans (by decide +kernel)
+
+theorem c123 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^51) ||| 2^58) = false := by decide +kernel
+
+theorem c113_d58 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 58 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 58 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^51)).testBit 58 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 58 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^51) ||| 2^58)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 58 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^51) ||| 2^58)))) := rfl
+  rw [c123] at e
+  exact e.trans (by decide +kernel)
+
+theorem c124 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^51) ||| 2^59) = false := by decide +kernel
+
+theorem c113_d59 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 59 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 59 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^51)).testBit 59 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 59 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^51) ||| 2^59)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 59 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^51) ||| 2^59)))) := rfl
+  rw [c124] at e
+  exact e.trans (by decide +kernel)
+
+theorem c125 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^51) ||| 2^61) = false := by decide +kernel
+
+theorem c113_d61 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 61 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 61 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^51)).testBit 61 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 61 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^51) ||| 2^61)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^51) 61 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^51) ||| 2^61)))) := rfl
+  rw [c125] at e
+  exact e.trans (by decide +kernel)
+
+theorem c113_o : (List.range 64).all (fun v => v == 1 || v == 7 || v == 12 || v == 15 || v == 31 || v == 34 || v == 35 || v == 50 || v == 58 || v == 59 || v == 61 || !body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^51) v) = true := by decide +kernel
+
+theorem c113_a : ∀ v, v < 64 → body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^51) v = false := by
+  intro v hv
+  have h := List.all_eq_true.mp c113_o v (List.mem_range.mpr hv)
+  by_cases h1 : v = 1
+  · subst h1; exact c113_d1
+  by_cases h7 : v = 7
+  · subst h7; exact c113_d7
+  by_cases h12 : v = 12
+  · subst h12; exact c113_d12
+  by_cases h15 : v = 15
+  · subst h15; exact c113_d15
+  by_cases h31 : v = 31
+  · subst h31; exact c113_d31
+  by_cases h34 : v = 34
+  · subst h34; exact c113_d34
+  by_cases h35 : v = 35
+  · subst h35; exact c113_d35
+  by_cases h50 : v = 50
+  · subst h50; exact c113_d50
+  by_cases h58 : v = 58
+  · subst h58; exact c113_d58
+  by_cases h59 : v = 59
+  · subst h59; exact c113_d59
+  by_cases h61 : v = 61
+  · subst h61; exact c113_d61
+  simpa [h1, h7, h12, h15, h31, h34, h35, h50, h58, h59, h61] using h
+
+theorem c113 : reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^2) ||| 2^51) = false := by
+  have e := reach_succ 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^51) rfl
+  have h : (List.range 64).any (body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^51)) = false := by
+    apply List.any_eq_false.mpr
+    intro v hv
+    rw [c113_a v (List.mem_range.mp hv)]; decide
+  rw [c20, c114, h] at e
+  exact e.trans (by decide +kernel)
+
+theorem c68_d51 : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^2) 51 = false := by
+  have e : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^2) 51 = (!(((S0 ||| 2^3) ||| 2^2)).testBit 51 && ((aoHas ((S0 ||| 2^3) ||| 2^2) 51 && reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^2) ||| 2^51)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^2) 51 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^51)))) := rfl
+  rw [c113] at e
+  exact e.trans (by decide +kernel)
+
+theorem c127 : reach 2 35 42 2 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^58) = false := by decide +kernel
+
+theorem c128 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^58) ||| 2^1) = false := by decide +kernel
+
+theorem c126_d1 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 1 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 1 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^58)).testBit 1 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 1 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^58) ||| 2^1)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 1 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^58) ||| 2^1)))) := rfl
+  rw [c128] at e
+  exact e.trans (by decide +kernel)
+
+theorem c129 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^58) ||| 2^5) = false := by decide +kernel
+
+theorem c126_d5 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 5 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 5 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^58)).testBit 5 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 5 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^58) ||| 2^5)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 5 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^58) ||| 2^5)))) := rfl
+  rw [c129] at e
+  exact e.trans (by decide +kernel)
+
+theorem c130 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^58) ||| 2^7) = false := by decide +kernel
+
+theorem c126_d7 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 7 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 7 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^58)).testBit 7 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 7 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^58) ||| 2^7)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 7 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^58) ||| 2^7)))) := rfl
+  rw [c130] at e
+  exact e.trans (by decide +kernel)
+
+theorem c131 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^58) ||| 2^15) = false := by decide +kernel
+
+theorem c126_d15 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 15 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 15 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^58)).testBit 15 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 15 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^58) ||| 2^15)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 15 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^58) ||| 2^15)))) := rfl
+  rw [c131] at e
+  exact e.trans (by decide +kernel)
+
+theorem c132 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^58) ||| 2^31) = false := by decide +kernel
+
+theorem c126_d31 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 31 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 31 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^58)).testBit 31 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 31 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^58) ||| 2^31)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 31 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^58) ||| 2^31)))) := rfl
+  rw [c132] at e
+  exact e.trans (by decide +kernel)
+
+theorem c133 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^58) ||| 2^34) = false := by decide +kernel
+
+theorem c126_d34 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 34 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 34 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^58)).testBit 34 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 34 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^58) ||| 2^34)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 34 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^58) ||| 2^34)))) := rfl
+  rw [c133] at e
+  exact e.trans (by decide +kernel)
+
+theorem c134 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^58) ||| 2^35) = false := by decide +kernel
+
+theorem c126_d35 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 35 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 35 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^58)).testBit 35 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 35 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^58) ||| 2^35)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 35 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^58) ||| 2^35)))) := rfl
+  rw [c134] at e
+  exact e.trans (by decide +kernel)
+
+theorem c135 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^58) ||| 2^50) = false := by decide +kernel
+
+theorem c126_d50 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 50 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 50 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^58)).testBit 50 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 50 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^58) ||| 2^50)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 50 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^58) ||| 2^50)))) := rfl
+  rw [c135] at e
+  exact e.trans (by decide +kernel)
+
+theorem c136 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^58) ||| 2^51) = false := by decide +kernel
+
+theorem c126_d51 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 51 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 51 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^58)).testBit 51 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 51 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^58) ||| 2^51)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 51 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^58) ||| 2^51)))) := rfl
+  rw [c136] at e
+  exact e.trans (by decide +kernel)
+
+theorem c137 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^58) ||| 2^59) = false := by decide +kernel
+
+theorem c126_d59 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 59 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 59 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^58)).testBit 59 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 59 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^58) ||| 2^59)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 59 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^58) ||| 2^59)))) := rfl
+  rw [c137] at e
+  exact e.trans (by decide +kernel)
+
+theorem c138 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^58) ||| 2^61) = false := by decide +kernel
+
+theorem c126_d61 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 61 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 61 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^58)).testBit 61 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 61 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^58) ||| 2^61)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^58) 61 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^58) ||| 2^61)))) := rfl
+  rw [c138] at e
+  exact e.trans (by decide +kernel)
+
+theorem c126_o : (List.range 64).all (fun v => v == 1 || v == 5 || v == 7 || v == 15 || v == 31 || v == 34 || v == 35 || v == 50 || v == 51 || v == 59 || v == 61 || !body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^58) v) = true := by decide +kernel
+
+theorem c126_a : ∀ v, v < 64 → body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^58) v = false := by
+  intro v hv
+  have h := List.all_eq_true.mp c126_o v (List.mem_range.mpr hv)
+  by_cases h1 : v = 1
+  · subst h1; exact c126_d1
+  by_cases h5 : v = 5
+  · subst h5; exact c126_d5
+  by_cases h7 : v = 7
+  · subst h7; exact c126_d7
+  by_cases h15 : v = 15
+  · subst h15; exact c126_d15
+  by_cases h31 : v = 31
+  · subst h31; exact c126_d31
+  by_cases h34 : v = 34
+  · subst h34; exact c126_d34
+  by_cases h35 : v = 35
+  · subst h35; exact c126_d35
+  by_cases h50 : v = 50
+  · subst h50; exact c126_d50
+  by_cases h51 : v = 51
+  · subst h51; exact c126_d51
+  by_cases h59 : v = 59
+  · subst h59; exact c126_d59
+  by_cases h61 : v = 61
+  · subst h61; exact c126_d61
+  simpa [h1, h5, h7, h15, h31, h34, h35, h50, h51, h59, h61] using h
+
+theorem c126 : reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^2) ||| 2^58) = false := by
+  have e := reach_succ 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^58) rfl
+  have h : (List.range 64).any (body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^58)) = false := by
+    apply List.any_eq_false.mpr
+    intro v hv
+    rw [c126_a v (List.mem_range.mp hv)]; decide
+  rw [c21, c127, h] at e
+  exact e.trans (by decide +kernel)
+
+theorem c68_d58 : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^2) 58 = false := by
+  have e : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^2) 58 = (!(((S0 ||| 2^3) ||| 2^2)).testBit 58 && ((aoHas ((S0 ||| 2^3) ||| 2^2) 58 && reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^2) ||| 2^58)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^2) 58 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^58)))) := rfl
+  rw [c126] at e
+  exact e.trans (by decide +kernel)
+
+theorem c140 : reach 2 35 42 2 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^59) = false := by decide +kernel
+
+theorem c141 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^59) ||| 2^1) = false := by decide +kernel
+
+theorem c139_d1 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 1 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 1 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^59)).testBit 1 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 1 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^59) ||| 2^1)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 1 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^59) ||| 2^1)))) := rfl
+  rw [c141] at e
+  exact e.trans (by decide +kernel)
+
+theorem c142 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^59) ||| 2^4) = false := by decide +kernel
+
+theorem c139_d4 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 4 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 4 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^59)).testBit 4 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 4 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^59) ||| 2^4)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 4 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^59) ||| 2^4)))) := rfl
+  rw [c142] at e
+  exact e.trans (by decide +kernel)
+
+theorem c143 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^59) ||| 2^7) = false := by decide +kernel
+
+theorem c139_d7 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 7 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 7 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^59)).testBit 7 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 7 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^59) ||| 2^7)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 7 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^59) ||| 2^7)))) := rfl
+  rw [c143] at e
+  exact e.trans (by decide +kernel)
+
+theorem c144 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^59) ||| 2^15) = false := by decide +kernel
+
+theorem c139_d15 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 15 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 15 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^59)).testBit 15 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 15 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^59) ||| 2^15)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 15 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^59) ||| 2^15)))) := rfl
+  rw [c144] at e
+  exact e.trans (by decide +kernel)
+
+theorem c145 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^59) ||| 2^31) = false := by decide +kernel
+
+theorem c139_d31 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 31 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 31 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^59)).testBit 31 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 31 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^59) ||| 2^31)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 31 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^59) ||| 2^31)))) := rfl
+  rw [c145] at e
+  exact e.trans (by decide +kernel)
+
+theorem c146 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^59) ||| 2^34) = false := by decide +kernel
+
+theorem c139_d34 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 34 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 34 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^59)).testBit 34 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 34 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^59) ||| 2^34)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 34 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^59) ||| 2^34)))) := rfl
+  rw [c146] at e
+  exact e.trans (by decide +kernel)
+
+theorem c147 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^59) ||| 2^35) = false := by decide +kernel
+
+theorem c139_d35 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 35 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 35 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^59)).testBit 35 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 35 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^59) ||| 2^35)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 35 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^59) ||| 2^35)))) := rfl
+  rw [c147] at e
+  exact e.trans (by decide +kernel)
+
+theorem c148 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^59) ||| 2^50) = false := by decide +kernel
+
+theorem c139_d50 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 50 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 50 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^59)).testBit 50 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 50 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^59) ||| 2^50)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 50 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^59) ||| 2^50)))) := rfl
+  rw [c148] at e
+  exact e.trans (by decide +kernel)
+
+theorem c149 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^59) ||| 2^51) = false := by decide +kernel
+
+theorem c139_d51 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 51 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 51 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^59)).testBit 51 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 51 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^59) ||| 2^51)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 51 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^59) ||| 2^51)))) := rfl
+  rw [c149] at e
+  exact e.trans (by decide +kernel)
+
+theorem c150 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^59) ||| 2^58) = false := by decide +kernel
+
+theorem c139_d58 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 58 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 58 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^59)).testBit 58 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 58 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^59) ||| 2^58)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 58 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^59) ||| 2^58)))) := rfl
+  rw [c150] at e
+  exact e.trans (by decide +kernel)
+
+theorem c151 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^59) ||| 2^61) = false := by decide +kernel
+
+theorem c139_d61 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 61 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 61 = (!((((S0 ||| 2^3) ||| 2^2) ||| 2^59)).testBit 61 && ((aoHas (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 61 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^2) ||| 2^59) ||| 2^61)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^2) ||| 2^59) 61 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^2) ||| 2^59) ||| 2^61)))) := rfl
+  rw [c151] at e
+  exact e.trans (by decide +kernel)
+
+theorem c139_o : (List.range 64).all (fun v => v == 1 || v == 4 || v == 7 || v == 15 || v == 31 || v == 34 || v == 35 || v == 50 || v == 51 || v == 58 || v == 61 || !body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^59) v) = true := by decide +kernel
+
+theorem c139_a : ∀ v, v < 64 → body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^59) v = false := by
+  intro v hv
+  have h := List.all_eq_true.mp c139_o v (List.mem_range.mpr hv)
+  by_cases h1 : v = 1
+  · subst h1; exact c139_d1
+  by_cases h4 : v = 4
+  · subst h4; exact c139_d4
+  by_cases h7 : v = 7
+  · subst h7; exact c139_d7
+  by_cases h15 : v = 15
+  · subst h15; exact c139_d15
+  by_cases h31 : v = 31
+  · subst h31; exact c139_d31
+  by_cases h34 : v = 34
+  · subst h34; exact c139_d34
+  by_cases h35 : v = 35
+  · subst h35; exact c139_d35
+  by_cases h50 : v = 50
+  · subst h50; exact c139_d50
+  by_cases h51 : v = 51
+  · subst h51; exact c139_d51
+  by_cases h58 : v = 58
+  · subst h58; exact c139_d58
+  by_cases h61 : v = 61
+  · subst h61; exact c139_d61
+  simpa [h1, h4, h7, h15, h31, h34, h35, h50, h51, h58, h61] using h
+
+theorem c139 : reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^2) ||| 2^59) = false := by
+  have e := reach_succ 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^59) rfl
+  have h : (List.range 64).any (body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^59)) = false := by
+    apply List.any_eq_false.mpr
+    intro v hv
+    rw [c139_a v (List.mem_range.mp hv)]; decide
+  rw [c22, c140, h] at e
+  exact e.trans (by decide +kernel)
+
+theorem c68_d59 : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^2) 59 = false := by
+  have e : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^2) 59 = (!(((S0 ||| 2^3) ||| 2^2)).testBit 59 && ((aoHas ((S0 ||| 2^3) ||| 2^2) 59 && reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^2) ||| 2^59)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^2) 59 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^59)))) := rfl
+  rw [c139] at e
+  exact e.trans (by decide +kernel)
+
+theorem c152 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^61) = false := by decide +kernel
+
+theorem c68_d61 : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^2) 61 = false := by
+  have e : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^2) 61 = (!(((S0 ||| 2^3) ||| 2^2)).testBit 61 && ((aoHas ((S0 ||| 2^3) ||| 2^2) 61 && reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^2) ||| 2^61)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^2) 61 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^2) ||| 2^61)))) := rfl
+  rw [c152] at e
+  exact e.trans (by decide +kernel)
+
+theorem c68_o : (List.range 64).all (fun v => v == 1 || v == 7 || v == 15 || v == 31 || v == 34 || v == 35 || v == 50 || v == 51 || v == 58 || v == 59 || v == 61 || !body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^2) v) = true := by decide +kernel
+
+theorem c68_a : ∀ v, v < 64 → body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^2) v = false := by
+  intro v hv
+  have h := List.all_eq_true.mp c68_o v (List.mem_range.mpr hv)
+  by_cases h1 : v = 1
+  · subst h1; exact c68_d1
+  by_cases h7 : v = 7
+  · subst h7; exact c68_d7
+  by_cases h15 : v = 15
+  · subst h15; exact c68_d15
+  by_cases h31 : v = 31
+  · subst h31; exact c68_d31
+  by_cases h34 : v = 34
+  · subst h34; exact c68_d34
+  by_cases h35 : v = 35
+  · subst h35; exact c68_d35
+  by_cases h50 : v = 50
+  · subst h50; exact c68_d50
+  by_cases h51 : v = 51
+  · subst h51; exact c68_d51
+  by_cases h58 : v = 58
+  · subst h58; exact c68_d58
+  by_cases h59 : v = 59
+  · subst h59; exact c68_d59
+  by_cases h61 : v = 61
+  · subst h61; exact c68_d61
+  simpa [h1, h7, h15, h31, h34, h35, h50, h51, h58, h59, h61] using h
+
+theorem c68 : reach 2 35 42 4 1 ((S0 ||| 2^3) ||| 2^2) = false := by
+  have e := reach_succ 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^2) rfl
+  have h : (List.range 64).any (body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^2)) = false := by
+    apply List.any_eq_false.mpr
+    intro v hv
+    rw [c68_a v (List.mem_range.mp hv)]; decide
+  rw [c10, c69, h] at e
+  exact e.trans (by decide +kernel)
+
+theorem c58_d2 : body 2 35 42 4 1 0 (S0 ||| 2^3) 2 = false := by
+  have e : body 2 35 42 4 1 0 (S0 ||| 2^3) 2 = (!((S0 ||| 2^3)).testBit 2 && ((aoHas (S0 ||| 2^3) 2 && reach 2 35 42 4 1 ((S0 ||| 2^3) ||| 2^2)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^3) 2 && reach 2 35 42 4 0 ((S0 ||| 2^3) ||| 2^2)))) := rfl
+  rw [c68] at e
+  exact e.trans (by decide +kernel)
+
+theorem c154 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^7) ||| 2^2) = false := by decide +kernel
+
+theorem c153_d2 : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^7) 2 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^7) 2 = (!(((S0 ||| 2^3) ||| 2^7)).testBit 2 && ((aoHas ((S0 ||| 2^3) ||| 2^7) 2 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^7) ||| 2^2)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^3) ||| 2^7) 2 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^7) ||| 2^2)))) := rfl
+  rw [c154] at e
+  exact e.trans (by decide +kernel)
+
+theorem c155 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^7) ||| 2^4) = false := by decide +kernel
+
+theorem c153_d4 : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^7) 4 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^7) 4 = (!(((S0 ||| 2^3) ||| 2^7)).testBit 4 && ((aoHas ((S0 ||| 2^3) ||| 2^7) 4 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^7) ||| 2^4)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^3) ||| 2^7) 4 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^7) ||| 2^4)))) := rfl
+  rw [c155] at e
+  exact e.trans (by decide +kernel)
+
+theorem c156 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^7) ||| 2^6) = false := by decide +kernel
+
+theorem c153_d6 : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^7) 6 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^7) 6 = (!(((S0 ||| 2^3) ||| 2^7)).testBit 6 && ((aoHas ((S0 ||| 2^3) ||| 2^7) 6 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^7) ||| 2^6)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^3) ||| 2^7) 6 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^7) ||| 2^6)))) := rfl
+  rw [c156] at e
+  exact e.trans (by decide +kernel)
+
+theorem c157 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^7) ||| 2^35) = false := by decide +kernel
+
+theorem c153_d35 : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^7) 35 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^7) 35 = (!(((S0 ||| 2^3) ||| 2^7)).testBit 35 && ((aoHas ((S0 ||| 2^3) ||| 2^7) 35 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^7) ||| 2^35)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^3) ||| 2^7) 35 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^7) ||| 2^35)))) := rfl
+  rw [c157] at e
+  exact e.trans (by decide +kernel)
+
+theorem c158 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^7) ||| 2^39) = false := by decide +kernel
+
+theorem c153_d39 : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^7) 39 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^7) 39 = (!(((S0 ||| 2^3) ||| 2^7)).testBit 39 && ((aoHas ((S0 ||| 2^3) ||| 2^7) 39 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^7) ||| 2^39)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^3) ||| 2^7) 39 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^7) ||| 2^39)))) := rfl
+  rw [c158] at e
+  exact e.trans (by decide +kernel)
+
+theorem c159 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^7) ||| 2^51) = false := by decide +kernel
+
+theorem c153_d51 : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^7) 51 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^7) 51 = (!(((S0 ||| 2^3) ||| 2^7)).testBit 51 && ((aoHas ((S0 ||| 2^3) ||| 2^7) 51 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^7) ||| 2^51)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^3) ||| 2^7) 51 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^7) ||| 2^51)))) := rfl
+  rw [c159] at e
+  exact e.trans (by decide +kernel)
+
+theorem c160 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^7) ||| 2^55) = false := by decide +kernel
+
+theorem c153_d55 : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^7) 55 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^7) 55 = (!(((S0 ||| 2^3) ||| 2^7)).testBit 55 && ((aoHas ((S0 ||| 2^3) ||| 2^7) 55 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^7) ||| 2^55)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^3) ||| 2^7) 55 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^7) ||| 2^55)))) := rfl
+  rw [c160] at e
+  exact e.trans (by decide +kernel)
+
+theorem c161 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^7) ||| 2^59) = false := by decide +kernel
+
+theorem c153_d59 : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^7) 59 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^7) 59 = (!(((S0 ||| 2^3) ||| 2^7)).testBit 59 && ((aoHas ((S0 ||| 2^3) ||| 2^7) 59 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^7) ||| 2^59)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^3) ||| 2^7) 59 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^7) ||| 2^59)))) := rfl
+  rw [c161] at e
+  exact e.trans (by decide +kernel)
+
+theorem c153_o : (List.range 64).all (fun v => v == 2 || v == 4 || v == 6 || v == 35 || v == 39 || v == 51 || v == 55 || v == 59 || !body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^7) v) = true := by decide +kernel
+
+theorem c153_a : ∀ v, v < 64 → body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^7) v = false := by
+  intro v hv
+  have h := List.all_eq_true.mp c153_o v (List.mem_range.mpr hv)
+  by_cases h2 : v = 2
+  · subst h2; exact c153_d2
+  by_cases h4 : v = 4
+  · subst h4; exact c153_d4
+  by_cases h6 : v = 6
+  · subst h6; exact c153_d6
+  by_cases h35 : v = 35
+  · subst h35; exact c153_d35
+  by_cases h39 : v = 39
+  · subst h39; exact c153_d39
+  by_cases h51 : v = 51
+  · subst h51; exact c153_d51
+  by_cases h55 : v = 55
+  · subst h55; exact c153_d55
+  by_cases h59 : v = 59
+  · subst h59; exact c153_d59
+  simpa [h2, h4, h6, h35, h39, h51, h55, h59] using h
+
+theorem c153 : reach 2 35 42 4 0 ((S0 ||| 2^3) ||| 2^7) = false := by
+  have e := reach_succ 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^7) rfl
+  have h : (List.range 64).any (body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^7)) = false := by
+    apply List.any_eq_false.mpr
+    intro v hv
+    rw [c153_a v (List.mem_range.mp hv)]; decide
+  rw [c24, h] at e
+  exact e.trans (by decide +kernel)
+
+theorem c58_d7 : body 2 35 42 4 1 0 (S0 ||| 2^3) 7 = false := by
+  have e : body 2 35 42 4 1 0 (S0 ||| 2^3) 7 = (!((S0 ||| 2^3)).testBit 7 && ((aoHas (S0 ||| 2^3) 7 && reach 2 35 42 4 1 ((S0 ||| 2^3) ||| 2^7)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^3) 7 && reach 2 35 42 4 0 ((S0 ||| 2^3) ||| 2^7)))) := rfl
+  rw [c153] at e
+  exact e.trans (by decide +kernel)
+
+theorem c163 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^15) ||| 2^2) = false := by decide +kernel
+
+theorem c162_d2 : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^15) 2 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^15) 2 = (!(((S0 ||| 2^3) ||| 2^15)).testBit 2 && ((aoHas ((S0 ||| 2^3) ||| 2^15) 2 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^15) ||| 2^2)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^3) ||| 2^15) 2 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^15) ||| 2^2)))) := rfl
+  rw [c163] at e
+  exact e.trans (by decide +kernel)
+
+theorem c164 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^15) ||| 2^8) = false := by decide +kernel
+
+theorem c162_d8 : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^15) 8 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^15) 8 = (!(((S0 ||| 2^3) ||| 2^15)).testBit 8 && ((aoHas ((S0 ||| 2^3) ||| 2^15) 8 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^15) ||| 2^8)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^3) ||| 2^15) 8 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^15) ||| 2^8)))) := rfl
+  rw [c164] at e
+  exact e.trans (by decide +kernel)
+
+theorem c165 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^15) ||| 2^12) = false := by decide +kernel
+
+theorem c162_d12 : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^15) 12 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^15) 12 = (!(((S0 ||| 2^3) ||| 2^15)).testBit 12 && ((aoHas ((S0 ||| 2^3) ||| 2^15) 12 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^15) ||| 2^12)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^3) ||| 2^15) 12 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^15) ||| 2^12)))) := rfl
+  rw [c165] at e
+  exact e.trans (by decide +kernel)
+
+theorem c166 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^15) ||| 2^14) = false := by decide +kernel
+
+theorem c162_d14 : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^15) 14 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^15) 14 = (!(((S0 ||| 2^3) ||| 2^15)).testBit 14 && ((aoHas ((S0 ||| 2^3) ||| 2^15) 14 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^15) ||| 2^14)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^3) ||| 2^15) 14 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^15) ||| 2^14)))) := rfl
+  rw [c166] at e
+  exact e.trans (by decide +kernel)
+
+theorem c167 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^15) ||| 2^35) = false := by decide +kernel
+
+theorem c162_d35 : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^15) 35 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^15) 35 = (!(((S0 ||| 2^3) ||| 2^15)).testBit 35 && ((aoHas ((S0 ||| 2^3) ||| 2^15) 35 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^15) ||| 2^35)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^3) ||| 2^15) 35 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^15) ||| 2^35)))) := rfl
+  rw [c167] at e
+  exact e.trans (by decide +kernel)
+
+theorem c168 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^15) ||| 2^47) = false := by decide +kernel
+
+theorem c162_d47 : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^15) 47 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^15) 47 = (!(((S0 ||| 2^3) ||| 2^15)).testBit 47 && ((aoHas ((S0 ||| 2^3) ||| 2^15) 47 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^15) ||| 2^47)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^3) ||| 2^15) 47 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^15) ||| 2^47)))) := rfl
+  rw [c168] at e
+  exact e.trans (by decide +kernel)
+
+theorem c169 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^15) ||| 2^51) = false := by decide +kernel
+
+theorem c162_d51 : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^15) 51 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^15) 51 = (!(((S0 ||| 2^3) ||| 2^15)).testBit 51 && ((aoHas ((S0 ||| 2^3) ||| 2^15) 51 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^15) ||| 2^51)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^3) ||| 2^15) 51 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^15) ||| 2^51)))) := rfl
+  rw [c169] at e
+  exact e.trans (by decide +kernel)
+
+theorem c170 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^15) ||| 2^59) = false := by decide +kernel
+
+theorem c162_d59 : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^15) 59 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^15) 59 = (!(((S0 ||| 2^3) ||| 2^15)).testBit 59 && ((aoHas ((S0 ||| 2^3) ||| 2^15) 59 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^15) ||| 2^59)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^3) ||| 2^15) 59 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^15) ||| 2^59)))) := rfl
+  rw [c170] at e
+  exact e.trans (by decide +kernel)
+
+theorem c162_o : (List.range 64).all (fun v => v == 2 || v == 8 || v == 12 || v == 14 || v == 35 || v == 47 || v == 51 || v == 59 || !body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^15) v) = true := by decide +kernel
+
+theorem c162_a : ∀ v, v < 64 → body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^15) v = false := by
+  intro v hv
+  have h := List.all_eq_true.mp c162_o v (List.mem_range.mpr hv)
+  by_cases h2 : v = 2
+  · subst h2; exact c162_d2
+  by_cases h8 : v = 8
+  · subst h8; exact c162_d8
+  by_cases h12 : v = 12
+  · subst h12; exact c162_d12
+  by_cases h14 : v = 14
+  · subst h14; exact c162_d14
+  by_cases h35 : v = 35
+  · subst h35; exact c162_d35
+  by_cases h47 : v = 47
+  · subst h47; exact c162_d47
+  by_cases h51 : v = 51
+  · subst h51; exact c162_d51
+  by_cases h59 : v = 59
+  · subst h59; exact c162_d59
+  simpa [h2, h8, h12, h14, h35, h47, h51, h59] using h
+
+theorem c162 : reach 2 35 42 4 0 ((S0 ||| 2^3) ||| 2^15) = false := by
+  have e := reach_succ 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^15) rfl
+  have h : (List.range 64).any (body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^15)) = false := by
+    apply List.any_eq_false.mpr
+    intro v hv
+    rw [c162_a v (List.mem_range.mp hv)]; decide
+  rw [c25, h] at e
+  exact e.trans (by decide +kernel)
+
+theorem c58_d15 : body 2 35 42 4 1 0 (S0 ||| 2^3) 15 = false := by
+  have e : body 2 35 42 4 1 0 (S0 ||| 2^3) 15 = (!((S0 ||| 2^3)).testBit 15 && ((aoHas (S0 ||| 2^3) 15 && reach 2 35 42 4 1 ((S0 ||| 2^3) ||| 2^15)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^3) 15 && reach 2 35 42 4 0 ((S0 ||| 2^3) ||| 2^15)))) := rfl
+  rw [c162] at e
+  exact e.trans (by decide +kernel)
+
+theorem c172 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^31) ||| 2^2) = false := by decide +kernel
+
+theorem c171_d2 : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^31) 2 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^31) 2 = (!(((S0 ||| 2^3) ||| 2^31)).testBit 2 && ((aoHas ((S0 ||| 2^3) ||| 2^31) 2 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^31) ||| 2^2)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^3) ||| 2^31) 2 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^31) ||| 2^2)))) := rfl
+  rw [c172] at e
+  exact e.trans (by decide +kernel)
+
+theorem c173 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^31) ||| 2^16) = false := by decide +kernel
+
+theorem c171_d16 : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^31) 16 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^31) 16 = (!(((S0 ||| 2^3) ||| 2^31)).testBit 16 && ((aoHas ((S0 ||| 2^3) ||| 2^31) 16 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^31) ||| 2^16)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^3) ||| 2^31) 16 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^31) ||| 2^16)))) := rfl
+  rw [c173] at e
+  exact e.trans (by decide +kernel)
+
+theorem c174 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^31) ||| 2^24) = false := by decide +kernel
+
+theorem c171_d24 : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^31) 24 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^31) 24 = (!(((S0 ||| 2^3) ||| 2^31)).testBit 24 && ((aoHas ((S0 ||| 2^3) ||| 2^31) 24 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^31) ||| 2^24)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^3) ||| 2^31) 24 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^31) ||| 2^24)))) := rfl
+  rw [c174] at e
+  exact e.trans (by decide +kernel)
+
+theorem c175 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^31) ||| 2^28) = false := by decide +kernel
+
+theorem c171_d28 : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^31) 28 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^31) 28 = (!(((S0 ||| 2^3) ||| 2^31)).testBit 28 && ((aoHas ((S0 ||| 2^3) ||| 2^31) 28 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^31) ||| 2^28)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^3) ||| 2^31) 28 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^31) ||| 2^28)))) := rfl
+  rw [c175] at e
+  exact e.trans (by decide +kernel)
+
+theorem c176 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^31) ||| 2^30) = false := by decide +kernel
+
+theorem c171_d30 : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^31) 30 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^31) 30 = (!(((S0 ||| 2^3) ||| 2^31)).testBit 30 && ((aoHas ((S0 ||| 2^3) ||| 2^31) 30 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^31) ||| 2^30)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^3) ||| 2^31) 30 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^31) ||| 2^30)))) := rfl
+  rw [c176] at e
+  exact e.trans (by decide +kernel)
+
+theorem c177 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^31) ||| 2^35) = false := by decide +kernel
+
+theorem c171_d35 : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^31) 35 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^31) 35 = (!(((S0 ||| 2^3) ||| 2^31)).testBit 35 && ((aoHas ((S0 ||| 2^3) ||| 2^31) 35 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^31) ||| 2^35)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^3) ||| 2^31) 35 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^31) ||| 2^35)))) := rfl
+  rw [c177] at e
+  exact e.trans (by decide +kernel)
+
+theorem c178 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^31) ||| 2^51) = false := by decide +kernel
+
+theorem c171_d51 : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^31) 51 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^31) 51 = (!(((S0 ||| 2^3) ||| 2^31)).testBit 51 && ((aoHas ((S0 ||| 2^3) ||| 2^31) 51 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^31) ||| 2^51)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^3) ||| 2^31) 51 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^31) ||| 2^51)))) := rfl
+  rw [c178] at e
+  exact e.trans (by decide +kernel)
+
+theorem c179 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^31) ||| 2^59) = false := by decide +kernel
+
+theorem c171_d59 : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^31) 59 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^31) 59 = (!(((S0 ||| 2^3) ||| 2^31)).testBit 59 && ((aoHas ((S0 ||| 2^3) ||| 2^31) 59 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^31) ||| 2^59)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^3) ||| 2^31) 59 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^31) ||| 2^59)))) := rfl
+  rw [c179] at e
+  exact e.trans (by decide +kernel)
+
+theorem c171_o : (List.range 64).all (fun v => v == 2 || v == 16 || v == 24 || v == 28 || v == 30 || v == 35 || v == 51 || v == 59 || !body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^31) v) = true := by decide +kernel
+
+theorem c171_a : ∀ v, v < 64 → body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^31) v = false := by
+  intro v hv
+  have h := List.all_eq_true.mp c171_o v (List.mem_range.mpr hv)
+  by_cases h2 : v = 2
+  · subst h2; exact c171_d2
+  by_cases h16 : v = 16
+  · subst h16; exact c171_d16
+  by_cases h24 : v = 24
+  · subst h24; exact c171_d24
+  by_cases h28 : v = 28
+  · subst h28; exact c171_d28
+  by_cases h30 : v = 30
+  · subst h30; exact c171_d30
+  by_cases h35 : v = 35
+  · subst h35; exact c171_d35
+  by_cases h51 : v = 51
+  · subst h51; exact c171_d51
+  by_cases h59 : v = 59
+  · subst h59; exact c171_d59
+  simpa [h2, h16, h24, h28, h30, h35, h51, h59] using h
+
+theorem c171 : reach 2 35 42 4 0 ((S0 ||| 2^3) ||| 2^31) = false := by
+  have e := reach_succ 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^31) rfl
+  have h : (List.range 64).any (body 2 35 42 3 0 0 ((S0 ||| 2^3) ||| 2^31)) = false := by
+    apply List.any_eq_false.mpr
+    intro v hv
+    rw [c171_a v (List.mem_range.mp hv)]; decide
+  rw [c26, h] at e
+  exact e.trans (by decide +kernel)
+
+theorem c58_d31 : body 2 35 42 4 1 0 (S0 ||| 2^3) 31 = false := by
+  have e : body 2 35 42 4 1 0 (S0 ||| 2^3) 31 = (!((S0 ||| 2^3)).testBit 31 && ((aoHas (S0 ||| 2^3) 31 && reach 2 35 42 4 1 ((S0 ||| 2^3) ||| 2^31)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^3) 31 && reach 2 35 42 4 0 ((S0 ||| 2^3) ||| 2^31)))) := rfl
+  rw [c171] at e
+  exact e.trans (by decide +kernel)
+
+theorem c181 : reach 2 35 42 3 0 ((S0 ||| 2^3) ||| 2^35) = false := by decide +kernel
+
+theorem c182 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^1) = false := by decide +kernel
+
+theorem c180_d1 : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^35) 1 = false := by
+  have e : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^35) 1 = (!(((S0 ||| 2^3) ||| 2^35)).testBit 1 && ((aoHas ((S0 ||| 2^3) ||| 2^35) 1 && reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^35) ||| 2^1)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^35) 1 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^1)))) := rfl
+  rw [c182] at e
+  exact e.trans (by decide +kernel)
+
+theorem c184 : reach 2 35 42 2 1 (((S0 ||| 2^3) ||| 2^35) ||| 2^2) = false := by decide +kernel
+
+theorem c185 : reach 2 35 42 2 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^2) = false := by decide +kernel
+
+theorem c186 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^35) ||| 2^2) ||| 2^1) = false := by decide +kernel
+
+theorem c183_d1 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 1 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 1 = (!((((S0 ||| 2^3) ||| 2^35) ||| 2^2)).testBit 1 && ((aoHas (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 1 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^35) ||| 2^2) ||| 2^1)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 1 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^35) ||| 2^2) ||| 2^1)))) := rfl
+  rw [c186] at e
+  exact e.trans (by decide +kernel)
+
+theorem c187 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^35) ||| 2^2) ||| 2^7) = false := by decide +kernel
+
+theorem c183_d7 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 7 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 7 = (!((((S0 ||| 2^3) ||| 2^35) ||| 2^2)).testBit 7 && ((aoHas (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 7 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^35) ||| 2^2) ||| 2^7)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 7 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^35) ||| 2^2) ||| 2^7)))) := rfl
+  rw [c187] at e
+  exact e.trans (by decide +kernel)
+
+theorem c188 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^35) ||| 2^2) ||| 2^15) = false := by decide +kernel
+
+theorem c183_d15 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 15 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 15 = (!((((S0 ||| 2^3) ||| 2^35) ||| 2^2)).testBit 15 && ((aoHas (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 15 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^35) ||| 2^2) ||| 2^15)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 15 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^35) ||| 2^2) ||| 2^15)))) := rfl
+  rw [c188] at e
+  exact e.trans (by decide +kernel)
+
+theorem c189 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^35) ||| 2^2) ||| 2^28) = false := by decide +kernel
+
+theorem c183_d28 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 28 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 28 = (!((((S0 ||| 2^3) ||| 2^35) ||| 2^2)).testBit 28 && ((aoHas (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 28 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^35) ||| 2^2) ||| 2^28)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 28 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^35) ||| 2^2) ||| 2^28)))) := rfl
+  rw [c189] at e
+  exact e.trans (by decide +kernel)
+
+theorem c190 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^35) ||| 2^2) ||| 2^31) = false := by decide +kernel
+
+theorem c183_d31 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 31 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 31 = (!((((S0 ||| 2^3) ||| 2^35) ||| 2^2)).testBit 31 && ((aoHas (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 31 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^35) ||| 2^2) ||| 2^31)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 31 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^35) ||| 2^2) ||| 2^31)))) := rfl
+  rw [c190] at e
+  exact e.trans (by decide +kernel)
+
+theorem c191 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^35) ||| 2^2) ||| 2^34) = false := by decide +kernel
+
+theorem c183_d34 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 34 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 34 = (!((((S0 ||| 2^3) ||| 2^35) ||| 2^2)).testBit 34 && ((aoHas (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 34 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^35) ||| 2^2) ||| 2^34)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 34 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^35) ||| 2^2) ||| 2^34)))) := rfl
+  rw [c191] at e
+  exact e.trans (by decide +kernel)
+
+theorem c192 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^35) ||| 2^2) ||| 2^50) = false := by decide +kernel
+
+theorem c183_d50 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 50 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 50 = (!((((S0 ||| 2^3) ||| 2^35) ||| 2^2)).testBit 50 && ((aoHas (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 50 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^35) ||| 2^2) ||| 2^50)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 50 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^35) ||| 2^2) ||| 2^50)))) := rfl
+  rw [c192] at e
+  exact e.trans (by decide +kernel)
+
+theorem c193 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^35) ||| 2^2) ||| 2^51) = false := by decide +kernel
+
+theorem c183_d51 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 51 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 51 = (!((((S0 ||| 2^3) ||| 2^35) ||| 2^2)).testBit 51 && ((aoHas (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 51 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^35) ||| 2^2) ||| 2^51)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 51 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^35) ||| 2^2) ||| 2^51)))) := rfl
+  rw [c193] at e
+  exact e.trans (by decide +kernel)
+
+theorem c194 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^35) ||| 2^2) ||| 2^58) = false := by decide +kernel
+
+theorem c183_d58 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 58 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 58 = (!((((S0 ||| 2^3) ||| 2^35) ||| 2^2)).testBit 58 && ((aoHas (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 58 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^35) ||| 2^2) ||| 2^58)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 58 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^35) ||| 2^2) ||| 2^58)))) := rfl
+  rw [c194] at e
+  exact e.trans (by decide +kernel)
+
+theorem c195 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^35) ||| 2^2) ||| 2^59) = false := by decide +kernel
+
+theorem c183_d59 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 59 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 59 = (!((((S0 ||| 2^3) ||| 2^35) ||| 2^2)).testBit 59 && ((aoHas (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 59 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^35) ||| 2^2) ||| 2^59)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 59 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^35) ||| 2^2) ||| 2^59)))) := rfl
+  rw [c195] at e
+  exact e.trans (by decide +kernel)
+
+theorem c196 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^35) ||| 2^2) ||| 2^61) = false := by decide +kernel
+
+theorem c183_d61 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 61 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 61 = (!((((S0 ||| 2^3) ||| 2^35) ||| 2^2)).testBit 61 && ((aoHas (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 61 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^35) ||| 2^2) ||| 2^61)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^35) ||| 2^2) 61 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^35) ||| 2^2) ||| 2^61)))) := rfl
+  rw [c196] at e
+  exact e.trans (by decide +kernel)
+
+theorem c183_o : (List.range 64).all (fun v => v == 1 || v == 7 || v == 15 || v == 28 || v == 31 || v == 34 || v == 50 || v == 51 || v == 58 || v == 59 || v == 61 || !body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^2) v) = true := by decide +kernel
+
+theorem c183_a : ∀ v, v < 64 → body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^2) v = false := by
+  intro v hv
+  have h := List.all_eq_true.mp c183_o v (List.mem_range.mpr hv)
+  by_cases h1 : v = 1
+  · subst h1; exact c183_d1
+  by_cases h7 : v = 7
+  · subst h7; exact c183_d7
+  by_cases h15 : v = 15
+  · subst h15; exact c183_d15
+  by_cases h28 : v = 28
+  · subst h28; exact c183_d28
+  by_cases h31 : v = 31
+  · subst h31; exact c183_d31
+  by_cases h34 : v = 34
+  · subst h34; exact c183_d34
+  by_cases h50 : v = 50
+  · subst h50; exact c183_d50
+  by_cases h51 : v = 51
+  · subst h51; exact c183_d51
+  by_cases h58 : v = 58
+  · subst h58; exact c183_d58
+  by_cases h59 : v = 59
+  · subst h59; exact c183_d59
+  by_cases h61 : v = 61
+  · subst h61; exact c183_d61
+  simpa [h1, h7, h15, h28, h31, h34, h50, h51, h58, h59, h61] using h
+
+theorem c183 : reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^35) ||| 2^2) = false := by
+  have e := reach_succ 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^2) rfl
+  have h : (List.range 64).any (body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^2)) = false := by
+    apply List.any_eq_false.mpr
+    intro v hv
+    rw [c183_a v (List.mem_range.mp hv)]; decide
+  rw [c184, c185, h] at e
+  exact e.trans (by decide +kernel)
+
+theorem c180_d2 : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^35) 2 = false := by
+  have e : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^35) 2 = (!(((S0 ||| 2^3) ||| 2^35)).testBit 2 && ((aoHas ((S0 ||| 2^3) ||| 2^35) 2 && reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^35) ||| 2^2)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^35) 2 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^2)))) := rfl
+  rw [c183] at e
+  exact e.trans (by decide +kernel)
+
+theorem c197 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^7) = false := by decide +kernel
+
+theorem c180_d7 : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^35) 7 = false := by
+  have e : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^35) 7 = (!(((S0 ||| 2^3) ||| 2^35)).testBit 7 && ((aoHas ((S0 ||| 2^3) ||| 2^35) 7 && reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^35) ||| 2^7)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^35) 7 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^7)))) := rfl
+  rw [c197] at e
+  exact e.trans (by decide +kernel)
+
+theorem c198 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^15) = false := by decide +kernel
+
+theorem c180_d15 : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^35) 15 = false := by
+  have e : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^35) 15 = (!(((S0 ||| 2^3) ||| 2^35)).testBit 15 && ((aoHas ((S0 ||| 2^3) ||| 2^35) 15 && reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^35) ||| 2^15)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^35) 15 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^15)))) := rfl
+  rw [c198] at e
+  exact e.trans (by decide +kernel)
+
+theorem c199 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^28) = false := by decide +kernel
+
+theorem c180_d28 : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^35) 28 = false := by
+  have e : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^35) 28 = (!(((S0 ||| 2^3) ||| 2^35)).testBit 28 && ((aoHas ((S0 ||| 2^3) ||| 2^35) 28 && reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^35) ||| 2^28)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^35) 28 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^28)))) := rfl
+  rw [c199] at e
+  exact e.trans (by decide +kernel)
+
+theorem c200 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^31) = false := by decide +kernel
+
+theorem c180_d31 : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^35) 31 = false := by
+  have e : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^35) 31 = (!(((S0 ||| 2^3) ||| 2^35)).testBit 31 && ((aoHas ((S0 ||| 2^3) ||| 2^35) 31 && reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^35) ||| 2^31)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^35) 31 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^31)))) := rfl
+  rw [c200] at e
+  exact e.trans (by decide +kernel)
+
+theorem c202 : reach 2 35 42 2 1 (((S0 ||| 2^3) ||| 2^35) ||| 2^34) = false := by decide +kernel
+
+theorem c203 : reach 2 35 42 2 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^34) = false := by decide +kernel
+
+theorem c204 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^35) ||| 2^34) ||| 2^1) = false := by decide +kernel
+
+theorem c201_d1 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 1 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 1 = (!((((S0 ||| 2^3) ||| 2^35) ||| 2^34)).testBit 1 && ((aoHas (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 1 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^35) ||| 2^34) ||| 2^1)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 1 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^35) ||| 2^34) ||| 2^1)))) := rfl
+  rw [c204] at e
+  exact e.trans (by decide +kernel)
+
+theorem c205 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^35) ||| 2^34) ||| 2^2) = false := by decide +kernel
+
+theorem c201_d2 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 2 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 2 = (!((((S0 ||| 2^3) ||| 2^35) ||| 2^34)).testBit 2 && ((aoHas (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 2 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^35) ||| 2^34) ||| 2^2)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 2 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^35) ||| 2^34) ||| 2^2)))) := rfl
+  rw [c205] at e
+  exact e.trans (by decide +kernel)
+
+theorem c206 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^35) ||| 2^34) ||| 2^7) = false := by decide +kernel
+
+theorem c201_d7 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 7 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 7 = (!((((S0 ||| 2^3) ||| 2^35) ||| 2^34)).testBit 7 && ((aoHas (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 7 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^35) ||| 2^34) ||| 2^7)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 7 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^35) ||| 2^34) ||| 2^7)))) := rfl
+  rw [c206] at e
+  exact e.trans (by decide +kernel)
+
+theorem c207 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^35) ||| 2^34) ||| 2^15) = false := by decide +kernel
+
+theorem c201_d15 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 15 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 15 = (!((((S0 ||| 2^3) ||| 2^35) ||| 2^34)).testBit 15 && ((aoHas (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 15 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^35) ||| 2^34) ||| 2^15)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 15 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^35) ||| 2^34) ||| 2^15)))) := rfl
+  rw [c207] at e
+  exact e.trans (by decide +kernel)
+
+theorem c208 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^35) ||| 2^34) ||| 2^28) = false := by decide +kernel
+
+theorem c201_d28 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 28 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 28 = (!((((S0 ||| 2^3) ||| 2^35) ||| 2^34)).testBit 28 && ((aoHas (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 28 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^35) ||| 2^34) ||| 2^28)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 28 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^35) ||| 2^34) ||| 2^28)))) := rfl
+  rw [c208] at e
+  exact e.trans (by decide +kernel)
+
+theorem c209 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^35) ||| 2^34) ||| 2^29) = false := by decide +kernel
+
+theorem c201_d29 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 29 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 29 = (!((((S0 ||| 2^3) ||| 2^35) ||| 2^34)).testBit 29 && ((aoHas (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 29 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^35) ||| 2^34) ||| 2^29)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 29 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^35) ||| 2^34) ||| 2^29)))) := rfl
+  rw [c209] at e
+  exact e.trans (by decide +kernel)
+
+theorem c210 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^35) ||| 2^34) ||| 2^31) = false := by decide +kernel
+
+theorem c201_d31 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 31 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 31 = (!((((S0 ||| 2^3) ||| 2^35) ||| 2^34)).testBit 31 && ((aoHas (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 31 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^35) ||| 2^34) ||| 2^31)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 31 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^35) ||| 2^34) ||| 2^31)))) := rfl
+  rw [c210] at e
+  exact e.trans (by decide +kernel)
+
+theorem c211 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^35) ||| 2^34) ||| 2^50) = false := by decide +kernel
+
+theorem c201_d50 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 50 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 50 = (!((((S0 ||| 2^3) ||| 2^35) ||| 2^34)).testBit 50 && ((aoHas (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 50 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^35) ||| 2^34) ||| 2^50)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 50 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^35) ||| 2^34) ||| 2^50)))) := rfl
+  rw [c211] at e
+  exact e.trans (by decide +kernel)
+
+theorem c212 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^35) ||| 2^34) ||| 2^51) = false := by decide +kernel
+
+theorem c201_d51 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 51 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 51 = (!((((S0 ||| 2^3) ||| 2^35) ||| 2^34)).testBit 51 && ((aoHas (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 51 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^35) ||| 2^34) ||| 2^51)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 51 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^35) ||| 2^34) ||| 2^51)))) := rfl
+  rw [c212] at e
+  exact e.trans (by decide +kernel)
+
+theorem c213 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^35) ||| 2^34) ||| 2^58) = false := by decide +kernel
+
+theorem c201_d58 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 58 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 58 = (!((((S0 ||| 2^3) ||| 2^35) ||| 2^34)).testBit 58 && ((aoHas (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 58 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^35) ||| 2^34) ||| 2^58)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 58 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^35) ||| 2^34) ||| 2^58)))) := rfl
+  rw [c213] at e
+  exact e.trans (by decide +kernel)
+
+theorem c214 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^35) ||| 2^34) ||| 2^59) = false := by decide +kernel
+
+theorem c201_d59 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 59 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 59 = (!((((S0 ||| 2^3) ||| 2^35) ||| 2^34)).testBit 59 && ((aoHas (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 59 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^35) ||| 2^34) ||| 2^59)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^35) ||| 2^34) 59 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^35) ||| 2^34) ||| 2^59)))) := rfl
+  rw [c214] at e
+  exact e.trans (by decide +kernel)
+
+theorem c201_o : (List.range 64).all (fun v => v == 1 || v == 2 || v == 7 || v == 15 || v == 28 || v == 29 || v == 31 || v == 50 || v == 51 || v == 58 || v == 59 || !body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^34) v) = true := by decide +kernel
+
+theorem c201_a : ∀ v, v < 64 → body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^34) v = false := by
+  intro v hv
+  have h := List.all_eq_true.mp c201_o v (List.mem_range.mpr hv)
+  by_cases h1 : v = 1
+  · subst h1; exact c201_d1
+  by_cases h2 : v = 2
+  · subst h2; exact c201_d2
+  by_cases h7 : v = 7
+  · subst h7; exact c201_d7
+  by_cases h15 : v = 15
+  · subst h15; exact c201_d15
+  by_cases h28 : v = 28
+  · subst h28; exact c201_d28
+  by_cases h29 : v = 29
+  · subst h29; exact c201_d29
+  by_cases h31 : v = 31
+  · subst h31; exact c201_d31
+  by_cases h50 : v = 50
+  · subst h50; exact c201_d50
+  by_cases h51 : v = 51
+  · subst h51; exact c201_d51
+  by_cases h58 : v = 58
+  · subst h58; exact c201_d58
+  by_cases h59 : v = 59
+  · subst h59; exact c201_d59
+  simpa [h1, h2, h7, h15, h28, h29, h31, h50, h51, h58, h59] using h
+
+theorem c201 : reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^35) ||| 2^34) = false := by
+  have e := reach_succ 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^34) rfl
+  have h : (List.range 64).any (body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^34)) = false := by
+    apply List.any_eq_false.mpr
+    intro v hv
+    rw [c201_a v (List.mem_range.mp hv)]; decide
+  rw [c202, c203, h] at e
+  exact e.trans (by decide +kernel)
+
+theorem c180_d34 : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^35) 34 = false := by
+  have e : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^35) 34 = (!(((S0 ||| 2^3) ||| 2^35)).testBit 34 && ((aoHas ((S0 ||| 2^3) ||| 2^35) 34 && reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^35) ||| 2^34)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^35) 34 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^34)))) := rfl
+  rw [c201] at e
+  exact e.trans (by decide +kernel)
+
+theorem c215 : reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^35) ||| 2^51) = false := by decide +kernel
+
+theorem c180_d51 : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^35) 51 = false := by
+  have e : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^35) 51 = (!(((S0 ||| 2^3) ||| 2^35)).testBit 51 && ((aoHas ((S0 ||| 2^3) ||| 2^35) 51 && reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^35) ||| 2^51)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^35) 51 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^51)))) := rfl
+  rw [c215] at e
+  exact e.trans (by decide +kernel)
+
+theorem c216 : reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^35) ||| 2^59) = false := by decide +kernel
+
+theorem c180_d59 : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^35) 59 = false := by
+  have e : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^35) 59 = (!(((S0 ||| 2^3) ||| 2^35)).testBit 59 && ((aoHas ((S0 ||| 2^3) ||| 2^35) 59 && reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^35) ||| 2^59)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^35) 59 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^35) ||| 2^59)))) := rfl
+  rw [c216] at e
+  exact e.trans (by decide +kernel)
+
+theorem c180_o : (List.range 64).all (fun v => v == 1 || v == 2 || v == 7 || v == 15 || v == 28 || v == 31 || v == 34 || v == 51 || v == 59 || !body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^35) v) = true := by decide +kernel
+
+theorem c180_a : ∀ v, v < 64 → body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^35) v = false := by
+  intro v hv
+  have h := List.all_eq_true.mp c180_o v (List.mem_range.mpr hv)
+  by_cases h1 : v = 1
+  · subst h1; exact c180_d1
+  by_cases h2 : v = 2
+  · subst h2; exact c180_d2
+  by_cases h7 : v = 7
+  · subst h7; exact c180_d7
+  by_cases h15 : v = 15
+  · subst h15; exact c180_d15
+  by_cases h28 : v = 28
+  · subst h28; exact c180_d28
+  by_cases h31 : v = 31
+  · subst h31; exact c180_d31
+  by_cases h34 : v = 34
+  · subst h34; exact c180_d34
+  by_cases h51 : v = 51
+  · subst h51; exact c180_d51
+  by_cases h59 : v = 59
+  · subst h59; exact c180_d59
+  simpa [h1, h2, h7, h15, h28, h31, h34, h51, h59] using h
+
+theorem c180 : reach 2 35 42 4 1 ((S0 ||| 2^3) ||| 2^35) = false := by
+  have e := reach_succ 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^35) rfl
+  have h : (List.range 64).any (body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^35)) = false := by
+    apply List.any_eq_false.mpr
+    intro v hv
+    rw [c180_a v (List.mem_range.mp hv)]; decide
+  rw [c27, c181, h] at e
+  exact e.trans (by decide +kernel)
+
+theorem c58_d35 : body 2 35 42 4 1 0 (S0 ||| 2^3) 35 = false := by
+  have e : body 2 35 42 4 1 0 (S0 ||| 2^3) 35 = (!((S0 ||| 2^3)).testBit 35 && ((aoHas (S0 ||| 2^3) 35 && reach 2 35 42 4 1 ((S0 ||| 2^3) ||| 2^35)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^3) 35 && reach 2 35 42 4 0 ((S0 ||| 2^3) ||| 2^35)))) := rfl
+  rw [c180] at e
+  exact e.trans (by decide +kernel)
+
+theorem c218 : reach 2 35 42 3 0 ((S0 ||| 2^3) ||| 2^51) = false := by decide +kernel
+
+theorem c219 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^1) = false := by decide +kernel
+
+theorem c217_d1 : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^51) 1 = false := by
+  have e : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^51) 1 = (!(((S0 ||| 2^3) ||| 2^51)).testBit 1 && ((aoHas ((S0 ||| 2^3) ||| 2^51) 1 && reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^51) ||| 2^1)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^51) 1 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^1)))) := rfl
+  rw [c219] at e
+  exact e.trans (by decide +kernel)
+
+theorem c221 : reach 2 35 42 2 1 (((S0 ||| 2^3) ||| 2^51) ||| 2^2) = false := by decide +kernel
+
+theorem c222 : reach 2 35 42 2 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^2) = false := by decide +kernel
+
+theorem c223 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^51) ||| 2^2) ||| 2^1) = false := by decide +kernel
+
+theorem c220_d1 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 1 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 1 = (!((((S0 ||| 2^3) ||| 2^51) ||| 2^2)).testBit 1 && ((aoHas (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 1 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^51) ||| 2^2) ||| 2^1)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 1 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^51) ||| 2^2) ||| 2^1)))) := rfl
+  rw [c223] at e
+  exact e.trans (by decide +kernel)
+
+theorem c224 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^51) ||| 2^2) ||| 2^7) = false := by decide +kernel
+
+theorem c220_d7 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 7 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 7 = (!((((S0 ||| 2^3) ||| 2^51) ||| 2^2)).testBit 7 && ((aoHas (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 7 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^51) ||| 2^2) ||| 2^7)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 7 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^51) ||| 2^2) ||| 2^7)))) := rfl
+  rw [c224] at e
+  exact e.trans (by decide +kernel)
+
+theorem c225 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^51) ||| 2^2) ||| 2^12) = false := by decide +kernel
+
+theorem c220_d12 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 12 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 12 = (!((((S0 ||| 2^3) ||| 2^51) ||| 2^2)).testBit 12 && ((aoHas (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 12 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^51) ||| 2^2) ||| 2^12)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 12 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^51) ||| 2^2) ||| 2^12)))) := rfl
+  rw [c225] at e
+  exact e.trans (by decide +kernel)
+
+theorem c226 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^51) ||| 2^2) ||| 2^15) = false := by decide +kernel
+
+theorem c220_d15 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 15 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 15 = (!((((S0 ||| 2^3) ||| 2^51) ||| 2^2)).testBit 15 && ((aoHas (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 15 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^51) ||| 2^2) ||| 2^15)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 15 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^51) ||| 2^2) ||| 2^15)))) := rfl
+  rw [c226] at e
+  exact e.trans (by decide +kernel)
+
+theorem c227 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^51) ||| 2^2) ||| 2^31) = false := by decide +kernel
+
+theorem c220_d31 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 31 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 31 = (!((((S0 ||| 2^3) ||| 2^51) ||| 2^2)).testBit 31 && ((aoHas (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 31 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^51) ||| 2^2) ||| 2^31)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 31 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^51) ||| 2^2) ||| 2^31)))) := rfl
+  rw [c227] at e
+  exact e.trans (by decide +kernel)
+
+theorem c228 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^51) ||| 2^2) ||| 2^34) = false := by decide +kernel
+
+theorem c220_d34 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 34 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 34 = (!((((S0 ||| 2^3) ||| 2^51) ||| 2^2)).testBit 34 && ((aoHas (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 34 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^51) ||| 2^2) ||| 2^34)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 34 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^51) ||| 2^2) ||| 2^34)))) := rfl
+  rw [c228] at e
+  exact e.trans (by decide +kernel)
+
+theorem c229 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^51) ||| 2^2) ||| 2^35) = false := by decide +kernel
+
+theorem c220_d35 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 35 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 35 = (!((((S0 ||| 2^3) ||| 2^51) ||| 2^2)).testBit 35 && ((aoHas (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 35 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^51) ||| 2^2) ||| 2^35)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 35 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^51) ||| 2^2) ||| 2^35)))) := rfl
+  rw [c229] at e
+  exact e.trans (by decide +kernel)
+
+theorem c230 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^51) ||| 2^2) ||| 2^50) = false := by decide +kernel
+
+theorem c220_d50 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 50 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 50 = (!((((S0 ||| 2^3) ||| 2^51) ||| 2^2)).testBit 50 && ((aoHas (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 50 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^51) ||| 2^2) ||| 2^50)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 50 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^51) ||| 2^2) ||| 2^50)))) := rfl
+  rw [c230] at e
+  exact e.trans (by decide +kernel)
+
+theorem c231 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^51) ||| 2^2) ||| 2^58) = false := by decide +kernel
+
+theorem c220_d58 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 58 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 58 = (!((((S0 ||| 2^3) ||| 2^51) ||| 2^2)).testBit 58 && ((aoHas (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 58 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^51) ||| 2^2) ||| 2^58)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 58 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^51) ||| 2^2) ||| 2^58)))) := rfl
+  rw [c231] at e
+  exact e.trans (by decide +kernel)
+
+theorem c232 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^51) ||| 2^2) ||| 2^59) = false := by decide +kernel
+
+theorem c220_d59 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 59 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 59 = (!((((S0 ||| 2^3) ||| 2^51) ||| 2^2)).testBit 59 && ((aoHas (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 59 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^51) ||| 2^2) ||| 2^59)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 59 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^51) ||| 2^2) ||| 2^59)))) := rfl
+  rw [c232] at e
+  exact e.trans (by decide +kernel)
+
+theorem c233 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^51) ||| 2^2) ||| 2^61) = false := by decide +kernel
+
+theorem c220_d61 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 61 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 61 = (!((((S0 ||| 2^3) ||| 2^51) ||| 2^2)).testBit 61 && ((aoHas (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 61 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^51) ||| 2^2) ||| 2^61)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^51) ||| 2^2) 61 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^51) ||| 2^2) ||| 2^61)))) := rfl
+  rw [c233] at e
+  exact e.trans (by decide +kernel)
+
+theorem c220_o : (List.range 64).all (fun v => v == 1 || v == 7 || v == 12 || v == 15 || v == 31 || v == 34 || v == 35 || v == 50 || v == 58 || v == 59 || v == 61 || !body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^2) v) = true := by decide +kernel
+
+theorem c220_a : ∀ v, v < 64 → body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^2) v = false := by
+  intro v hv
+  have h := List.all_eq_true.mp c220_o v (List.mem_range.mpr hv)
+  by_cases h1 : v = 1
+  · subst h1; exact c220_d1
+  by_cases h7 : v = 7
+  · subst h7; exact c220_d7
+  by_cases h12 : v = 12
+  · subst h12; exact c220_d12
+  by_cases h15 : v = 15
+  · subst h15; exact c220_d15
+  by_cases h31 : v = 31
+  · subst h31; exact c220_d31
+  by_cases h34 : v = 34
+  · subst h34; exact c220_d34
+  by_cases h35 : v = 35
+  · subst h35; exact c220_d35
+  by_cases h50 : v = 50
+  · subst h50; exact c220_d50
+  by_cases h58 : v = 58
+  · subst h58; exact c220_d58
+  by_cases h59 : v = 59
+  · subst h59; exact c220_d59
+  by_cases h61 : v = 61
+  · subst h61; exact c220_d61
+  simpa [h1, h7, h12, h15, h31, h34, h35, h50, h58, h59, h61] using h
+
+theorem c220 : reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^51) ||| 2^2) = false := by
+  have e := reach_succ 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^2) rfl
+  have h : (List.range 64).any (body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^2)) = false := by
+    apply List.any_eq_false.mpr
+    intro v hv
+    rw [c220_a v (List.mem_range.mp hv)]; decide
+  rw [c221, c222, h] at e
+  exact e.trans (by decide +kernel)
+
+theorem c217_d2 : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^51) 2 = false := by
+  have e : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^51) 2 = (!(((S0 ||| 2^3) ||| 2^51)).testBit 2 && ((aoHas ((S0 ||| 2^3) ||| 2^51) 2 && reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^51) ||| 2^2)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^51) 2 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^2)))) := rfl
+  rw [c220] at e
+  exact e.trans (by decide +kernel)
+
+theorem c234 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^7) = false := by decide +kernel
+
+theorem c217_d7 : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^51) 7 = false := by
+  have e : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^51) 7 = (!(((S0 ||| 2^3) ||| 2^51)).testBit 7 && ((aoHas ((S0 ||| 2^3) ||| 2^51) 7 && reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^51) ||| 2^7)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^51) 7 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^7)))) := rfl
+  rw [c234] at e
+  exact e.trans (by decide +kernel)
+
+theorem c235 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^12) = false := by decide +kernel
+
+theorem c217_d12 : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^51) 12 = false := by
+  have e : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^51) 12 = (!(((S0 ||| 2^3) ||| 2^51)).testBit 12 && ((aoHas ((S0 ||| 2^3) ||| 2^51) 12 && reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^51) ||| 2^12)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^51) 12 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^12)))) := rfl
+  rw [c235] at e
+  exact e.trans (by decide +kernel)
+
+theorem c236 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^15) = false := by decide +kernel
+
+theorem c217_d15 : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^51) 15 = false := by
+  have e : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^51) 15 = (!(((S0 ||| 2^3) ||| 2^51)).testBit 15 && ((aoHas ((S0 ||| 2^3) ||| 2^51) 15 && reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^51) ||| 2^15)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^51) 15 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^15)))) := rfl
+  rw [c236] at e
+  exact e.trans (by decide +kernel)
+
+theorem c237 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^31) = false := by decide +kernel
+
+theorem c217_d31 : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^51) 31 = false := by
+  have e : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^51) 31 = (!(((S0 ||| 2^3) ||| 2^51)).testBit 31 && ((aoHas ((S0 ||| 2^3) ||| 2^51) 31 && reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^51) ||| 2^31)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^51) 31 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^31)))) := rfl
+  rw [c237] at e
+  exact e.trans (by decide +kernel)
+
+theorem c238 : reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^51) ||| 2^35) = false := by decide +kernel
+
+theorem c217_d35 : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^51) 35 = false := by
+  have e : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^51) 35 = (!(((S0 ||| 2^3) ||| 2^51)).testBit 35 && ((aoHas ((S0 ||| 2^3) ||| 2^51) 35 && reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^51) ||| 2^35)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^51) 35 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^35)))) := rfl
+  rw [c238] at e
+  exact e.trans (by decide +kernel)
+
+theorem c239 : reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^51) ||| 2^50) = false := by decide +kernel
+
+theorem c217_d50 : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^51) 50 = false := by
+  have e : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^51) 50 = (!(((S0 ||| 2^3) ||| 2^51)).testBit 50 && ((aoHas ((S0 ||| 2^3) ||| 2^51) 50 && reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^51) ||| 2^50)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^51) 50 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^50)))) := rfl
+  rw [c239] at e
+  exact e.trans (by decide +kernel)
+
+theorem c240 : reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^51) ||| 2^59) = false := by decide +kernel
+
+theorem c217_d59 : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^51) 59 = false := by
+  have e : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^51) 59 = (!(((S0 ||| 2^3) ||| 2^51)).testBit 59 && ((aoHas ((S0 ||| 2^3) ||| 2^51) 59 && reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^51) ||| 2^59)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^51) 59 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^51) ||| 2^59)))) := rfl
+  rw [c240] at e
+  exact e.trans (by decide +kernel)
+
+theorem c217_o : (List.range 64).all (fun v => v == 1 || v == 2 || v == 7 || v == 12 || v == 15 || v == 31 || v == 35 || v == 50 || v == 59 || !body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^51) v) = true := by decide +kernel
+
+theorem c217_a : ∀ v, v < 64 → body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^51) v = false := by
+  intro v hv
+  have h := List.all_eq_true.mp c217_o v (List.mem_range.mpr hv)
+  by_cases h1 : v = 1
+  · subst h1; exact c217_d1
+  by_cases h2 : v = 2
+  · subst h2; exact c217_d2
+  by_cases h7 : v = 7
+  · subst h7; exact c217_d7
+  by_cases h12 : v = 12
+  · subst h12; exact c217_d12
+  by_cases h15 : v = 15
+  · subst h15; exact c217_d15
+  by_cases h31 : v = 31
+  · subst h31; exact c217_d31
+  by_cases h35 : v = 35
+  · subst h35; exact c217_d35
+  by_cases h50 : v = 50
+  · subst h50; exact c217_d50
+  by_cases h59 : v = 59
+  · subst h59; exact c217_d59
+  simpa [h1, h2, h7, h12, h15, h31, h35, h50, h59] using h
+
+theorem c217 : reach 2 35 42 4 1 ((S0 ||| 2^3) ||| 2^51) = false := by
+  have e := reach_succ 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^51) rfl
+  have h : (List.range 64).any (body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^51)) = false := by
+    apply List.any_eq_false.mpr
+    intro v hv
+    rw [c217_a v (List.mem_range.mp hv)]; decide
+  rw [c28, c218, h] at e
+  exact e.trans (by decide +kernel)
+
+theorem c58_d51 : body 2 35 42 4 1 0 (S0 ||| 2^3) 51 = false := by
+  have e : body 2 35 42 4 1 0 (S0 ||| 2^3) 51 = (!((S0 ||| 2^3)).testBit 51 && ((aoHas (S0 ||| 2^3) 51 && reach 2 35 42 4 1 ((S0 ||| 2^3) ||| 2^51)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^3) 51 && reach 2 35 42 4 0 ((S0 ||| 2^3) ||| 2^51)))) := rfl
+  rw [c217] at e
+  exact e.trans (by decide +kernel)
+
+theorem c242 : reach 2 35 42 3 0 ((S0 ||| 2^3) ||| 2^59) = false := by decide +kernel
+
+theorem c243 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^1) = false := by decide +kernel
+
+theorem c241_d1 : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^59) 1 = false := by
+  have e : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^59) 1 = (!(((S0 ||| 2^3) ||| 2^59)).testBit 1 && ((aoHas ((S0 ||| 2^3) ||| 2^59) 1 && reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^59) ||| 2^1)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^59) 1 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^1)))) := rfl
+  rw [c243] at e
+  exact e.trans (by decide +kernel)
+
+theorem c245 : reach 2 35 42 2 1 (((S0 ||| 2^3) ||| 2^59) ||| 2^2) = false := by decide +kernel
+
+theorem c246 : reach 2 35 42 2 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^2) = false := by decide +kernel
+
+theorem c247 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^59) ||| 2^2) ||| 2^1) = false := by decide +kernel
+
+theorem c244_d1 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 1 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 1 = (!((((S0 ||| 2^3) ||| 2^59) ||| 2^2)).testBit 1 && ((aoHas (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 1 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^59) ||| 2^2) ||| 2^1)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 1 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^59) ||| 2^2) ||| 2^1)))) := rfl
+  rw [c247] at e
+  exact e.trans (by decide +kernel)
+
+theorem c248 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^59) ||| 2^2) ||| 2^4) = false := by decide +kernel
+
+theorem c244_d4 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 4 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 4 = (!((((S0 ||| 2^3) ||| 2^59) ||| 2^2)).testBit 4 && ((aoHas (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 4 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^59) ||| 2^2) ||| 2^4)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 4 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^59) ||| 2^2) ||| 2^4)))) := rfl
+  rw [c248] at e
+  exact e.trans (by decide +kernel)
+
+theorem c249 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^59) ||| 2^2) ||| 2^7) = false := by decide +kernel
+
+theorem c244_d7 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 7 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 7 = (!((((S0 ||| 2^3) ||| 2^59) ||| 2^2)).testBit 7 && ((aoHas (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 7 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^59) ||| 2^2) ||| 2^7)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 7 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^59) ||| 2^2) ||| 2^7)))) := rfl
+  rw [c249] at e
+  exact e.trans (by decide +kernel)
+
+theorem c250 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^59) ||| 2^2) ||| 2^15) = false := by decide +kernel
+
+theorem c244_d15 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 15 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 15 = (!((((S0 ||| 2^3) ||| 2^59) ||| 2^2)).testBit 15 && ((aoHas (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 15 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^59) ||| 2^2) ||| 2^15)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 15 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^59) ||| 2^2) ||| 2^15)))) := rfl
+  rw [c250] at e
+  exact e.trans (by decide +kernel)
+
+theorem c251 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^59) ||| 2^2) ||| 2^31) = false := by decide +kernel
+
+theorem c244_d31 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 31 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 31 = (!((((S0 ||| 2^3) ||| 2^59) ||| 2^2)).testBit 31 && ((aoHas (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 31 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^59) ||| 2^2) ||| 2^31)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 31 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^59) ||| 2^2) ||| 2^31)))) := rfl
+  rw [c251] at e
+  exact e.trans (by decide +kernel)
+
+theorem c252 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^59) ||| 2^2) ||| 2^34) = false := by decide +kernel
+
+theorem c244_d34 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 34 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 34 = (!((((S0 ||| 2^3) ||| 2^59) ||| 2^2)).testBit 34 && ((aoHas (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 34 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^59) ||| 2^2) ||| 2^34)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 34 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^59) ||| 2^2) ||| 2^34)))) := rfl
+  rw [c252] at e
+  exact e.trans (by decide +kernel)
+
+theorem c253 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^59) ||| 2^2) ||| 2^35) = false := by decide +kernel
+
+theorem c244_d35 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 35 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 35 = (!((((S0 ||| 2^3) ||| 2^59) ||| 2^2)).testBit 35 && ((aoHas (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 35 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^59) ||| 2^2) ||| 2^35)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 35 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^59) ||| 2^2) ||| 2^35)))) := rfl
+  rw [c253] at e
+  exact e.trans (by decide +kernel)
+
+theorem c254 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^59) ||| 2^2) ||| 2^50) = false := by decide +kernel
+
+theorem c244_d50 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 50 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 50 = (!((((S0 ||| 2^3) ||| 2^59) ||| 2^2)).testBit 50 && ((aoHas (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 50 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^59) ||| 2^2) ||| 2^50)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 50 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^59) ||| 2^2) ||| 2^50)))) := rfl
+  rw [c254] at e
+  exact e.trans (by decide +kernel)
+
+theorem c255 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^59) ||| 2^2) ||| 2^51) = false := by decide +kernel
+
+theorem c244_d51 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 51 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 51 = (!((((S0 ||| 2^3) ||| 2^59) ||| 2^2)).testBit 51 && ((aoHas (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 51 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^59) ||| 2^2) ||| 2^51)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 51 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^59) ||| 2^2) ||| 2^51)))) := rfl
+  rw [c255] at e
+  exact e.trans (by decide +kernel)
+
+theorem c256 : reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^59) ||| 2^2) ||| 2^58) = false := by decide +kernel
+
+theorem c244_d58 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 58 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 58 = (!((((S0 ||| 2^3) ||| 2^59) ||| 2^2)).testBit 58 && ((aoHas (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 58 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^59) ||| 2^2) ||| 2^58)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 58 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^59) ||| 2^2) ||| 2^58)))) := rfl
+  rw [c256] at e
+  exact e.trans (by decide +kernel)
+
+theorem c257 : reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^59) ||| 2^2) ||| 2^61) = false := by decide +kernel
+
+theorem c244_d61 : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 61 = false := by
+  have e : body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 61 = (!((((S0 ||| 2^3) ||| 2^59) ||| 2^2)).testBit 61 && ((aoHas (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 61 && reach 2 35 42 2 1 ((((S0 ||| 2^3) ||| 2^59) ||| 2^2) ||| 2^61)) ||
+      (decide (0 < 1) && notHas (((S0 ||| 2^3) ||| 2^59) ||| 2^2) 61 && reach 2 35 42 2 0 ((((S0 ||| 2^3) ||| 2^59) ||| 2^2) ||| 2^61)))) := rfl
+  rw [c257] at e
+  exact e.trans (by decide +kernel)
+
+theorem c244_o : (List.range 64).all (fun v => v == 1 || v == 4 || v == 7 || v == 15 || v == 31 || v == 34 || v == 35 || v == 50 || v == 51 || v == 58 || v == 61 || !body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^2) v) = true := by decide +kernel
+
+theorem c244_a : ∀ v, v < 64 → body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^2) v = false := by
+  intro v hv
+  have h := List.all_eq_true.mp c244_o v (List.mem_range.mpr hv)
+  by_cases h1 : v = 1
+  · subst h1; exact c244_d1
+  by_cases h4 : v = 4
+  · subst h4; exact c244_d4
+  by_cases h7 : v = 7
+  · subst h7; exact c244_d7
+  by_cases h15 : v = 15
+  · subst h15; exact c244_d15
+  by_cases h31 : v = 31
+  · subst h31; exact c244_d31
+  by_cases h34 : v = 34
+  · subst h34; exact c244_d34
+  by_cases h35 : v = 35
+  · subst h35; exact c244_d35
+  by_cases h50 : v = 50
+  · subst h50; exact c244_d50
+  by_cases h51 : v = 51
+  · subst h51; exact c244_d51
+  by_cases h58 : v = 58
+  · subst h58; exact c244_d58
+  by_cases h61 : v = 61
+  · subst h61; exact c244_d61
+  simpa [h1, h4, h7, h15, h31, h34, h35, h50, h51, h58, h61] using h
+
+theorem c244 : reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^59) ||| 2^2) = false := by
+  have e := reach_succ 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^2) rfl
+  have h : (List.range 64).any (body 2 35 42 2 1 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^2)) = false := by
+    apply List.any_eq_false.mpr
+    intro v hv
+    rw [c244_a v (List.mem_range.mp hv)]; decide
+  rw [c245, c246, h] at e
+  exact e.trans (by decide +kernel)
+
+theorem c241_d2 : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^59) 2 = false := by
+  have e : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^59) 2 = (!(((S0 ||| 2^3) ||| 2^59)).testBit 2 && ((aoHas ((S0 ||| 2^3) ||| 2^59) 2 && reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^59) ||| 2^2)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^59) 2 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^2)))) := rfl
+  rw [c244] at e
+  exact e.trans (by decide +kernel)
+
+theorem c258 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^4) = false := by decide +kernel
+
+theorem c241_d4 : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^59) 4 = false := by
+  have e : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^59) 4 = (!(((S0 ||| 2^3) ||| 2^59)).testBit 4 && ((aoHas ((S0 ||| 2^3) ||| 2^59) 4 && reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^59) ||| 2^4)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^59) 4 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^4)))) := rfl
+  rw [c258] at e
+  exact e.trans (by decide +kernel)
+
+theorem c259 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^7) = false := by decide +kernel
+
+theorem c241_d7 : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^59) 7 = false := by
+  have e : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^59) 7 = (!(((S0 ||| 2^3) ||| 2^59)).testBit 7 && ((aoHas ((S0 ||| 2^3) ||| 2^59) 7 && reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^59) ||| 2^7)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^59) 7 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^7)))) := rfl
+  rw [c259] at e
+  exact e.trans (by decide +kernel)
+
+theorem c260 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^15) = false := by decide +kernel
+
+theorem c241_d15 : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^59) 15 = false := by
+  have e : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^59) 15 = (!(((S0 ||| 2^3) ||| 2^59)).testBit 15 && ((aoHas ((S0 ||| 2^3) ||| 2^59) 15 && reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^59) ||| 2^15)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^59) 15 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^15)))) := rfl
+  rw [c260] at e
+  exact e.trans (by decide +kernel)
+
+theorem c261 : reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^31) = false := by decide +kernel
+
+theorem c241_d31 : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^59) 31 = false := by
+  have e : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^59) 31 = (!(((S0 ||| 2^3) ||| 2^59)).testBit 31 && ((aoHas ((S0 ||| 2^3) ||| 2^59) 31 && reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^59) ||| 2^31)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^59) 31 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^31)))) := rfl
+  rw [c261] at e
+  exact e.trans (by decide +kernel)
+
+theorem c262 : reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^59) ||| 2^35) = false := by decide +kernel
+
+theorem c241_d35 : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^59) 35 = false := by
+  have e : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^59) 35 = (!(((S0 ||| 2^3) ||| 2^59)).testBit 35 && ((aoHas ((S0 ||| 2^3) ||| 2^59) 35 && reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^59) ||| 2^35)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^59) 35 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^35)))) := rfl
+  rw [c262] at e
+  exact e.trans (by decide +kernel)
+
+theorem c263 : reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^59) ||| 2^51) = false := by decide +kernel
+
+theorem c241_d51 : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^59) 51 = false := by
+  have e : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^59) 51 = (!(((S0 ||| 2^3) ||| 2^59)).testBit 51 && ((aoHas ((S0 ||| 2^3) ||| 2^59) 51 && reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^59) ||| 2^51)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^59) 51 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^51)))) := rfl
+  rw [c263] at e
+  exact e.trans (by decide +kernel)
+
+theorem c264 : reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^59) ||| 2^58) = false := by decide +kernel
+
+theorem c241_d58 : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^59) 58 = false := by
+  have e : body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^59) 58 = (!(((S0 ||| 2^3) ||| 2^59)).testBit 58 && ((aoHas ((S0 ||| 2^3) ||| 2^59) 58 && reach 2 35 42 3 1 (((S0 ||| 2^3) ||| 2^59) ||| 2^58)) ||
+      (decide (0 < 1) && notHas ((S0 ||| 2^3) ||| 2^59) 58 && reach 2 35 42 3 0 (((S0 ||| 2^3) ||| 2^59) ||| 2^58)))) := rfl
+  rw [c264] at e
+  exact e.trans (by decide +kernel)
+
+theorem c241_o : (List.range 64).all (fun v => v == 1 || v == 2 || v == 4 || v == 7 || v == 15 || v == 31 || v == 35 || v == 51 || v == 58 || !body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^59) v) = true := by decide +kernel
+
+theorem c241_a : ∀ v, v < 64 → body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^59) v = false := by
+  intro v hv
+  have h := List.all_eq_true.mp c241_o v (List.mem_range.mpr hv)
+  by_cases h1 : v = 1
+  · subst h1; exact c241_d1
+  by_cases h2 : v = 2
+  · subst h2; exact c241_d2
+  by_cases h4 : v = 4
+  · subst h4; exact c241_d4
+  by_cases h7 : v = 7
+  · subst h7; exact c241_d7
+  by_cases h15 : v = 15
+  · subst h15; exact c241_d15
+  by_cases h31 : v = 31
+  · subst h31; exact c241_d31
+  by_cases h35 : v = 35
+  · subst h35; exact c241_d35
+  by_cases h51 : v = 51
+  · subst h51; exact c241_d51
+  by_cases h58 : v = 58
+  · subst h58; exact c241_d58
+  simpa [h1, h2, h4, h7, h15, h31, h35, h51, h58] using h
+
+theorem c241 : reach 2 35 42 4 1 ((S0 ||| 2^3) ||| 2^59) = false := by
+  have e := reach_succ 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^59) rfl
+  have h : (List.range 64).any (body 2 35 42 3 1 0 ((S0 ||| 2^3) ||| 2^59)) = false := by
+    apply List.any_eq_false.mpr
+    intro v hv
+    rw [c241_a v (List.mem_range.mp hv)]; decide
+  rw [c29, c242, h] at e
+  exact e.trans (by decide +kernel)
+
+theorem c58_d59 : body 2 35 42 4 1 0 (S0 ||| 2^3) 59 = false := by
+  have e : body 2 35 42 4 1 0 (S0 ||| 2^3) 59 = (!((S0 ||| 2^3)).testBit 59 && ((aoHas (S0 ||| 2^3) 59 && reach 2 35 42 4 1 ((S0 ||| 2^3) ||| 2^59)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^3) 59 && reach 2 35 42 4 0 ((S0 ||| 2^3) ||| 2^59)))) := rfl
+  rw [c241] at e
+  exact e.trans (by decide +kernel)
+
+theorem c58_o : (List.range 64).all (fun v => v == 1 || v == 2 || v == 7 || v == 15 || v == 31 || v == 35 || v == 51 || v == 59 || !body 2 35 42 4 1 0 (S0 ||| 2^3) v) = true := by decide +kernel
+
+theorem c58_a : ∀ v, v < 64 → body 2 35 42 4 1 0 (S0 ||| 2^3) v = false := by
+  intro v hv
+  have h := List.all_eq_true.mp c58_o v (List.mem_range.mpr hv)
+  by_cases h1 : v = 1
+  · subst h1; exact c58_d1
+  by_cases h2 : v = 2
+  · subst h2; exact c58_d2
+  by_cases h7 : v = 7
+  · subst h7; exact c58_d7
+  by_cases h15 : v = 15
+  · subst h15; exact c58_d15
+  by_cases h31 : v = 31
+  · subst h31; exact c58_d31
+  by_cases h35 : v = 35
+  · subst h35; exact c58_d35
+  by_cases h51 : v = 51
+  · subst h51; exact c58_d51
+  by_cases h59 : v = 59
+  · subst h59; exact c58_d59
+  simpa [h1, h2, h7, h15, h31, h35, h51, h59] using h
+
+theorem c58 : reach 2 35 42 5 1 (S0 ||| 2^3) = false := by
+  have e := reach_succ 2 35 42 4 1 0 (S0 ||| 2^3) rfl
+  have h : (List.range 64).any (body 2 35 42 4 1 0 (S0 ||| 2^3)) = false := by
+    apply List.any_eq_false.mpr
+    intro v hv
+    rw [c58_a v (List.mem_range.mp hv)]; decide
+  rw [c6, c36, h] at e
+  exact e.trans (by decide +kernel)
+
+theorem c1_d3 : body 2 35 42 5 2 1 S0 3 = false := by
+  have e : body 2 35 42 5 2 1 S0 3 = (!(S0).testBit 3 && ((aoHas S0 3 && reach 2 35 42 5 2 (S0 ||| 2^3)) ||
+      (decide (0 < 2) && notHas S0 3 && reach 2 35 42 5 1 (S0 ||| 2^3)))) := rfl
+  rw [c58] at e
+  exact e.trans (by decide +kernel)
+
+theorem c266 : reach 2 35 42 4 0 ((S0 ||| 2^7) ||| 2^1) = false := by decide +kernel
+
+theorem c265_d1 : body 2 35 42 4 1 0 (S0 ||| 2^7) 1 = false := by
+  have e : body 2 35 42 4 1 0 (S0 ||| 2^7) 1 = (!((S0 ||| 2^7)).testBit 1 && ((aoHas (S0 ||| 2^7) 1 && reach 2 35 42 4 1 ((S0 ||| 2^7) ||| 2^1)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^7) 1 && reach 2 35 42 4 0 ((S0 ||| 2^7) ||| 2^1)))) := rfl
+  rw [c266] at e
+  exact e.trans (by decide +kernel)
+
+theorem c268 : reach 2 35 42 3 0 ((S0 ||| 2^7) ||| 2^3) = false := by decide +kernel
+
+theorem c269 : reach 2 35 42 3 0 (((S0 ||| 2^7) ||| 2^3) ||| 2^2) = false := by decide +kernel
+
+theorem c267_d2 : body 2 35 42 3 0 0 ((S0 ||| 2^7) ||| 2^3) 2 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^7) ||| 2^3) 2 = (!(((S0 ||| 2^7) ||| 2^3)).testBit 2 && ((aoHas ((S0 ||| 2^7) ||| 2^3) 2 && reach 2 35 42 3 0 (((S0 ||| 2^7) ||| 2^3) ||| 2^2)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^7) ||| 2^3) 2 && reach 2 35 42 3 0 (((S0 ||| 2^7) ||| 2^3) ||| 2^2)))) := rfl
+  rw [c269] at e
+  exact e.trans (by decide +kernel)
+
+theorem c270 : reach 2 35 42 3 0 (((S0 ||| 2^7) ||| 2^3) ||| 2^4) = false := by decide +kernel
+
+theorem c267_d4 : body 2 35 42 3 0 0 ((S0 ||| 2^7) ||| 2^3) 4 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^7) ||| 2^3) 4 = (!(((S0 ||| 2^7) ||| 2^3)).testBit 4 && ((aoHas ((S0 ||| 2^7) ||| 2^3) 4 && reach 2 35 42 3 0 (((S0 ||| 2^7) ||| 2^3) ||| 2^4)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^7) ||| 2^3) 4 && reach 2 35 42 3 0 (((S0 ||| 2^7) ||| 2^3) ||| 2^4)))) := rfl
+  rw [c270] at e
+  exact e.trans (by decide +kernel)
+
+theorem c271 : reach 2 35 42 3 0 (((S0 ||| 2^7) ||| 2^3) ||| 2^6) = false := by decide +kernel
+
+theorem c267_d6 : body 2 35 42 3 0 0 ((S0 ||| 2^7) ||| 2^3) 6 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^7) ||| 2^3) 6 = (!(((S0 ||| 2^7) ||| 2^3)).testBit 6 && ((aoHas ((S0 ||| 2^7) ||| 2^3) 6 && reach 2 35 42 3 0 (((S0 ||| 2^7) ||| 2^3) ||| 2^6)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^7) ||| 2^3) 6 && reach 2 35 42 3 0 (((S0 ||| 2^7) ||| 2^3) ||| 2^6)))) := rfl
+  rw [c271] at e
+  exact e.trans (by decide +kernel)
+
+theorem c272 : reach 2 35 42 3 0 (((S0 ||| 2^7) ||| 2^3) ||| 2^35) = false := by decide +kernel
+
+theorem c267_d35 : body 2 35 42 3 0 0 ((S0 ||| 2^7) ||| 2^3) 35 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^7) ||| 2^3) 35 = (!(((S0 ||| 2^7) ||| 2^3)).testBit 35 && ((aoHas ((S0 ||| 2^7) ||| 2^3) 35 && reach 2 35 42 3 0 (((S0 ||| 2^7) ||| 2^3) ||| 2^35)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^7) ||| 2^3) 35 && reach 2 35 42 3 0 (((S0 ||| 2^7) ||| 2^3) ||| 2^35)))) := rfl
+  rw [c272] at e
+  exact e.trans (by decide +kernel)
+
+theorem c273 : reach 2 35 42 3 0 (((S0 ||| 2^7) ||| 2^3) ||| 2^39) = false := by decide +kernel
+
+theorem c267_d39 : body 2 35 42 3 0 0 ((S0 ||| 2^7) ||| 2^3) 39 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^7) ||| 2^3) 39 = (!(((S0 ||| 2^7) ||| 2^3)).testBit 39 && ((aoHas ((S0 ||| 2^7) ||| 2^3) 39 && reach 2 35 42 3 0 (((S0 ||| 2^7) ||| 2^3) ||| 2^39)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^7) ||| 2^3) 39 && reach 2 35 42 3 0 (((S0 ||| 2^7) ||| 2^3) ||| 2^39)))) := rfl
+  rw [c273] at e
+  exact e.trans (by decide +kernel)
+
+theorem c274 : reach 2 35 42 3 0 (((S0 ||| 2^7) ||| 2^3) ||| 2^51) = false := by decide +kernel
+
+theorem c267_d51 : body 2 35 42 3 0 0 ((S0 ||| 2^7) ||| 2^3) 51 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^7) ||| 2^3) 51 = (!(((S0 ||| 2^7) ||| 2^3)).testBit 51 && ((aoHas ((S0 ||| 2^7) ||| 2^3) 51 && reach 2 35 42 3 0 (((S0 ||| 2^7) ||| 2^3) ||| 2^51)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^7) ||| 2^3) 51 && reach 2 35 42 3 0 (((S0 ||| 2^7) ||| 2^3) ||| 2^51)))) := rfl
+  rw [c274] at e
+  exact e.trans (by decide +kernel)
+
+theorem c275 : reach 2 35 42 3 0 (((S0 ||| 2^7) ||| 2^3) ||| 2^55) = false := by decide +kernel
+
+theorem c267_d55 : body 2 35 42 3 0 0 ((S0 ||| 2^7) ||| 2^3) 55 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^7) ||| 2^3) 55 = (!(((S0 ||| 2^7) ||| 2^3)).testBit 55 && ((aoHas ((S0 ||| 2^7) ||| 2^3) 55 && reach 2 35 42 3 0 (((S0 ||| 2^7) ||| 2^3) ||| 2^55)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^7) ||| 2^3) 55 && reach 2 35 42 3 0 (((S0 ||| 2^7) ||| 2^3) ||| 2^55)))) := rfl
+  rw [c275] at e
+  exact e.trans (by decide +kernel)
+
+theorem c276 : reach 2 35 42 3 0 (((S0 ||| 2^7) ||| 2^3) ||| 2^59) = false := by decide +kernel
+
+theorem c267_d59 : body 2 35 42 3 0 0 ((S0 ||| 2^7) ||| 2^3) 59 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^7) ||| 2^3) 59 = (!(((S0 ||| 2^7) ||| 2^3)).testBit 59 && ((aoHas ((S0 ||| 2^7) ||| 2^3) 59 && reach 2 35 42 3 0 (((S0 ||| 2^7) ||| 2^3) ||| 2^59)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^7) ||| 2^3) 59 && reach 2 35 42 3 0 (((S0 ||| 2^7) ||| 2^3) ||| 2^59)))) := rfl
+  rw [c276] at e
+  exact e.trans (by decide +kernel)
+
+theorem c267_o : (List.range 64).all (fun v => v == 2 || v == 4 || v == 6 || v == 35 || v == 39 || v == 51 || v == 55 || v == 59 || !body 2 35 42 3 0 0 ((S0 ||| 2^7) ||| 2^3) v) = true := by decide +kernel
+
+theorem c267_a : ∀ v, v < 64 → body 2 35 42 3 0 0 ((S0 ||| 2^7) ||| 2^3) v = false := by
+  intro v hv
+  have h := List.all_eq_true.mp c267_o v (List.mem_range.mpr hv)
+  by_cases h2 : v = 2
+  · subst h2; exact c267_d2
+  by_cases h4 : v = 4
+  · subst h4; exact c267_d4
+  by_cases h6 : v = 6
+  · subst h6; exact c267_d6
+  by_cases h35 : v = 35
+  · subst h35; exact c267_d35
+  by_cases h39 : v = 39
+  · subst h39; exact c267_d39
+  by_cases h51 : v = 51
+  · subst h51; exact c267_d51
+  by_cases h55 : v = 55
+  · subst h55; exact c267_d55
+  by_cases h59 : v = 59
+  · subst h59; exact c267_d59
+  simpa [h2, h4, h6, h35, h39, h51, h55, h59] using h
+
+theorem c267 : reach 2 35 42 4 0 ((S0 ||| 2^7) ||| 2^3) = false := by
+  have e := reach_succ 2 35 42 3 0 0 ((S0 ||| 2^7) ||| 2^3) rfl
+  have h : (List.range 64).any (body 2 35 42 3 0 0 ((S0 ||| 2^7) ||| 2^3)) = false := by
+    apply List.any_eq_false.mpr
+    intro v hv
+    rw [c267_a v (List.mem_range.mp hv)]; decide
+  rw [c268, h] at e
+  exact e.trans (by decide +kernel)
+
+theorem c265_d3 : body 2 35 42 4 1 0 (S0 ||| 2^7) 3 = false := by
+  have e : body 2 35 42 4 1 0 (S0 ||| 2^7) 3 = (!((S0 ||| 2^7)).testBit 3 && ((aoHas (S0 ||| 2^7) 3 && reach 2 35 42 4 1 ((S0 ||| 2^7) ||| 2^3)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^7) 3 && reach 2 35 42 4 0 ((S0 ||| 2^7) ||| 2^3)))) := rfl
+  rw [c267] at e
+  exact e.trans (by decide +kernel)
+
+theorem c277 : reach 2 35 42 4 1 ((S0 ||| 2^7) ||| 2^4) = false := by decide +kernel
+
+theorem c265_d4 : body 2 35 42 4 1 0 (S0 ||| 2^7) 4 = false := by
+  have e : body 2 35 42 4 1 0 (S0 ||| 2^7) 4 = (!((S0 ||| 2^7)).testBit 4 && ((aoHas (S0 ||| 2^7) 4 && reach 2 35 42 4 1 ((S0 ||| 2^7) ||| 2^4)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^7) 4 && reach 2 35 42 4 0 ((S0 ||| 2^7) ||| 2^4)))) := rfl
+  rw [c277] at e
+  exact e.trans (by decide +kernel)
+
+theorem c278 : reach 2 35 42 4 1 ((S0 ||| 2^7) ||| 2^6) = false := by decide +kernel
+
+theorem c265_d6 : body 2 35 42 4 1 0 (S0 ||| 2^7) 6 = false := by
+  have e : body 2 35 42 4 1 0 (S0 ||| 2^7) 6 = (!((S0 ||| 2^7)).testBit 6 && ((aoHas (S0 ||| 2^7) 6 && reach 2 35 42 4 1 ((S0 ||| 2^7) ||| 2^6)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^7) 6 && reach 2 35 42 4 0 ((S0 ||| 2^7) ||| 2^6)))) := rfl
+  rw [c278] at e
+  exact e.trans (by decide +kernel)
+
+theorem c279 : reach 2 35 42 4 0 ((S0 ||| 2^7) ||| 2^15) = false := by decide +kernel
+
+theorem c265_d15 : body 2 35 42 4 1 0 (S0 ||| 2^7) 15 = false := by
+  have e : body 2 35 42 4 1 0 (S0 ||| 2^7) 15 = (!((S0 ||| 2^7)).testBit 15 && ((aoHas (S0 ||| 2^7) 15 && reach 2 35 42 4 1 ((S0 ||| 2^7) ||| 2^15)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^7) 15 && reach 2 35 42 4 0 ((S0 ||| 2^7) ||| 2^15)))) := rfl
+  rw [c279] at e
+  exact e.trans (by decide +kernel)
+
+theorem c280 : reach 2 35 42 4 0 ((S0 ||| 2^7) ||| 2^31) = false := by decide +kernel
+
+theorem c265_d31 : body 2 35 42 4 1 0 (S0 ||| 2^7) 31 = false := by
+  have e : body 2 35 42 4 1 0 (S0 ||| 2^7) 31 = (!((S0 ||| 2^7)).testBit 31 && ((aoHas (S0 ||| 2^7) 31 && reach 2 35 42 4 1 ((S0 ||| 2^7) ||| 2^31)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^7) 31 && reach 2 35 42 4 0 ((S0 ||| 2^7) ||| 2^31)))) := rfl
+  rw [c280] at e
+  exact e.trans (by decide +kernel)
+
+theorem c281 : reach 2 35 42 4 1 ((S0 ||| 2^7) ||| 2^39) = false := by decide +kernel
+
+theorem c265_d39 : body 2 35 42 4 1 0 (S0 ||| 2^7) 39 = false := by
+  have e : body 2 35 42 4 1 0 (S0 ||| 2^7) 39 = (!((S0 ||| 2^7)).testBit 39 && ((aoHas (S0 ||| 2^7) 39 && reach 2 35 42 4 1 ((S0 ||| 2^7) ||| 2^39)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^7) 39 && reach 2 35 42 4 0 ((S0 ||| 2^7) ||| 2^39)))) := rfl
+  rw [c281] at e
+  exact e.trans (by decide +kernel)
+
+theorem c282 : reach 2 35 42 4 1 ((S0 ||| 2^7) ||| 2^55) = false := by decide +kernel
+
+theorem c265_d55 : body 2 35 42 4 1 0 (S0 ||| 2^7) 55 = false := by
+  have e : body 2 35 42 4 1 0 (S0 ||| 2^7) 55 = (!((S0 ||| 2^7)).testBit 55 && ((aoHas (S0 ||| 2^7) 55 && reach 2 35 42 4 1 ((S0 ||| 2^7) ||| 2^55)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^7) 55 && reach 2 35 42 4 0 ((S0 ||| 2^7) ||| 2^55)))) := rfl
+  rw [c282] at e
+  exact e.trans (by decide +kernel)
+
+theorem c265_o : (List.range 64).all (fun v => v == 1 || v == 3 || v == 4 || v == 6 || v == 15 || v == 31 || v == 39 || v == 55 || !body 2 35 42 4 1 0 (S0 ||| 2^7) v) = true := by decide +kernel
+
+theorem c265_a : ∀ v, v < 64 → body 2 35 42 4 1 0 (S0 ||| 2^7) v = false := by
+  intro v hv
+  have h := List.all_eq_true.mp c265_o v (List.mem_range.mpr hv)
+  by_cases h1 : v = 1
+  · subst h1; exact c265_d1
+  by_cases h3 : v = 3
+  · subst h3; exact c265_d3
+  by_cases h4 : v = 4
+  · subst h4; exact c265_d4
+  by_cases h6 : v = 6
+  · subst h6; exact c265_d6
+  by_cases h15 : v = 15
+  · subst h15; exact c265_d15
+  by_cases h31 : v = 31
+  · subst h31; exact c265_d31
+  by_cases h39 : v = 39
+  · subst h39; exact c265_d39
+  by_cases h55 : v = 55
+  · subst h55; exact c265_d55
+  simpa [h1, h3, h4, h6, h15, h31, h39, h55] using h
+
+theorem c265 : reach 2 35 42 5 1 (S0 ||| 2^7) = false := by
+  have e := reach_succ 2 35 42 4 1 0 (S0 ||| 2^7) rfl
+  have h : (List.range 64).any (body 2 35 42 4 1 0 (S0 ||| 2^7)) = false := by
+    apply List.any_eq_false.mpr
+    intro v hv
+    rw [c265_a v (List.mem_range.mp hv)]; decide
+  rw [c30, c37, h] at e
+  exact e.trans (by decide +kernel)
+
+theorem c1_d7 : body 2 35 42 5 2 1 S0 7 = false := by
+  have e : body 2 35 42 5 2 1 S0 7 = (!(S0).testBit 7 && ((aoHas S0 7 && reach 2 35 42 5 2 (S0 ||| 2^7)) ||
+      (decide (0 < 2) && notHas S0 7 && reach 2 35 42 5 1 (S0 ||| 2^7)))) := rfl
+  rw [c265] at e
+  exact e.trans (by decide +kernel)
+
+theorem c284 : reach 2 35 42 4 0 ((S0 ||| 2^15) ||| 2^1) = false := by decide +kernel
+
+theorem c283_d1 : body 2 35 42 4 1 0 (S0 ||| 2^15) 1 = false := by
+  have e : body 2 35 42 4 1 0 (S0 ||| 2^15) 1 = (!((S0 ||| 2^15)).testBit 1 && ((aoHas (S0 ||| 2^15) 1 && reach 2 35 42 4 1 ((S0 ||| 2^15) ||| 2^1)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^15) 1 && reach 2 35 42 4 0 ((S0 ||| 2^15) ||| 2^1)))) := rfl
+  rw [c284] at e
+  exact e.trans (by decide +kernel)
+
+theorem c286 : reach 2 35 42 3 0 ((S0 ||| 2^15) ||| 2^3) = false := by decide +kernel
+
+theorem c287 : reach 2 35 42 3 0 (((S0 ||| 2^15) ||| 2^3) ||| 2^2) = false := by decide +kernel
+
+theorem c285_d2 : body 2 35 42 3 0 0 ((S0 ||| 2^15) ||| 2^3) 2 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^15) ||| 2^3) 2 = (!(((S0 ||| 2^15) ||| 2^3)).testBit 2 && ((aoHas ((S0 ||| 2^15) ||| 2^3) 2 && reach 2 35 42 3 0 (((S0 ||| 2^15) ||| 2^3) ||| 2^2)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^15) ||| 2^3) 2 && reach 2 35 42 3 0 (((S0 ||| 2^15) ||| 2^3) ||| 2^2)))) := rfl
+  rw [c287] at e
+  exact e.trans (by decide +kernel)
+
+theorem c288 : reach 2 35 42 3 0 (((S0 ||| 2^15) ||| 2^3) ||| 2^8) = false := by decide +kernel
+
+theorem c285_d8 : body 2 35 42 3 0 0 ((S0 ||| 2^15) ||| 2^3) 8 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^15) ||| 2^3) 8 = (!(((S0 ||| 2^15) ||| 2^3)).testBit 8 && ((aoHas ((S0 ||| 2^15) ||| 2^3) 8 && reach 2 35 42 3 0 (((S0 ||| 2^15) ||| 2^3) ||| 2^8)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^15) ||| 2^3) 8 && reach 2 35 42 3 0 (((S0 ||| 2^15) ||| 2^3) ||| 2^8)))) := rfl
+  rw [c288] at e
+  exact e.trans (by decide +kernel)
+
+theorem c289 : reach 2 35 42 3 0 (((S0 ||| 2^15) ||| 2^3) ||| 2^12) = false := by decide +kernel
+
+theorem c285_d12 : body 2 35 42 3 0 0 ((S0 ||| 2^15) ||| 2^3) 12 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^15) ||| 2^3) 12 = (!(((S0 ||| 2^15) ||| 2^3)).testBit 12 && ((aoHas ((S0 ||| 2^15) ||| 2^3) 12 && reach 2 35 42 3 0 (((S0 ||| 2^15) ||| 2^3) ||| 2^12)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^15) ||| 2^3) 12 && reach 2 35 42 3 0 (((S0 ||| 2^15) ||| 2^3) ||| 2^12)))) := rfl
+  rw [c289] at e
+  exact e.trans (by decide +kernel)
+
+theorem c290 : reach 2 35 42 3 0 (((S0 ||| 2^15) ||| 2^3) ||| 2^14) = false := by decide +kernel
+
+theorem c285_d14 : body 2 35 42 3 0 0 ((S0 ||| 2^15) ||| 2^3) 14 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^15) ||| 2^3) 14 = (!(((S0 ||| 2^15) ||| 2^3)).testBit 14 && ((aoHas ((S0 ||| 2^15) ||| 2^3) 14 && reach 2 35 42 3 0 (((S0 ||| 2^15) ||| 2^3) ||| 2^14)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^15) ||| 2^3) 14 && reach 2 35 42 3 0 (((S0 ||| 2^15) ||| 2^3) ||| 2^14)))) := rfl
+  rw [c290] at e
+  exact e.trans (by decide +kernel)
+
+theorem c291 : reach 2 35 42 3 0 (((S0 ||| 2^15) ||| 2^3) ||| 2^35) = false := by decide +kernel
+
+theorem c285_d35 : body 2 35 42 3 0 0 ((S0 ||| 2^15) ||| 2^3) 35 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^15) ||| 2^3) 35 = (!(((S0 ||| 2^15) ||| 2^3)).testBit 35 && ((aoHas ((S0 ||| 2^15) ||| 2^3) 35 && reach 2 35 42 3 0 (((S0 ||| 2^15) ||| 2^3) ||| 2^35)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^15) ||| 2^3) 35 && reach 2 35 42 3 0 (((S0 ||| 2^15) ||| 2^3) ||| 2^35)))) := rfl
+  rw [c291] at e
+  exact e.trans (by decide +kernel)
+
+theorem c292 : reach 2 35 42 3 0 (((S0 ||| 2^15) ||| 2^3) ||| 2^47) = false := by decide +kernel
+
+theorem c285_d47 : body 2 35 42 3 0 0 ((S0 ||| 2^15) ||| 2^3) 47 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^15) ||| 2^3) 47 = (!(((S0 ||| 2^15) ||| 2^3)).testBit 47 && ((aoHas ((S0 ||| 2^15) ||| 2^3) 47 && reach 2 35 42 3 0 (((S0 ||| 2^15) ||| 2^3) ||| 2^47)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^15) ||| 2^3) 47 && reach 2 35 42 3 0 (((S0 ||| 2^15) ||| 2^3) ||| 2^47)))) := rfl
+  rw [c292] at e
+  exact e.trans (by decide +kernel)
+
+theorem c293 : reach 2 35 42 3 0 (((S0 ||| 2^15) ||| 2^3) ||| 2^51) = false := by decide +kernel
+
+theorem c285_d51 : body 2 35 42 3 0 0 ((S0 ||| 2^15) ||| 2^3) 51 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^15) ||| 2^3) 51 = (!(((S0 ||| 2^15) ||| 2^3)).testBit 51 && ((aoHas ((S0 ||| 2^15) ||| 2^3) 51 && reach 2 35 42 3 0 (((S0 ||| 2^15) ||| 2^3) ||| 2^51)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^15) ||| 2^3) 51 && reach 2 35 42 3 0 (((S0 ||| 2^15) ||| 2^3) ||| 2^51)))) := rfl
+  rw [c293] at e
+  exact e.trans (by decide +kernel)
+
+theorem c294 : reach 2 35 42 3 0 (((S0 ||| 2^15) ||| 2^3) ||| 2^59) = false := by decide +kernel
+
+theorem c285_d59 : body 2 35 42 3 0 0 ((S0 ||| 2^15) ||| 2^3) 59 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^15) ||| 2^3) 59 = (!(((S0 ||| 2^15) ||| 2^3)).testBit 59 && ((aoHas ((S0 ||| 2^15) ||| 2^3) 59 && reach 2 35 42 3 0 (((S0 ||| 2^15) ||| 2^3) ||| 2^59)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^15) ||| 2^3) 59 && reach 2 35 42 3 0 (((S0 ||| 2^15) ||| 2^3) ||| 2^59)))) := rfl
+  rw [c294] at e
+  exact e.trans (by decide +kernel)
+
+theorem c285_o : (List.range 64).all (fun v => v == 2 || v == 8 || v == 12 || v == 14 || v == 35 || v == 47 || v == 51 || v == 59 || !body 2 35 42 3 0 0 ((S0 ||| 2^15) ||| 2^3) v) = true := by decide +kernel
+
+theorem c285_a : ∀ v, v < 64 → body 2 35 42 3 0 0 ((S0 ||| 2^15) ||| 2^3) v = false := by
+  intro v hv
+  have h := List.all_eq_true.mp c285_o v (List.mem_range.mpr hv)
+  by_cases h2 : v = 2
+  · subst h2; exact c285_d2
+  by_cases h8 : v = 8
+  · subst h8; exact c285_d8
+  by_cases h12 : v = 12
+  · subst h12; exact c285_d12
+  by_cases h14 : v = 14
+  · subst h14; exact c285_d14
+  by_cases h35 : v = 35
+  · subst h35; exact c285_d35
+  by_cases h47 : v = 47
+  · subst h47; exact c285_d47
+  by_cases h51 : v = 51
+  · subst h51; exact c285_d51
+  by_cases h59 : v = 59
+  · subst h59; exact c285_d59
+  simpa [h2, h8, h12, h14, h35, h47, h51, h59] using h
+
+theorem c285 : reach 2 35 42 4 0 ((S0 ||| 2^15) ||| 2^3) = false := by
+  have e := reach_succ 2 35 42 3 0 0 ((S0 ||| 2^15) ||| 2^3) rfl
+  have h : (List.range 64).any (body 2 35 42 3 0 0 ((S0 ||| 2^15) ||| 2^3)) = false := by
+    apply List.any_eq_false.mpr
+    intro v hv
+    rw [c285_a v (List.mem_range.mp hv)]; decide
+  rw [c286, h] at e
+  exact e.trans (by decide +kernel)
+
+theorem c283_d3 : body 2 35 42 4 1 0 (S0 ||| 2^15) 3 = false := by
+  have e : body 2 35 42 4 1 0 (S0 ||| 2^15) 3 = (!((S0 ||| 2^15)).testBit 3 && ((aoHas (S0 ||| 2^15) 3 && reach 2 35 42 4 1 ((S0 ||| 2^15) ||| 2^3)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^15) 3 && reach 2 35 42 4 0 ((S0 ||| 2^15) ||| 2^3)))) := rfl
+  rw [c285] at e
+  exact e.trans (by decide +kernel)
+
+theorem c295 : reach 2 35 42 4 0 ((S0 ||| 2^15) ||| 2^7) = false := by decide +kernel
+
+theorem c283_d7 : body 2 35 42 4 1 0 (S0 ||| 2^15) 7 = false := by
+  have e : body 2 35 42 4 1 0 (S0 ||| 2^15) 7 = (!((S0 ||| 2^15)).testBit 7 && ((aoHas (S0 ||| 2^15) 7 && reach 2 35 42 4 1 ((S0 ||| 2^15) ||| 2^7)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^15) 7 && reach 2 35 42 4 0 ((S0 ||| 2^15) ||| 2^7)))) := rfl
+  rw [c295] at e
+  exact e.trans (by decide +kernel)
+
+theorem c296 : reach 2 35 42 4 1 ((S0 ||| 2^15) ||| 2^8) = false := by decide +kernel
+
+theorem c283_d8 : body 2 35 42 4 1 0 (S0 ||| 2^15) 8 = false := by
+  have e : body 2 35 42 4 1 0 (S0 ||| 2^15) 8 = (!((S0 ||| 2^15)).testBit 8 && ((aoHas (S0 ||| 2^15) 8 && reach 2 35 42 4 1 ((S0 ||| 2^15) ||| 2^8)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^15) 8 && reach 2 35 42 4 0 ((S0 ||| 2^15) ||| 2^8)))) := rfl
+  rw [c296] at e
+  exact e.trans (by decide +kernel)
+
+theorem c297 : reach 2 35 42 4 1 ((S0 ||| 2^15) ||| 2^12) = false := by decide +kernel
+
+theorem c283_d12 : body 2 35 42 4 1 0 (S0 ||| 2^15) 12 = false := by
+  have e : body 2 35 42 4 1 0 (S0 ||| 2^15) 12 = (!((S0 ||| 2^15)).testBit 12 && ((aoHas (S0 ||| 2^15) 12 && reach 2 35 42 4 1 ((S0 ||| 2^15) ||| 2^12)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^15) 12 && reach 2 35 42 4 0 ((S0 ||| 2^15) ||| 2^12)))) := rfl
+  rw [c297] at e
+  exact e.trans (by decide +kernel)
+
+theorem c298 : reach 2 35 42 4 1 ((S0 ||| 2^15) ||| 2^14) = false := by decide +kernel
+
+theorem c283_d14 : body 2 35 42 4 1 0 (S0 ||| 2^15) 14 = false := by
+  have e : body 2 35 42 4 1 0 (S0 ||| 2^15) 14 = (!((S0 ||| 2^15)).testBit 14 && ((aoHas (S0 ||| 2^15) 14 && reach 2 35 42 4 1 ((S0 ||| 2^15) ||| 2^14)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^15) 14 && reach 2 35 42 4 0 ((S0 ||| 2^15) ||| 2^14)))) := rfl
+  rw [c298] at e
+  exact e.trans (by decide +kernel)
+
+theorem c299 : reach 2 35 42 4 0 ((S0 ||| 2^15) ||| 2^31) = false := by decide +kernel
+
+theorem c283_d31 : body 2 35 42 4 1 0 (S0 ||| 2^15) 31 = false := by
+  have e : body 2 35 42 4 1 0 (S0 ||| 2^15) 31 = (!((S0 ||| 2^15)).testBit 31 && ((aoHas (S0 ||| 2^15) 31 && reach 2 35 42 4 1 ((S0 ||| 2^15) ||| 2^31)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^15) 31 && reach 2 35 42 4 0 ((S0 ||| 2^15) ||| 2^31)))) := rfl
+  rw [c299] at e
+  exact e.trans (by decide +kernel)
+
+theorem c300 : reach 2 35 42 4 1 ((S0 ||| 2^15) ||| 2^47) = false := by decide +kernel
+
+theorem c283_d47 : body 2 35 42 4 1 0 (S0 ||| 2^15) 47 = false := by
+  have e : body 2 35 42 4 1 0 (S0 ||| 2^15) 47 = (!((S0 ||| 2^15)).testBit 47 && ((aoHas (S0 ||| 2^15) 47 && reach 2 35 42 4 1 ((S0 ||| 2^15) ||| 2^47)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^15) 47 && reach 2 35 42 4 0 ((S0 ||| 2^15) ||| 2^47)))) := rfl
+  rw [c300] at e
+  exact e.trans (by decide +kernel)
+
+theorem c283_o : (List.range 64).all (fun v => v == 1 || v == 3 || v == 7 || v == 8 || v == 12 || v == 14 || v == 31 || v == 47 || !body 2 35 42 4 1 0 (S0 ||| 2^15) v) = true := by decide +kernel
+
+theorem c283_a : ∀ v, v < 64 → body 2 35 42 4 1 0 (S0 ||| 2^15) v = false := by
+  intro v hv
+  have h := List.all_eq_true.mp c283_o v (List.mem_range.mpr hv)
+  by_cases h1 : v = 1
+  · subst h1; exact c283_d1
+  by_cases h3 : v = 3
+  · subst h3; exact c283_d3
+  by_cases h7 : v = 7
+  · subst h7; exact c283_d7
+  by_cases h8 : v = 8
+  · subst h8; exact c283_d8
+  by_cases h12 : v = 12
+  · subst h12; exact c283_d12
+  by_cases h14 : v = 14
+  · subst h14; exact c283_d14
+  by_cases h31 : v = 31
+  · subst h31; exact c283_d31
+  by_cases h47 : v = 47
+  · subst h47; exact c283_d47
+  simpa [h1, h3, h7, h8, h12, h14, h31, h47] using h
+
+theorem c283 : reach 2 35 42 5 1 (S0 ||| 2^15) = false := by
+  have e := reach_succ 2 35 42 4 1 0 (S0 ||| 2^15) rfl
+  have h : (List.range 64).any (body 2 35 42 4 1 0 (S0 ||| 2^15)) = false := by
+    apply List.any_eq_false.mpr
+    intro v hv
+    rw [c283_a v (List.mem_range.mp hv)]; decide
+  rw [c31, c38, h] at e
+  exact e.trans (by decide +kernel)
+
+theorem c1_d15 : body 2 35 42 5 2 1 S0 15 = false := by
+  have e : body 2 35 42 5 2 1 S0 15 = (!(S0).testBit 15 && ((aoHas S0 15 && reach 2 35 42 5 2 (S0 ||| 2^15)) ||
+      (decide (0 < 2) && notHas S0 15 && reach 2 35 42 5 1 (S0 ||| 2^15)))) := rfl
+  rw [c283] at e
+  exact e.trans (by decide +kernel)
+
+theorem c302 : reach 2 35 42 4 0 ((S0 ||| 2^31) ||| 2^1) = false := by decide +kernel
+
+theorem c301_d1 : body 2 35 42 4 1 0 (S0 ||| 2^31) 1 = false := by
+  have e : body 2 35 42 4 1 0 (S0 ||| 2^31) 1 = (!((S0 ||| 2^31)).testBit 1 && ((aoHas (S0 ||| 2^31) 1 && reach 2 35 42 4 1 ((S0 ||| 2^31) ||| 2^1)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^31) 1 && reach 2 35 42 4 0 ((S0 ||| 2^31) ||| 2^1)))) := rfl
+  rw [c302] at e
+  exact e.trans (by decide +kernel)
+
+theorem c304 : reach 2 35 42 3 0 ((S0 ||| 2^31) ||| 2^3) = false := by decide +kernel
+
+theorem c305 : reach 2 35 42 3 0 (((S0 ||| 2^31) ||| 2^3) ||| 2^2) = false := by decide +kernel
+
+theorem c303_d2 : body 2 35 42 3 0 0 ((S0 ||| 2^31) ||| 2^3) 2 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^31) ||| 2^3) 2 = (!(((S0 ||| 2^31) ||| 2^3)).testBit 2 && ((aoHas ((S0 ||| 2^31) ||| 2^3) 2 && reach 2 35 42 3 0 (((S0 ||| 2^31) ||| 2^3) ||| 2^2)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^31) ||| 2^3) 2 && reach 2 35 42 3 0 (((S0 ||| 2^31) ||| 2^3) ||| 2^2)))) := rfl
+  rw [c305] at e
+  exact e.trans (by decide +kernel)
+
+theorem c306 : reach 2 35 42 3 0 (((S0 ||| 2^31) ||| 2^3) ||| 2^16) = false := by decide +kernel
+
+theorem c303_d16 : body 2 35 42 3 0 0 ((S0 ||| 2^31) ||| 2^3) 16 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^31) ||| 2^3) 16 = (!(((S0 ||| 2^31) ||| 2^3)).testBit 16 && ((aoHas ((S0 ||| 2^31) ||| 2^3) 16 && reach 2 35 42 3 0 (((S0 ||| 2^31) ||| 2^3) ||| 2^16)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^31) ||| 2^3) 16 && reach 2 35 42 3 0 (((S0 ||| 2^31) ||| 2^3) ||| 2^16)))) := rfl
+  rw [c306] at e
+  exact e.trans (by decide +kernel)
+
+theorem c307 : reach 2 35 42 3 0 (((S0 ||| 2^31) ||| 2^3) ||| 2^24) = false := by decide +kernel
+
+theorem c303_d24 : body 2 35 42 3 0 0 ((S0 ||| 2^31) ||| 2^3) 24 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^31) ||| 2^3) 24 = (!(((S0 ||| 2^31) ||| 2^3)).testBit 24 && ((aoHas ((S0 ||| 2^31) ||| 2^3) 24 && reach 2 35 42 3 0 (((S0 ||| 2^31) ||| 2^3) ||| 2^24)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^31) ||| 2^3) 24 && reach 2 35 42 3 0 (((S0 ||| 2^31) ||| 2^3) ||| 2^24)))) := rfl
+  rw [c307] at e
+  exact e.trans (by decide +kernel)
+
+theorem c308 : reach 2 35 42 3 0 (((S0 ||| 2^31) ||| 2^3) ||| 2^28) = false := by decide +kernel
+
+theorem c303_d28 : body 2 35 42 3 0 0 ((S0 ||| 2^31) ||| 2^3) 28 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^31) ||| 2^3) 28 = (!(((S0 ||| 2^31) ||| 2^3)).testBit 28 && ((aoHas ((S0 ||| 2^31) ||| 2^3) 28 && reach 2 35 42 3 0 (((S0 ||| 2^31) ||| 2^3) ||| 2^28)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^31) ||| 2^3) 28 && reach 2 35 42 3 0 (((S0 ||| 2^31) ||| 2^3) ||| 2^28)))) := rfl
+  rw [c308] at e
+  exact e.trans (by decide +kernel)
+
+theorem c309 : reach 2 35 42 3 0 (((S0 ||| 2^31) ||| 2^3) ||| 2^30) = false := by decide +kernel
+
+theorem c303_d30 : body 2 35 42 3 0 0 ((S0 ||| 2^31) ||| 2^3) 30 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^31) ||| 2^3) 30 = (!(((S0 ||| 2^31) ||| 2^3)).testBit 30 && ((aoHas ((S0 ||| 2^31) ||| 2^3) 30 && reach 2 35 42 3 0 (((S0 ||| 2^31) ||| 2^3) ||| 2^30)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^31) ||| 2^3) 30 && reach 2 35 42 3 0 (((S0 ||| 2^31) ||| 2^3) ||| 2^30)))) := rfl
+  rw [c309] at e
+  exact e.trans (by decide +kernel)
+
+theorem c310 : reach 2 35 42 3 0 (((S0 ||| 2^31) ||| 2^3) ||| 2^35) = false := by decide +kernel
+
+theorem c303_d35 : body 2 35 42 3 0 0 ((S0 ||| 2^31) ||| 2^3) 35 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^31) ||| 2^3) 35 = (!(((S0 ||| 2^31) ||| 2^3)).testBit 35 && ((aoHas ((S0 ||| 2^31) ||| 2^3) 35 && reach 2 35 42 3 0 (((S0 ||| 2^31) ||| 2^3) ||| 2^35)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^31) ||| 2^3) 35 && reach 2 35 42 3 0 (((S0 ||| 2^31) ||| 2^3) ||| 2^35)))) := rfl
+  rw [c310] at e
+  exact e.trans (by decide +kernel)
+
+theorem c311 : reach 2 35 42 3 0 (((S0 ||| 2^31) ||| 2^3) ||| 2^51) = false := by decide +kernel
+
+theorem c303_d51 : body 2 35 42 3 0 0 ((S0 ||| 2^31) ||| 2^3) 51 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^31) ||| 2^3) 51 = (!(((S0 ||| 2^31) ||| 2^3)).testBit 51 && ((aoHas ((S0 ||| 2^31) ||| 2^3) 51 && reach 2 35 42 3 0 (((S0 ||| 2^31) ||| 2^3) ||| 2^51)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^31) ||| 2^3) 51 && reach 2 35 42 3 0 (((S0 ||| 2^31) ||| 2^3) ||| 2^51)))) := rfl
+  rw [c311] at e
+  exact e.trans (by decide +kernel)
+
+theorem c312 : reach 2 35 42 3 0 (((S0 ||| 2^31) ||| 2^3) ||| 2^59) = false := by decide +kernel
+
+theorem c303_d59 : body 2 35 42 3 0 0 ((S0 ||| 2^31) ||| 2^3) 59 = false := by
+  have e : body 2 35 42 3 0 0 ((S0 ||| 2^31) ||| 2^3) 59 = (!(((S0 ||| 2^31) ||| 2^3)).testBit 59 && ((aoHas ((S0 ||| 2^31) ||| 2^3) 59 && reach 2 35 42 3 0 (((S0 ||| 2^31) ||| 2^3) ||| 2^59)) ||
+      (decide (0 < 0) && notHas ((S0 ||| 2^31) ||| 2^3) 59 && reach 2 35 42 3 0 (((S0 ||| 2^31) ||| 2^3) ||| 2^59)))) := rfl
+  rw [c312] at e
+  exact e.trans (by decide +kernel)
+
+theorem c303_o : (List.range 64).all (fun v => v == 2 || v == 16 || v == 24 || v == 28 || v == 30 || v == 35 || v == 51 || v == 59 || !body 2 35 42 3 0 0 ((S0 ||| 2^31) ||| 2^3) v) = true := by decide +kernel
+
+theorem c303_a : ∀ v, v < 64 → body 2 35 42 3 0 0 ((S0 ||| 2^31) ||| 2^3) v = false := by
+  intro v hv
+  have h := List.all_eq_true.mp c303_o v (List.mem_range.mpr hv)
+  by_cases h2 : v = 2
+  · subst h2; exact c303_d2
+  by_cases h16 : v = 16
+  · subst h16; exact c303_d16
+  by_cases h24 : v = 24
+  · subst h24; exact c303_d24
+  by_cases h28 : v = 28
+  · subst h28; exact c303_d28
+  by_cases h30 : v = 30
+  · subst h30; exact c303_d30
+  by_cases h35 : v = 35
+  · subst h35; exact c303_d35
+  by_cases h51 : v = 51
+  · subst h51; exact c303_d51
+  by_cases h59 : v = 59
+  · subst h59; exact c303_d59
+  simpa [h2, h16, h24, h28, h30, h35, h51, h59] using h
+
+theorem c303 : reach 2 35 42 4 0 ((S0 ||| 2^31) ||| 2^3) = false := by
+  have e := reach_succ 2 35 42 3 0 0 ((S0 ||| 2^31) ||| 2^3) rfl
+  have h : (List.range 64).any (body 2 35 42 3 0 0 ((S0 ||| 2^31) ||| 2^3)) = false := by
+    apply List.any_eq_false.mpr
+    intro v hv
+    rw [c303_a v (List.mem_range.mp hv)]; decide
+  rw [c304, h] at e
+  exact e.trans (by decide +kernel)
+
+theorem c301_d3 : body 2 35 42 4 1 0 (S0 ||| 2^31) 3 = false := by
+  have e : body 2 35 42 4 1 0 (S0 ||| 2^31) 3 = (!((S0 ||| 2^31)).testBit 3 && ((aoHas (S0 ||| 2^31) 3 && reach 2 35 42 4 1 ((S0 ||| 2^31) ||| 2^3)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^31) 3 && reach 2 35 42 4 0 ((S0 ||| 2^31) ||| 2^3)))) := rfl
+  rw [c303] at e
+  exact e.trans (by decide +kernel)
+
+theorem c313 : reach 2 35 42 4 0 ((S0 ||| 2^31) ||| 2^7) = false := by decide +kernel
+
+theorem c301_d7 : body 2 35 42 4 1 0 (S0 ||| 2^31) 7 = false := by
+  have e : body 2 35 42 4 1 0 (S0 ||| 2^31) 7 = (!((S0 ||| 2^31)).testBit 7 && ((aoHas (S0 ||| 2^31) 7 && reach 2 35 42 4 1 ((S0 ||| 2^31) ||| 2^7)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^31) 7 && reach 2 35 42 4 0 ((S0 ||| 2^31) ||| 2^7)))) := rfl
+  rw [c313] at e
+  exact e.trans (by decide +kernel)
+
+theorem c314 : reach 2 35 42 4 0 ((S0 ||| 2^31) ||| 2^15) = false := by decide +kernel
+
+theorem c301_d15 : body 2 35 42 4 1 0 (S0 ||| 2^31) 15 = false := by
+  have e : body 2 35 42 4 1 0 (S0 ||| 2^31) 15 = (!((S0 ||| 2^31)).testBit 15 && ((aoHas (S0 ||| 2^31) 15 && reach 2 35 42 4 1 ((S0 ||| 2^31) ||| 2^15)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^31) 15 && reach 2 35 42 4 0 ((S0 ||| 2^31) ||| 2^15)))) := rfl
+  rw [c314] at e
+  exact e.trans (by decide +kernel)
+
+theorem c315 : reach 2 35 42 4 1 ((S0 ||| 2^31) ||| 2^16) = false := by decide +kernel
+
+theorem c301_d16 : body 2 35 42 4 1 0 (S0 ||| 2^31) 16 = false := by
+  have e : body 2 35 42 4 1 0 (S0 ||| 2^31) 16 = (!((S0 ||| 2^31)).testBit 16 && ((aoHas (S0 ||| 2^31) 16 && reach 2 35 42 4 1 ((S0 ||| 2^31) ||| 2^16)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^31) 16 && reach 2 35 42 4 0 ((S0 ||| 2^31) ||| 2^16)))) := rfl
+  rw [c315] at e
+  exact e.trans (by decide +kernel)
+
+theorem c316 : reach 2 35 42 4 1 ((S0 ||| 2^31) ||| 2^24) = false := by decide +kernel
+
+theorem c301_d24 : body 2 35 42 4 1 0 (S0 ||| 2^31) 24 = false := by
+  have e : body 2 35 42 4 1 0 (S0 ||| 2^31) 24 = (!((S0 ||| 2^31)).testBit 24 && ((aoHas (S0 ||| 2^31) 24 && reach 2 35 42 4 1 ((S0 ||| 2^31) ||| 2^24)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^31) 24 && reach 2 35 42 4 0 ((S0 ||| 2^31) ||| 2^24)))) := rfl
+  rw [c316] at e
+  exact e.trans (by decide +kernel)
+
+theorem c317 : reach 2 35 42 4 1 ((S0 ||| 2^31) ||| 2^28) = false := by decide +kernel
+
+theorem c301_d28 : body 2 35 42 4 1 0 (S0 ||| 2^31) 28 = false := by
+  have e : body 2 35 42 4 1 0 (S0 ||| 2^31) 28 = (!((S0 ||| 2^31)).testBit 28 && ((aoHas (S0 ||| 2^31) 28 && reach 2 35 42 4 1 ((S0 ||| 2^31) ||| 2^28)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^31) 28 && reach 2 35 42 4 0 ((S0 ||| 2^31) ||| 2^28)))) := rfl
+  rw [c317] at e
+  exact e.trans (by decide +kernel)
+
+theorem c318 : reach 2 35 42 4 1 ((S0 ||| 2^31) ||| 2^30) = false := by decide +kernel
+
+theorem c301_d30 : body 2 35 42 4 1 0 (S0 ||| 2^31) 30 = false := by
+  have e : body 2 35 42 4 1 0 (S0 ||| 2^31) 30 = (!((S0 ||| 2^31)).testBit 30 && ((aoHas (S0 ||| 2^31) 30 && reach 2 35 42 4 1 ((S0 ||| 2^31) ||| 2^30)) ||
+      (decide (0 < 1) && notHas (S0 ||| 2^31) 30 && reach 2 35 42 4 0 ((S0 ||| 2^31) ||| 2^30)))) := rfl
+  rw [c318] at e
+  exact e.trans (by decide +kernel)
+
+theorem c301_o : (List.range 64).all (fun v => v == 1 || v == 3 || v == 7 || v == 15 || v == 16 || v == 24 || v == 28 || v == 30 || !body 2 35 42 4 1 0 (S0 ||| 2^31) v) = true := by decide +kernel
+
+theorem c301_a : ∀ v, v < 64 → body 2 35 42 4 1 0 (S0 ||| 2^31) v = false := by
+  intro v hv
+  have h := List.all_eq_true.mp c301_o v (List.mem_range.mpr hv)
+  by_cases h1 : v = 1
+  · subst h1; exact c301_d1
+  by_cases h3 : v = 3
+  · subst h3; exact c301_d3
+  by_cases h7 : v = 7
+  · subst h7; exact c301_d7
+  by_cases h15 : v = 15
+  · subst h15; exact c301_d15
+  by_cases h16 : v = 16
+  · subst h16; exact c301_d16
+  by_cases h24 : v = 24
+  · subst h24; exact c301_d24
+  by_cases h28 : v = 28
+  · subst h28; exact c301_d28
+  by_cases h30 : v = 30
+  · subst h30; exact c301_d30
+  simpa [h1, h3, h7, h15, h16, h24, h28, h30] using h
+
+theorem c301 : reach 2 35 42 5 1 (S0 ||| 2^31) = false := by
+  have e := reach_succ 2 35 42 4 1 0 (S0 ||| 2^31) rfl
+  have h : (List.range 64).any (body 2 35 42 4 1 0 (S0 ||| 2^31)) = false := by
+    apply List.any_eq_false.mpr
+    intro v hv
+    rw [c301_a v (List.mem_range.mp hv)]; decide
+  rw [c32, c39, h] at e
+  exact e.trans (by decide +kernel)
+
+theorem c1_d31 : body 2 35 42 5 2 1 S0 31 = false := by
+  have e : body 2 35 42 5 2 1 S0 31 = (!(S0).testBit 31 && ((aoHas S0 31 && reach 2 35 42 5 2 (S0 ||| 2^31)) ||
+      (decide (0 < 2) && notHas S0 31 && reach 2 35 42 5 1 (S0 ||| 2^31)))) := rfl
+  rw [c301] at e
+  exact e.trans (by decide +kernel)
+
+theorem c1_o : (List.range 64).all (fun v => v == 1 || v == 3 || v == 7 || v == 15 || v == 31 || !body 2 35 42 5 2 1 S0 v) = true := by decide +kernel
+
+theorem c1_a : ∀ v, v < 64 → body 2 35 42 5 2 1 S0 v = false := by
+  intro v hv
+  have h := List.all_eq_true.mp c1_o v (List.mem_range.mpr hv)
+  by_cases h1 : v = 1
+  · subst h1; exact c1_d1
+  by_cases h3 : v = 3
+  · subst h3; exact c1_d3
+  by_cases h7 : v = 7
+  · subst h7; exact c1_d7
+  by_cases h15 : v = 15
+  · subst h15; exact c1_d15
+  by_cases h31 : v = 31
+  · subst h31; exact c1_d31
+  simpa [h1, h3, h7, h15, h31] using h
+
+theorem c1 : reach 2 35 42 6 2 S0 = false := by
+  have e := reach_succ 2 35 42 5 2 1 S0 rfl
+  have h : (List.range 64).any (body 2 35 42 5 2 1 S0) = false := by
+    apply List.any_eq_false.mpr
+    intro v hv
+    rw [c1_a v (List.mem_range.mp hv)]; decide
+  rw [c2, c33, h] at e
+  exact e.trans (by decide +kernel)
+
+theorem cert : reach 2 35 42 6 2 S0 = false := c1
+
+theorem init : ∀ i < 7, ∃ m, m < 64 ∧ S0.testBit m = true ∧ ∀ t : Fin 6,
+    ((List.ofFn (fun i : Fin 5 => decide (i.val < t.val))) ++ [false,true]).getD i false =
+      m.testBit t.val := by
+  intro i hi
+  refine ⟨[62, 60, 56, 48, 32, 0, 63].getD i 0, ?_⟩
+  revert i
+  decide +kernel
+
+theorem main : ¬ (∃ (D : PEqualNP.CircuitLowerBounds.Circuit) (p q r : Fin (7+D.size)),
+  PEqualNP.MetaComplexity.FanInTwo D ∧ PEqualNP.MetaComplexity.NestedCover.ReadsBack 7 D ∧
+  PEqualNP.NotBracket.notCount D ≤ 2 ∧ D.size ≤ 6 ∧
+  ∀ t : Fin 6,
+    let xs := (List.ofFn (fun i : Fin 5 => decide (i.val < t.val))) ++ [false,true]
+    let w := D.wires xs
+    w.getD p.val false = (2 : Nat).testBit t.val ∧
+    w.getD q.val false = (35 : Nat).testBit t.val ∧
+    w.getD r.val false = (42 : Nat).testBit t.val) := by
+  rintro ⟨D, p, q, r, hf, hr, hn, hs, ht⟩
+  have := sound 2 35 42 (by decide) (by decide) (by decide) (by decide) (by decide) (by decide)
+    D.gates (fun t => (List.ofFn (fun i : Fin 5 => decide (i.val < t.val))) ++ [false,true])
+    7 S0 6 2 (fun t => by simp) (by decide) (by decide) init hf hr hs hn p.val q.val r.val
+    p.isLt q.isLt r.isLt (fun t => ht t)
+  rw [cert] at this
+  exact absurd this (by decide)
+
+end PEqualNP.Outside.L_meta_50101
+
+theorem PEqualNP.Outside.L_meta_50101 : ¬ (∃ (D : PEqualNP.CircuitLowerBounds.Circuit) (p q r : Fin (7+D.size)),
+  PEqualNP.MetaComplexity.FanInTwo D ∧ PEqualNP.MetaComplexity.NestedCover.ReadsBack 7 D ∧
+  PEqualNP.NotBracket.notCount D ≤ 2 ∧ D.size ≤ 6 ∧
+  ∀ t : Fin 6,
+    let xs := (List.ofFn (fun i : Fin 5 => decide (i.val < t.val))) ++ [false,true]
+    let w := D.wires xs
+    w.getD p.val false = (2 : Nat).testBit t.val ∧
+    w.getD q.val false = (35 : Nat).testBit t.val ∧
+    w.getD r.val false = (42 : Nat).testBit t.val) :=
+  PEqualNP.Outside.L_meta_50101.main
