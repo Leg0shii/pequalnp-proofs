@@ -1,0 +1,8 @@
+[package]
+name = "notrm"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+cadical = "0.1.16"
+rayon = "1.12.0"
