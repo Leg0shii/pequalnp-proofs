@@ -35,7 +35,7 @@ EMAIL = "46093332+Leg0shii@users.noreply.github.com"
 SIZE_LIMIT = 524288
 DESC = "Proof written by an AI worker."
 FOOTER = "\n\n\U0001F916 Generated with [Claude Code](https://claude.com/claude-code)"
-# Owner 05:22 UTC 27 Nov: the makers' optional credit line (PULL_REQUEST_TEMPLATE.md, tools/pnp.sh PNP_LINKEDIN). The address
+# The makers' optional credit line (PULL_REQUEST_TEMPLATE.md, tools/pnp.sh PNP_LINKEDIN). The address
 # comes from the fork secret or variable PNP_LINKEDIN, else (Lead 05:50, signed) from config/linkedin.txt in the private
 # toolkit, read ONCE per drain by drain.py (children get PNP_LINKEDIN_READ=1 and never read it again) or once by a
 # single-unit run. Unset, unreadable, slow (20 s) or malformed = no line, and the body is then byte for byte what it was
@@ -481,7 +481,7 @@ def step_file_re(step_id):
 
 
 def pr_accepted(number):
-    """True = this rival PR holds the step. Owner 2026-11-25 19:35 (BACKUP SUBMIT, replaces 17:04): no blind backup PRs,
+    """True = this rival PR holds the step. BACKUP SUBMIT rule: no blind backup PRs,
     so a rival holds unless the intake bot's LAST verdict marks it invalid (REJECTED / REFUSED / FAULT); pending and
     accepted rivals both hold (oversized ones are released by pr_oversized). Any doubt = True (it blocks)."""
     try:
@@ -610,11 +610,11 @@ def race_check(step_id):
 _DESK_T = [0.0]
 
 
-DESK_MODEL = os.environ.get("DESK_MODEL", "unknown")     # owner 15:40:27 UTC "Yes to both": &model= on every desk call
+DESK_MODEL = os.environ.get("DESK_MODEL", "unknown")     # &model= on every desk call
 
 
 PAUSED = [False]
-NO_DESK_UNTIL = 0               # owner 08:12 UTC 26 Nov "Leases on: cloud and PC" (Lead d46): the shared deskguard pause is the switch
+NO_DESK_UNTIL = 0               # leases on for cloud and PC (Lead d46): the shared deskguard pause is the switch
 LEASES_ON = True                # d46: claim EVERY step we open (held or unheld), Lease line in the body, release when submitted
 LEASE_MAX = 4                   # team-wide (PC, cloud, backup): deskguard.SLOTS leaseslot/<k> refs, 4 of the handle's 5
 SLOT_WAIT_S = 45                # slots busy: wait up to 45 s (no desk call), then PR without a lease
@@ -808,7 +808,7 @@ def claim(gid, prio=1):
     return str(lid), "claimed (gate)"
 
 
-LF_WAIT_S = float(os.environ.get("LF_WAIT_S", "15"))      # GATEWAY 4: slot wait short, the gate answers within 60 s      # owner 15:17:26 lease rule: wait up to 3 min for a token
+LF_WAIT_S = float(os.environ.get("LF_WAIT_S", "15"))      # GATEWAY 4: slot wait short, the gate answers within 60 s      # lease rule: wait up to 3 min for a token
 _LF_HELD = re.compile(r"gets a head start|was handed this step|bring your proof back|held by another|another handle|"
                       r"at most one handle|retry_after", re.I)
 
@@ -1303,7 +1303,7 @@ STOP_URL = "https://raw.githubusercontent.com/open-goat/pequalnp-proofs/main/STO
 
 
 def stopped():
-    """Owner's kill switch (Lead D7, same as watch.py stopped()): while upstream main has a STOP file, no PR and no
+    """Kill switch (Lead D7, same as watch.py stopped()): while upstream main has a STOP file, no PR and no
     lease. True if the fresh upstream clone has it or the raw URL answers 200."""
     if os.path.exists(os.path.join(TREE, "STOP")):
         return True

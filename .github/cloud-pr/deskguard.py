@@ -22,7 +22,7 @@ import os, re, sys, time, json, subprocess, socket
 
 REPO = os.environ.get("DESKGUARD_REPO") or os.environ.get("WATCH_TK") or os.path.expanduser("~/farm/tk")
 REMOTE = os.environ.get("DESKGUARD_REMOTE", "origin")
-GAP = float(os.environ.get("DESKGUARD_GAP", "5")); BUDGET = int(os.environ.get("DESKGUARD_BUDGET", "170"))   # 8x8 wave only (owner 14:17 UTC: 8 claims + 8 releases a min): back to 20 with leaserate 4
+GAP = float(os.environ.get("DESKGUARD_GAP", "5")); BUDGET = int(os.environ.get("DESKGUARD_BUDGET", "170"))   # 8x8 wave only (8 claims + 8 releases a min): back to 20 with leaserate 4
 HOME = os.environ.get("DESKGUARD_HOME", os.path.expanduser("~/.deskguard")); os.makedirs(HOME, exist_ok=True)
 CALLS = os.path.join(HOME, "calls.json")
 
@@ -92,7 +92,7 @@ def acquire(step, why=None):
         return no("guard error (fail closed): " + repr(e)[:120])
 
 
-# ---- 2026-11-26 audit (owner: never be paused again; Lead review of the cloud lease patch) ----
+# ---- 2026-11-26 audit (goal: never be paused again; Lead review of the cloud lease patch) ----
 SLOTS = int(os.environ.get("DESKGUARD_SLOTS", "4"))       # team-wide max held leases (handle cap is 5)
 SLOT_STALE_S = 600
 HARMLESS = re.compile(r"proved first|already proved|held by another|another handle|at most one handle|cap reached|"
@@ -164,7 +164,7 @@ def slot_free(ref):
         except Exception: pass
 
 
-RATE_DEFAULT = int(os.environ.get("DESKGUARD_RATE", "4"))     # team-wide claims per minute (owner pick 09:48 UTC 26 Nov)
+RATE_DEFAULT = int(os.environ.get("DESKGUARD_RATE", "4"))     # team-wide claims per minute
 
 
 def rate():
@@ -219,7 +219,7 @@ def rate_take(owner, wait=45, prio=2, cap=None):
     t0 = time.time(); R = rate()
     if prio < 2 and batch_active():    # Lead 15:17 item 4: while a batch lists, the sweep and other low claimers yield
         return False
-    if cap is not None:                # a step outside a raised-rate wave keeps the base rate (owner 14:12: 8/min wave only)
+    if cap is not None:                # a step outside a raised-rate wave keeps the base rate (8/min wave only)
         R = min(R, cap)
     if R <= 0:
         return False
@@ -287,11 +287,11 @@ def check_answer(d, what="claim"):
     return not bad
 
 
-# ---- desk/next trial (owner card 13:55 UTC 26 Nov "PC only, 2 asks a minute"; Lead 13:57 + 14:01; 4c pre-check in
+# ---- desk/next trial (PC trial, at most 2 asks a minute; 4c pre-check in
 # team/lead/DESK-AUDIT.md 14:00). Used only by watch/asknext.py, which is off unless WATCH_ASK=1. ----
 ASK_RATE = int(os.environ.get("DESKGUARD_ASK_RATE", "2"))      # asks a minute, team-wide (they also take a ratetok)
 ASK_HOLDS = int(os.environ.get("DESKGUARD_ASK_HOLDS", "3"))    # asked steps held at once, team-wide
-ASK_BUDGET = int(os.environ.get("DESKGUARD_ASK_BUDGET", "150"))  # owner go 14:41 UTC (wave, inside BUDGET 170); back to 12 with BUDGET 20 # no ask once this many of BUDGET calls / 10 min are used
+ASK_BUDGET = int(os.environ.get("DESKGUARD_ASK_BUDGET", "150"))  # wave, inside BUDGET 170; back to 12 with BUDGET 20 # no ask once this many of BUDGET calls / 10 min are used
 ASK_PAUSE_AGE = 3600                                            # Lead 14:01: no ask while a deskpause ref under 60 min old
 ASK_NONE = re.compile(r"no step right now|ask again in a few minutes|no (open |free )?(step|gap)s? (is |are )?(free|open|offerable|left|right now)|"
                       r"nothing (is )?offerable|too many held|limit of \d+ held|at most \d+ (gaps|steps)|cap reached", re.I)

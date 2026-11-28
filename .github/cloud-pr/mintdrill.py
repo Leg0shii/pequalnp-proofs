@@ -586,7 +586,7 @@ def judge_submit(name, w, r, expect):
     return (not bad), "; ".join(bad) or f"{got} ({r['result']}: {r['why'][:70]})"
 
 
-# PR body as the makers' template wants it (Lead 05:27, owner ask 05:22). Written out here, not imported, so a change
+# PR body as the makers' template wants it (Lead 05:27). Written out here, not imported, so a change
 # of submit.py's constants fails the drill.
 B_DESC = "Proof written by an AI worker."
 B_FOOT = "\n\n\U0001F916 Generated with [Claude Code](https://claude.com/claude-code)"
