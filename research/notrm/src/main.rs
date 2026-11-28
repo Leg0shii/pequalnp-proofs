@@ -395,9 +395,10 @@ fn main() {
                     match find(n, tgt, kk, true, to) {
                         Some(None) => res.push_str(&format!("ok c>={}", kk + 1)),
                         None => res.push_str(&format!("TIMEOUT c<= ? at {}", kk)),
-                        Some(Some(cc)) => {
-                            // a NOT circuit of size <= kk: candidate; is there a mono circuit of kk+slack?
-                            let s = cc.len();
+                        Some(Some(_)) => {
+                            // a NOT circuit of size <= kk exists: get the exact NOT cost, then test mono at c+slack
+                            let (s, cx, cc) = least(n, tgt, kk, true, to, 0);
+                            if !cx { res.push_str("c-not-exact "); }
                             match find(n, tgt, s + slack, false, to * 4.0) {
                                 Some(Some(_)) => res.push_str("ok (m_ub not exact)"),
                                 Some(None) => res.push_str(&format!("BREAK s={} C: {}", s, fmt_circ(n, &cc))),
